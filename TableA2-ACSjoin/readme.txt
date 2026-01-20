@@ -30,7 +30,34 @@ INPUT FILES
 
 2. Relationship files (auto-downloaded if missing):
    - place_county_relationship.csv - Links Census places to counties
+     * Maps PLACEA (5-digit place FIPS codes) to COUNTYA (3-digit county FIPS codes)
+     * Source: U.S. Census Bureau's national_place_by_county2020.txt
+     * Used in Step 3 to populate county information for place-level data
+     * Example: "Los Angeles" (place) → "Los Angeles County" (county)
+   
    - county_cbsa_relationship.csv - Links counties to CBSA/MSA codes
+     * Maps COUNTYA (3-digit county FIPS codes) to CBSAA (5-digit MSA/CBSA codes)
+     * Source: NBER's cbsa2fipsxw crosswalk file
+     * Used in Step 4 to link places to their Metropolitan Statistical Areas
+     * Example: "Los Angeles County" (county) → "31080" (Los Angeles-Long Beach-Anaheim MSA)
+   
+   Why two tables are required:
+   The U.S. Census geographic hierarchy is: Place → County → MSA/CBSA. The Census Bureau
+   does not provide a direct place-to-MSA relationship file because MSAs are defined at
+   the county level, not the place level. To link a place to its MSA, the script must:
+   1. First join the place to its county using place_county_relationship.csv
+   2. Then join that county to its MSA using county_cbsa_relationship.csv
+   
+   This two-step process is necessary because:
+   - A single MSA can contain multiple counties
+   - A single county can contain hundreds of places
+   - Place-level NHGIS data may not include county or MSA codes directly
+   - The hierarchical relationship must be traversed in sequence
+   
+   Data flow example:
+   Place "San Francisco" (PLACEA="67000") 
+     → [place_county_relationship] → County "San Francisco County" (COUNTYA="075")
+     → [county_cbsa_relationship] → MSA "San Francisco-Oakland-Berkeley, CA" (CBSAA="41860")
 
 3. NHGIS cache (auto-created):
    - nhgis_cache.json - Cached ACS data (valid for 365 days)
@@ -135,16 +162,6 @@ Step 11: Select output columns
   - Removes raw NHGIS columns
   - Selects final output columns
   - Saves to acs_join_output.csv
-
-DESIGN PRINCIPLES
------------------
-The code follows omni-rule principles:
-- No repetition: Repeated operations extracted into reusable functions/lambdas
-- No one-time assignments: Variables only created if used multiple times
-- Efficient operations: O(n) operations computed once and reused
-- Complete transformation pipelines: Single-pass transformations where possible
-- Maximum nesting depth: 3 levels
-- Concise comments: Comments are accurate and brief
 
 KEY FUNCTIONS
 ------------
