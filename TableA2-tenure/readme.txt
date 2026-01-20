@@ -1,1 +1,3 @@
+requirements:
 pandas
+numpy
