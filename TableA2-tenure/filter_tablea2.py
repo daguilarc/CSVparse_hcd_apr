@@ -3,10 +3,14 @@ CSV Filter Script for tablea2.csv
 
 This script filters a CSV file by:
 1. Keeping columns that begin with: JURIS_NAME, YEAR, UNIT_CAT, TENURE, DR_TYPE, DENSITY_BONUS_TOTAL
-2. Keeping columns that start with CO_ and end with _DR
-3. Filtering rows where UNIT_CAT contains "5+"
-4. Filtering out rows with blank DR_TYPE values
-5. Keeping only rows where DR_TYPE contains "DB" or "INC"
+2. Keeping columns that end with _DR (excluding those starting with NO_FA)
+3. Keeping columns that end with _NDR
+4. Filtering rows where UNIT_CAT contains "5+"
+5. Filtering out rows with blank DR_TYPE values
+6. Keeping only rows where DR_TYPE contains "DB" or "INC"
+7. Transforming DR_TYPE values:
+   - "DB" if contains "DB" (inclusive, includes "DB;INC")
+   - "INC" if contains "INC" but not "DB" (exclusive)
 """
 
 import pandas as pd
@@ -39,7 +43,8 @@ def main():
         filtered_columns = [
             col for col in df.columns
             if (any(str(col).startswith(prefix) for prefix in prefix_patterns) or
-                str(col).endswith('_DR'))
+                (str(col).endswith('_DR') and not str(col).startswith('NO_FA')) or
+                str(col).endswith('_NDR'))
         ]
         df_filtered = df[filtered_columns]
         print(f"Kept {len(filtered_columns)} columns: {filtered_columns}")
@@ -73,8 +78,10 @@ def main():
         
         print("Transforming DR_TYPE values...")
         if has_dr_type_col and len(df_filtered) > 0:
-            # Vectorized transformation of DR_TYPE values to standardized categories
-            # Convert entire series to uppercase string (vectorized)
+            # Vectorized transformation of DR_TYPE values to standardized categories:
+            # - "DB" if contains "DB" (inclusive, includes "DB;INC")
+            # - "INC" if contains "INC" but not "DB" (exclusive)
+            # Ensure entire series is uppercase string for case-insensitive matching (vectorized)
             dr_type_str_upper = df_filtered['DR_TYPE'].astype(str).str.upper()
             
             # Create boolean masks for pattern matching (vectorized)
@@ -86,19 +93,19 @@ def main():
             
             # Use np.select for vectorized conditional assignment (eliminates repetition)
             # Conditions are evaluated in order, first match wins
+            # DB is inclusive (includes DB;INC), INC is exclusive (only if no DB)
             dr_type_conditions = [
-                dr_type_non_null_mask & has_db_mask & has_inc_mask,  # Both DB and INC
-                dr_type_non_null_mask & has_db_mask & ~has_inc_mask,  # DB only
-                dr_type_non_null_mask & ~has_db_mask & has_inc_mask   # INC only
+                dr_type_non_null_mask & has_db_mask,  # DB (includes both DB and DB;INC)
+                dr_type_non_null_mask & ~has_db_mask & has_inc_mask   # INC only (excludes any with DB)
             ]
-            dr_type_choices = ['DB;INC', 'DB', 'INC']
+            dr_type_choices = ['DB', 'INC']
             
             # Apply transformations: use np.select for matched rows, preserve original for others
             # dr_type_conditions list is reused: once for np.select, once for matched_mask computation (inline)
             # dr_type_choices list is reused in np.select
             df_filtered['DR_TYPE'] = pd.Series(
                 np.where(
-                    dr_type_conditions[0] | dr_type_conditions[1] | dr_type_conditions[2],
+                    dr_type_conditions[0] | dr_type_conditions[1],
                     np.select(dr_type_conditions, dr_type_choices, default=None),
                     df_filtered['DR_TYPE']
                 ),
