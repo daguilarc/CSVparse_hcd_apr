@@ -10,32 +10,9 @@ This script filters a CSV file by:
 """
 
 import pandas as pd
+import numpy as np
 import os
 import sys
-
-
-def transform_dr_type(value):
-    """
-    Transform DR_TYPE values to standardized categories:
-    - "DB" if contains "DB" but not "INC"
-    - "INC" if contains "INC" but not "DB"
-    - "DB;INC" if contains both "DB" and "INC"
-    """
-    if pd.isna(value):
-        return value
-    
-    str_value = str(value).upper()
-    has_db = 'DB' in str_value
-    has_inc = 'INC' in str_value
-    
-    if has_db and has_inc:
-        return 'DB;INC'
-    elif has_db:
-        return 'DB'
-    elif has_inc:
-        return 'INC'
-    else:
-        return value
 
 
 def main():
@@ -58,31 +35,75 @@ def main():
         print(f"Loaded {len(df)} rows, {len(df.columns)} columns")
         
         print("Filtering columns...")
+        prefix_patterns = ['JURIS_NAME', 'YEAR', 'UNIT_CAT', 'TENURE', 'DR_TYPE', 'DENSITY_BONUS_TOTAL']
         filtered_columns = [
             col for col in df.columns
-            if (str(col).startswith('JURIS_NAME') or
-                str(col).startswith('YEAR') or
-                str(col).startswith('UNIT_CAT') or
-                str(col).startswith('TENURE') or
-                str(col).startswith('DR_TYPE') or
-                str(col).startswith('DENSITY_BONUS_TOTAL') or
-                (str(col).startswith('CO_') and str(col).endswith('_DR')))
+            if (any(str(col).startswith(prefix) for prefix in prefix_patterns) or
+                str(col).endswith('_DR'))
         ]
         df_filtered = df[filtered_columns]
         print(f"Kept {len(filtered_columns)} columns: {filtered_columns}")
         
         print("Filtering rows (UNIT_CAT contains '5+', DR_TYPE contains 'DB' or 'INC')...")
-        if 'UNIT_CAT' in df_filtered.columns:
-            df_filtered = df_filtered[df_filtered['UNIT_CAT'].astype(str).str.contains('5+', na=False)]
+        # Build boolean mask: True = keep row, False = drop row
+        # Extract column existence check for DR_TYPE (used multiple times)
+        # UNIT_CAT check is inlined since it's only used once
+        has_dr_type_col = 'DR_TYPE' in df_filtered.columns
         
-        if 'DR_TYPE' in df_filtered.columns:
-            df_filtered = df_filtered[df_filtered['DR_TYPE'].notna()]
-            df_filtered = df_filtered[df_filtered['DR_TYPE'].astype(str).str.strip() != '']
-            df_filtered = df_filtered[df_filtered['DR_TYPE'].astype(str).str.contains('DB|INC', na=False, case=False, regex=True)]
+        # Build filter masks conditionally and combine using vectorized & operator
+        keep_rows = None
+        
+        # Filter 1: Keep only rows where UNIT_CAT contains '5+'
+        if 'UNIT_CAT' in df_filtered.columns:
+            keep_rows = df_filtered['UNIT_CAT'].astype(str).str.contains('5+', na=False)
+        
+        # Filter 2: Keep only rows where DR_TYPE is not null, not empty, and contains 'DB' or 'INC'
+        if has_dr_type_col:
+            dr_type_str = df_filtered['DR_TYPE'].astype(str)
+            has_valid_dr_type = (
+                df_filtered['DR_TYPE'].notna() &
+                (dr_type_str.str.strip() != '') &
+                dr_type_str.str.contains('DB|INC', na=False, case=False, regex=True)
+            )
+            keep_rows = has_valid_dr_type if keep_rows is None else keep_rows & has_valid_dr_type
+        
+        # Apply the combined filter: keep only rows where keep_rows is True
+        if keep_rows is not None:
+            df_filtered = df_filtered[keep_rows]
         
         print("Transforming DR_TYPE values...")
-        if 'DR_TYPE' in df_filtered.columns and len(df_filtered) > 0:
-            df_filtered['DR_TYPE'] = df_filtered['DR_TYPE'].apply(transform_dr_type)
+        if has_dr_type_col and len(df_filtered) > 0:
+            # Vectorized transformation of DR_TYPE values to standardized categories
+            # Convert entire series to uppercase string (vectorized)
+            dr_type_str_upper = df_filtered['DR_TYPE'].astype(str).str.upper()
+            
+            # Create boolean masks for pattern matching (vectorized)
+            has_db_mask = dr_type_str_upper.str.contains('DB', na=False, case=False, regex=False)
+            has_inc_mask = dr_type_str_upper.str.contains('INC', na=False, case=False, regex=False)
+            
+            # Preserve NaN values - only transform non-NaN values
+            dr_type_non_null_mask = df_filtered['DR_TYPE'].notna()
+            
+            # Use np.select for vectorized conditional assignment (eliminates repetition)
+            # Conditions are evaluated in order, first match wins
+            dr_type_conditions = [
+                dr_type_non_null_mask & has_db_mask & has_inc_mask,  # Both DB and INC
+                dr_type_non_null_mask & has_db_mask & ~has_inc_mask,  # DB only
+                dr_type_non_null_mask & ~has_db_mask & has_inc_mask   # INC only
+            ]
+            dr_type_choices = ['DB;INC', 'DB', 'INC']
+            
+            # Apply transformations: use np.select for matched rows, preserve original for others
+            # dr_type_conditions list is reused: once for np.select, once for matched_mask computation (inline)
+            # dr_type_choices list is reused in np.select
+            df_filtered['DR_TYPE'] = pd.Series(
+                np.where(
+                    dr_type_conditions[0] | dr_type_conditions[1] | dr_type_conditions[2],
+                    np.select(dr_type_conditions, dr_type_choices, default=None),
+                    df_filtered['DR_TYPE']
+                ),
+                index=df_filtered.index
+            )
         print(f"After row filtering and transformation: {len(df_filtered)} rows")
         
         output_path = os.path.join(
@@ -100,3 +121,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""MIT License
+Creative Commons CC-BY-SA 4.0 2026 Diego Aguilar-Canabal"""
