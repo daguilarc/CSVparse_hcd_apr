@@ -3,12 +3,13 @@ CSV Filter Script for tablea2.csv
 
 This script filters a CSV file by:
 1. Keeping columns that begin with: JURIS_NAME, YEAR, UNIT_CAT, TENURE, DR_TYPE, DENSITY_BONUS_TOTAL
-2. Keeping columns that end with _DR (excluding those starting with NO_FA)
-3. Keeping columns that end with _NDR
-4. Filtering rows where UNIT_CAT contains "5+"
-5. Filtering out rows with blank DR_TYPE values
-6. Keeping only rows where DR_TYPE contains "DB" or "INC"
-7. Transforming DR_TYPE values:
+2. Keeping exact match columns: APN, STREET_ADDRESS
+3. Keeping columns that end with _DR (excluding those starting with NO_FA)
+4. Keeping columns that end with _NDR
+5. Filtering rows where UNIT_CAT contains "5+"
+6. Filtering out rows with blank DR_TYPE values
+7. Keeping only rows where DR_TYPE contains "DB" or "INC"
+8. Transforming DR_TYPE values:
    - "DB" if contains "DB" (inclusive, includes "DB;INC")
    - "INC" if contains "INC" but not "DB" (exclusive)
 """
@@ -40,9 +41,11 @@ def main():
         
         print("Filtering columns...")
         prefix_patterns = ['JURIS_NAME', 'YEAR', 'UNIT_CAT', 'TENURE', 'DR_TYPE', 'DENSITY_BONUS_TOTAL']
+        exact_match_cols = ['APN', 'STREET_ADDRESS']
         filtered_columns = [
             col for col in df.columns
             if (any(str(col).startswith(prefix) for prefix in prefix_patterns) or
+                str(col) in exact_match_cols or
                 (str(col).endswith('_DR') and not str(col).startswith('NO_FA')) or
                 str(col).endswith('_NDR'))
         ]
