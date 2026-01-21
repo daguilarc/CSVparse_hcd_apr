@@ -45,24 +45,73 @@ def calculate_permit_rates(df, permit_years, permit_cols, rate_cols):
     return df
 
 
+
+
+def clean_jurisdiction_name(name):
+    """Normalize jurisdiction name for joining by removing suffixes and standardizing format."""
+    return "" if not name else re.sub(r'\s+(city|town|CDP|village)$', '', str(name).split(',')[0], flags=re.IGNORECASE).strip().upper()
+
+
+def normalize_cbsaa(series):
+    """Normalize CBSAA codes to 5-digit string format."""
+    series = series.astype(str).str.replace(".0", "").str.strip().replace(["nan", ""], np.nan)
+    non_null_mask = series.notna()
+    if non_null_mask.any():
+        cbsaa_non_null = series.loc[non_null_mask].astype(str)
+        digit_indices = cbsaa_non_null.index[cbsaa_non_null.str.isdigit()]
+        if len(digit_indices) > 0:
+            series.loc[digit_indices] = cbsaa_non_null.loc[digit_indices].str.zfill(5)
+    return series
+
+
+
+
+
+
+def agg_permits(df_hcd, is_county_filter, permit_years):
+    """Aggregate permit data by jurisdiction and year, returning dataframe ready for merge."""
+    return (df_hcd[is_county_filter].groupby(["JURIS_CLEAN", "YEAR"])["bp_total_units"]
+            .sum().unstack("YEAR").reindex(columns=permit_years).fillna(0).reset_index()
+            .rename(columns={y: f"permits_{y}" for y in permit_years}))
+
+
+def afford_ratio(df, ref_income_col, median_home_value_col="median_home_value"):
+    """Calculate affordability ratio: median_home_value / ref_income, handling nulls and zeros."""
+    return np.where(
+        df[ref_income_col].notna() & (df[ref_income_col] > 0) & df[median_home_value_col].notna(),
+        df[median_home_value_col] / df[ref_income_col],
+        np.nan
+    )
+
+
 # Step 1: Load relationship files (place-county and county-CBSA)
 gazetteer_path = Path(__file__).resolve().parent / "place_county_relationship.csv"
-if not gazetteer_path.exists():
-    print("Downloading Census place-county relationship file...")
+file_exists = gazetteer_path.exists()
+if file_exists:
+    df_rel = pd.read_csv(gazetteer_path, dtype=str)
+    if "COUNTYA" not in df_rel.columns or "PLACEA" not in df_rel.columns:
+        raise ValueError(f"Relationship file missing required columns. Found: {df_rel.columns.tolist()}, Expected: ['PLACEA', 'COUNTYA']")
+    needs_download = "PLACE_TYPE" not in df_rel.columns
+    if needs_download:
+        print("PLACE_TYPE column missing from cached file, re-downloading...")
+else:
+    needs_download = True
+
+if needs_download:
+    if not file_exists:
+        print("Downloading Census place-county relationship file...")
     resp = requests.get("https://www2.census.gov/geo/docs/reference/codes2020/national_place_by_county2020.txt", timeout=30)
     resp.raise_for_status()
     df_rel = pd.read_csv(io.StringIO(resp.text), sep="|", dtype=str)
-    df_rel = df_rel[df_rel["STATEFP"] == "06"][["PLACEFP", "COUNTYFP"]].copy()
-    df_rel.columns = ["PLACEA", "COUNTYA"]
+    if "TYPE" not in df_rel.columns:
+        raise ValueError(f"TYPE column not found in Census file. Available columns: {df_rel.columns.tolist()}")
+    df_rel = df_rel[df_rel["STATEFP"] == "06"][["PLACEFP", "COUNTYFP", "TYPE"]].copy()
+    df_rel.columns = ["PLACEA", "COUNTYA", "PLACE_TYPE"]
     df_rel["PLACEA"] = df_rel["PLACEA"].str.zfill(5)
     df_rel["COUNTYA"] = df_rel["COUNTYA"].str.zfill(3)
     df_rel = df_rel.drop_duplicates(subset=["PLACEA"], keep="first")
     df_rel.to_csv(gazetteer_path, index=False)
     print(f"Saved relationship file to {gazetteer_path} ({len(df_rel)} relationships)")
-else:
-    df_rel = pd.read_csv(gazetteer_path, dtype=str)
-    if "COUNTYA" not in df_rel.columns or "PLACEA" not in df_rel.columns:
-        raise ValueError(f"Relationship file missing required columns. Found: {df_rel.columns.tolist()}, Expected: ['PLACEA', 'COUNTYA']")
 
 county_cbsa_path = Path(__file__).resolve().parent / "county_cbsa_relationship.csv"
 if not county_cbsa_path.exists():
@@ -73,17 +122,19 @@ if not county_cbsa_path.exists():
     if "fipscountycode" not in df_county_cbsa.columns or "cbsacode" not in df_county_cbsa.columns or "fipsstatecode" not in df_county_cbsa.columns:
         raise ValueError(f"County-CBSA file missing required columns. Found: {df_county_cbsa.columns.tolist()}")
     df_county_cbsa = (df_county_cbsa[df_county_cbsa["fipsstatecode"].astype(str).str.zfill(2) == "06"]
-                      .assign(COUNTYA=lambda x: x["fipscountycode"].astype(str).str.zfill(3),
-                              CBSAA=lambda x: x["cbsacode"].astype(str).str.zfill(5))
-                      [["COUNTYA", "CBSAA"]]
+                      .assign(COUNTYA=lambda x: x["fipscountycode"].astype(str).str.zfill(3))
+                      [["COUNTYA", "cbsacode"]]
                       .drop_duplicates(subset=["COUNTYA"], keep="first")
                       .copy())
+    df_county_cbsa["CBSAA"] = normalize_cbsaa(df_county_cbsa["cbsacode"])
+    df_county_cbsa = df_county_cbsa[["COUNTYA", "CBSAA"]].copy()
     df_county_cbsa.to_csv(county_cbsa_path, index=False)
     print(f"Saved county-CBSA relationship file to {county_cbsa_path} ({len(df_county_cbsa)} relationships)")
 else:
     df_county_cbsa = pd.read_csv(county_cbsa_path, dtype=str)
     if "COUNTYA" not in df_county_cbsa.columns or "CBSAA" not in df_county_cbsa.columns:
         raise ValueError(f"County-CBSA relationship file missing required columns. Found: {df_county_cbsa.columns.tolist()}, Expected: ['COUNTYA', 'CBSAA']")
+    df_county_cbsa["CBSAA"] = normalize_cbsaa(df_county_cbsa["CBSAA"])
 
 # Step 2: Load NHGIS data (cache or API)
 df_place, df_county, df_msa = None, None, None
@@ -91,18 +142,11 @@ data_from_api = False
 if CACHE_PATH.exists():
     with open(CACHE_PATH) as f:
         cache = json.load(f)
-    cache_expired = datetime.now() - datetime.fromisoformat(cache.get("cached_at", "1970-01-01")) >= timedelta(days=CACHE_MAX_AGE_DAYS)
-    if not cache_expired:
+    if datetime.now() - datetime.fromisoformat(cache.get("cached_at", "1970-01-01")) < timedelta(days=CACHE_MAX_AGE_DAYS):
         print("Loading ACS data from cache...")
         df_place = pd.DataFrame(cache["place"])
         df_county = pd.DataFrame(cache["county"])
         df_msa = pd.DataFrame(cache["msa"])
-        for df in [df_place, df_county, df_msa]:
-            if df is None or len(df) == 0:
-                continue
-            nhgis_cols = [col for col in df.columns if col.startswith(("ASVNE", "ASN1", "ASQPE"))]
-            for col in nhgis_cols:
-                df[col] = pd.to_numeric(df[col], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
 
 if df_place is None:
     data_from_api = True
@@ -141,9 +185,8 @@ if df_place is None:
     download_resp = requests.get(status["downloadLinks"]["tableData"]["url"], headers={"Authorization": IPUMS_API_KEY})
     download_resp.raise_for_status()
     with zipfile.ZipFile(io.BytesIO(download_resp.content)) as zf:
-        for name in zf.namelist():
-            if not name.endswith(".csv"):
-                continue
+        csv_files = [name for name in zf.namelist() if name.endswith(".csv")]
+        for name in csv_files:
             name_lower = name.lower()
             if "place" in name_lower:
                 df_place = pd.read_csv(zf.open(name), encoding="latin-1", low_memory=False)
@@ -151,8 +194,9 @@ if df_place is None:
                 df_county = pd.read_csv(zf.open(name), encoding="latin-1", low_memory=False)
             elif "cbsa" in name_lower:
                 df_msa = pd.read_csv(zf.open(name), encoding="latin-1", low_memory=False)
-                if "CBSAA" in df_msa.columns:
-                    df_msa = df_msa[df_msa["CBSAA"].astype(str).str.isdigit() | df_msa["CBSAA"].isna()].copy()
+        # Filter MSA CBSAA after loading to reduce nesting
+        if df_msa is not None and "CBSAA" in df_msa.columns:
+            df_msa = df_msa[df_msa["CBSAA"].astype(str).str.isdigit() | df_msa["CBSAA"].isna()].copy()
     
     # Filter to California only (STATEA = "06")
     if df_place is not None and "STATEA" in df_place.columns:
@@ -161,19 +205,40 @@ if df_place is None:
         df_county = df_county[df_county["STATEA"] == "06"].copy()
 
 # Step 3: Link places to counties using relationship file
+# Always merge PLACE_TYPE if available, even if COUNTYA already exists (needed for filtering incorporated cities)
 if df_place is not None and "PLACEA" in df_place.columns:
-    if "COUNTYA" not in df_place.columns or df_place["COUNTYA"].isna().all():
+    needs_county_merge = "COUNTYA" not in df_place.columns or df_place["COUNTYA"].isna().all()
+    needs_place_type = "PLACE_TYPE" not in df_place.columns
+    if needs_county_merge or needs_place_type:
         df_place["PLACEA"] = df_place["PLACEA"].astype(str).str.zfill(5)
         if len(df_rel) == 0:
             raise RuntimeError("Relationship file is empty - cannot link places to counties")
         if "COUNTYA" not in df_rel.columns or "PLACEA" not in df_rel.columns:
             raise RuntimeError(f"Relationship file missing required columns. Found: {df_rel.columns.tolist()}, Expected: ['PLACEA', 'COUNTYA']")
-        df_place = df_place.merge(df_rel[["PLACEA", "COUNTYA"]], on="PLACEA", how="left", suffixes=("", "_from_rel"))
-        df_place["COUNTYA"] = df_place["COUNTYA_from_rel"]
-        df_place = df_place.drop(columns=["COUNTYA_from_rel"])
-        if "COUNTYA" not in df_place.columns:
+        # Merge COUNTYA and/or PLACE_TYPE (for incorporation status)
+        merge_cols = ["PLACEA"]
+        if needs_county_merge and "COUNTYA" in df_rel.columns:
+            merge_cols.append("COUNTYA")
+        if needs_place_type and "PLACE_TYPE" in df_rel.columns:
+            merge_cols.append("PLACE_TYPE")
+        df_place = df_place.merge(
+            df_rel[merge_cols],
+            on="PLACEA", how="left", suffixes=("", "_from_rel")
+        )
+        # Use merged columns: prefer _from_rel suffix if exists (from relationship file), otherwise use direct column
+        for col_base in ["COUNTYA", "PLACE_TYPE"]:
+            col_from_rel = f"{col_base}_from_rel"
+            if col_from_rel in df_place.columns:
+                df_place[col_base] = df_place[col_from_rel]
+        df_place = df_place.drop(columns=[col for col in df_place.columns if col.endswith("_from_rel")])
+        if needs_county_merge and "COUNTYA" not in df_place.columns:
             raise RuntimeError("COUNTYA column not added after merge - relationship file structure issue")
-        print(f"  Linked {df_place['COUNTYA'].notna().sum()} places to counties via relationship file")
+        if needs_county_merge:
+            print(f"  Linked {df_place['COUNTYA'].notna().sum()} places to counties via relationship file")
+        if "PLACE_TYPE" in df_place.columns:
+            print(f"  DEBUG Step 3: PLACE_TYPE after merge - unique values: {df_place['PLACE_TYPE'].value_counts().to_dict()}")
+        elif needs_place_type:
+            print(f"  WARNING Step 3: PLACE_TYPE not found after merge")
 
 # Save to cache only if data was fetched from API
 if data_from_api:
@@ -186,23 +251,25 @@ if data_from_api:
         }, f)
     print(f"Cached NHGIS data to {CACHE_PATH}")
 
+# Clean numeric columns: convert to numeric and replace suppression codes
+# Apply to all dataframes after loading (cache or API) - unified cleaning eliminates repetition
+for df in [df_place, df_county, df_msa]:
+    if df is None or len(df) == 0:
+        continue
+    nhgis_cols = [col for col in df.columns if col.startswith(("ASVNE", "ASN1", "ASQPE"))]
+    for col in nhgis_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
+
 # Step 4: rename columns to standard names and join keys
 # Normalize COUNTYA and CBSAA codes, create county column, link MSA IDs
 for df in [df_place, df_county]:
     if "COUNTYA" in df.columns:
         df["COUNTYA"] = df["COUNTYA"].astype(str).str.replace(".0", "").str.zfill(3).replace("nan", "")
 for df in [df_place, df_county, df_msa]:
-    if "CBSAA" not in df.columns:
-        continue
-    df["CBSAA"] = df["CBSAA"].astype(str).str.replace(".0", "").str.strip().replace(["nan", ""], np.nan)
-    non_null_mask = df["CBSAA"].notna()
-    if non_null_mask.any():
-        cbsaa_non_null = df.loc[non_null_mask, "CBSAA"].astype(str)
-        digit_indices = cbsaa_non_null.index[cbsaa_non_null.str.isdigit()]
-        if len(digit_indices) > 0:
-            df.loc[digit_indices, "CBSAA"] = cbsaa_non_null.loc[digit_indices].str.zfill(5)
-            if not df.loc[digit_indices, "CBSAA"].str.len().eq(5).all():
-                print(f"  WARNING: CBSAA normalization may have failed")
+    if "CBSAA" in df.columns:
+        df["CBSAA"] = normalize_cbsaa(df["CBSAA"])
+        if df["CBSAA"].notna().any() and not df["CBSAA"].dropna().astype(str).str.len().eq(5).all():
+            print(f"  WARNING: CBSAA normalization may have failed")
 
 # Diagnostic: check available columns
 print("\nChecking available columns in NHGIS data...")
@@ -216,6 +283,8 @@ if "COUNTYA" in df_place.columns:
 place_income_cols = [c for c in df_place.columns if 'ASQPE' in c]
 place_home_cols = [c for c in df_place.columns if 'ASVNE' in c]
 place_pop_cols = [c for c in df_place.columns if 'ASN1' in c]
+county_home_cols = [c for c in df_county.columns if 'ASVNE' in c] if df_county is not None else []
+county_pop_cols = [c for c in df_county.columns if 'ASN1' in c] if df_county is not None else []
 county_income_cols = [c for c in df_county.columns if 'ASQPE' in c]
 msa_income_cols = [c for c in df_msa.columns if 'ASQPE' in c]
 
@@ -231,22 +300,15 @@ if "COUNTYA" in df_msa.columns:
     print(f"MSA COUNTYA sample: {df_msa['COUNTYA'].dropna().head(10).tolist()}")
 
 # Diagnostic: Check raw income column values BEFORE renaming
-if county_income_cols:
-    raw_col = county_income_cols[0]
-    print(f"\nCounty income column '{raw_col}' BEFORE renaming:")
-    print(f"  Sample values: {df_county[raw_col].head(10).tolist()}")
-    print(f"  Data type: {df_county[raw_col].dtype}")
-    print(f"  Non-null count: {(~df_county[raw_col].isna()).sum()} / {len(df_county)}")
-    print(f"  Suppression codes: {(df_county[raw_col].isin(SUPPRESSION_CODES)).sum()}")
-    print(f"  Unique values sample: {df_county[raw_col].dropna().head(10).tolist()}")
-if msa_income_cols:
-    raw_col = msa_income_cols[0]
-    print(f"\nMSA income column '{raw_col}' BEFORE renaming:")
-    print(f"  Sample values: {df_msa[raw_col].head(10).tolist()}")
-    print(f"  Data type: {df_msa[raw_col].dtype}")
-    print(f"  Non-null count: {(~df_msa[raw_col].isna()).sum()} / {len(df_msa)}")
-    print(f"  Suppression codes: {(df_msa[raw_col].isin(SUPPRESSION_CODES)).sum()}")
-    print(f"  Unique values sample: {df_msa[raw_col].dropna().head(10).tolist()}")
+for col_list, df, label in [(county_income_cols, df_county, "County"), (msa_income_cols, df_msa, "MSA")]:
+    if col_list:
+        raw_col = col_list[0]
+        print(f"\n{label} income column '{raw_col}' BEFORE renaming:")
+        print(f"  Sample values: {df[raw_col].head(10).tolist()}")
+        print(f"  Data type: {df[raw_col].dtype}")
+        print(f"  Non-null count: {(~df[raw_col].isna()).sum()} / {len(df)}")
+        print(f"  Suppression codes: {(df[raw_col].isin(SUPPRESSION_CODES)).sum()}")
+        print(f"  Unique values sample: {df[raw_col].dropna().head(10).tolist()}")
 
 # Rename columns and create county column (4-digit NHGIS to 3-digit FIPS)
 if "ASVNE001" not in df_place.columns or "ASN1E001" not in df_place.columns:
@@ -287,11 +349,11 @@ elif "CBSAA" in df_county.columns and df_county["CBSAA"].notna().any():
 else:
     if "county" in df_place.columns:
         county_cbsa_lookup = df_county_cbsa[["COUNTYA", "CBSAA"]].rename(columns={"COUNTYA": "county", "CBSAA": "msa_id"}).drop_duplicates(subset=["county"], keep="first").copy()
+        county_cbsa_lookup["msa_id"] = county_cbsa_lookup["msa_id"].replace(["nan", "None", ""], np.nan)
         place_county_set = set(df_place['county'].dropna().astype(str))
         lookup_county_set = set(county_cbsa_lookup['county'].dropna().astype(str))
         print(f"  County key overlap for MSA merge: {len(place_county_set & lookup_county_set)} / {df_place['county'].notna().sum()}")
         df_place = df_place.merge(county_cbsa_lookup, on="county", how="left")
-        df_place["msa_id"] = df_place["msa_id"].replace(["nan", "None", ""], np.nan)
         print(f"  Linked {df_place['msa_id'].notna().sum()} places to MSAs via county-CBSA relationship file")
     else:
         df_place["msa_id"] = np.nan
@@ -321,24 +383,13 @@ else:
     df_msa = df_msa.rename(columns={"ASQPE001": "msa_income", "CBSAA": "msa_id"})
 
 # Normalize place names for joining
-df_place["JOIN_NAME"] = df_place["NAME_E"].apply(lambda name: "" if not name else re.sub(r'\s+(city|town|CDP|village)$', '', str(name).split(',')[0], flags=re.IGNORECASE).strip().upper())
+df_place["JOIN_NAME"] = df_place["NAME_E"].apply(clean_jurisdiction_name)
 
-# Clean numeric columns: convert to numeric and replace suppression codes
-if data_from_api:
-    for df in [df_place, df_county, df_msa]:
-        if df is None or len(df) == 0:
-            continue
-        nhgis_cols = [col for col in df.columns if col.startswith(("ASVNE", "ASN1", "ASQPE"))]
-        for col in nhgis_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
-
-# Clean renamed columns: convert to numeric and replace suppression codes
-for col in ["median_home_value", "population"]:
-    if col in df_place.columns:
-        df_place[col] = pd.to_numeric(df_place[col], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
-if "county_income" in df_county.columns:
-    df_county["county_income"] = pd.to_numeric(df_county["county_income"], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
-if "msa_income" in df_msa.columns:
+# Clean renamed columns: only clean columns that weren't already cleaned above
+# median_home_value and population were renamed from ASVNE001 and ASN1E001, already cleaned above
+# county_income and msa_income were renamed from ASQPE001, already cleaned above (cache or API)
+# Only need to clean if they were set to np.nan directly (line 367 for msa_income fallback)
+if "msa_income" in df_msa.columns and df_msa["msa_income"].dtype == object:
     df_msa["msa_income"] = pd.to_numeric(df_msa["msa_income"], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
 
 # Step 5: merge place → county (for county_income) and place → MSA (for msa_income)
@@ -354,12 +405,6 @@ print(f"  MSA rows: {len(df_msa)}, unique MSA IDs: {df_msa['msa_id'].nunique()}"
 print(f"  Place county column sample: {df_place['county'].head(10).tolist() if county_in_place else 'MISSING'}")
 print(f"  Place county unique values: {df_place['county'].nunique() if county_in_place else 0}, non-null: {(~df_place['county'].isna()).sum() if county_in_place else 0}")
 # Efficient condition check: compute set operations once, reuse for diagnostics and merge checks (omni-rule: eliminate repetition)
-place_county_set = None
-county_county_set = None
-county_overlap_set = None
-place_msas = None
-msa_msas = None
-msa_overlap_set = None
 if county_in_place:
     place_county_set = set(df_place['county'].dropna().astype(str))
     county_county_set = set(df_county['county'].dropna().astype(str))
@@ -380,7 +425,21 @@ if msa_id_in_place:
         print(f"  MSA data ID sample values: {list(msa_msas)[:10]}")
 
 df_final = df_place[["JOIN_NAME", "county", "msa_id", "median_home_value", "population"]].copy()
-df_final["geography_type"] = "Place"
+# Set geography_type based on incorporation status: "City" for incorporated places, "Place" for CDPs/unincorporated
+if "PLACE_TYPE" in df_place.columns:
+    print(f"  DEBUG: PLACE_TYPE column exists, unique values: {df_place['PLACE_TYPE'].value_counts().to_dict()}")
+    print(f"  DEBUG: PLACE_TYPE sample values: {df_place['PLACE_TYPE'].head(10).tolist()}")
+    df_final["geography_type"] = df_place["PLACE_TYPE"].apply(
+        lambda x: "City" if pd.notna(x) and str(x).strip().lower() == "incorporated place" else "Place"
+    )
+    print(f"  DEBUG: geography_type counts: {df_final['geography_type'].value_counts().to_dict()}")
+else:
+    print(f"  WARNING: PLACE_TYPE column missing from df_place, all places will be marked as 'Place'")
+    df_final["geography_type"] = "Place"
+# Filter to keep only incorporated cities (drop unincorporated places/CDPs)
+places_before = len(df_final)
+df_final = df_final[df_final["geography_type"] == "City"].copy()
+print(f"  Filtered places: {places_before} → {len(df_final)} (dropped {places_before - len(df_final)} unincorporated places/CDPs)")
 df_final["home_ref"] = "Place"  # Track data source: Place = original, County = imputed
 # df_final["county"] already normalized from df_place["county"] - no redundant transformation
 msa_id_in_final = "msa_id" in df_final.columns
@@ -399,24 +458,28 @@ print(f"  df_msa msa_income: {'msa_income' in df_msa.columns}, non-null: {(~df_m
 # Merge income data: merge keys already normalized at creation (omni-rule: complete transformation pipeline)
 # df_place["county"] and df_county["county"] already normalized above - no duplicate transformation needed
 
-# Verify key overlap before merge (reuse sets computed above - omni-rule: eliminate repetition)
-if place_county_set is not None and county_county_set is not None:
-    print(f"  Merge check - Place counties: {len(place_county_set)}, County counties: {len(county_county_set)}, Overlap: {len(county_overlap_set)}")
-    if len(county_overlap_set) == 0 and len(place_county_set) > 0:
-        print(f"  WARNING: No county key overlap! Sample place counties: {list(place_county_set)[:5]}, Sample county counties: {list(county_county_set)[:5]}")
+# Verify key overlap before merge (recompute after filtering - omni-rule: verify intermediate state)
+if "county" in df_final.columns and len(df_final) > 0:
+    final_county_set = set(df_final['county'].dropna().astype(str))
+    county_county_set = set(df_county['county'].dropna().astype(str))
+    county_overlap = final_county_set & county_county_set
+    print(f"  Merge check - Final counties: {len(final_county_set)}, County counties: {len(county_county_set)}, Overlap: {len(county_overlap)}")
+    if len(county_overlap) == 0 and len(final_county_set) > 0:
+        print(f"  WARNING: No county key overlap! Sample final counties: {list(final_county_set)[:5]}, Sample county counties: {list(county_county_set)[:5]}")
 
 df_final = df_final.merge(df_county[["county", "county_income"]].drop_duplicates(), on="county", how="left")
 
-if msa_id_in_final:
-    # MSA IDs already normalized earlier (lines 177-193, 269-303) - only need to ensure object dtype for merge
-    # Header rows already filtered at line 136 - no redundant filtering
-    # df_final["msa_id"] and df_msa["msa_id"] already converted to object dtype above (line 480) - no repetition
-    
-    # INTERMEDIATE STATE VERIFICATION: Verify key overlap before merge (reuse sets computed above - omni-rule: eliminate repetition)
-    if place_msas is not None and msa_msas is not None:
-        print(f"  Merge check - Place MSAs: {len(place_msas)}, MSA MSAs: {len(msa_msas)}, Overlap: {len(msa_overlap_set)}")
-    
+# Merge MSA income data - always ensure msa_income column exists
+if msa_id_in_final and len(df_final) > 0:
+    final_msa_set = set(df_final["msa_id"].dropna().astype(str))
+    msa_msa_set = set(df_msa["msa_id"].dropna().astype(str))
+    msa_overlap = final_msa_set & msa_msa_set
+    print(f"  Merge check - Final MSAs: {len(final_msa_set)}, MSA MSAs: {len(msa_msa_set)}, Overlap: {len(msa_overlap)}")
+    if len(msa_overlap) == 0 and len(final_msa_set) > 0:
+        print(f"  WARNING: No MSA key overlap! Sample final MSAs: {list(final_msa_set)[:5]}, Sample MSA MSAs: {list(msa_msa_set)[:5]}")
     df_final = df_final.merge(df_msa[["msa_id", "msa_income"]].drop_duplicates(), on="msa_id", how="left")
+else:
+    df_final["msa_income"] = np.nan
 
 print(f"  After merge - rows with county_income: {(~df_final['county_income'].isna()).sum()}, rows with msa_income: {(~df_final['msa_income'].isna()).sum() if 'msa_income' in df_final.columns else 0}")
 
@@ -434,9 +497,7 @@ print(f"  Places with missing population: {pop_missing.sum()}")
 print(f"  Total places needing imputation: {missing_places.sum()}")
 
 if missing_places.sum() > 0:
-    county_home_cols = [c for c in df_county.columns if 'ASVNE' in c]
-    county_pop_cols = [c for c in df_county.columns if 'ASN1' in c]
-    
+    # county_home_cols and county_pop_cols already defined at lines 262-263 - reuse them
     print(f"  County columns for imputation - Home: {county_home_cols}, Pop: {county_pop_cols}")
     
     if county_home_cols and county_pop_cols:
@@ -447,48 +508,34 @@ if missing_places.sum() > 0:
         ).groupby("county").first().reset_index()
         
         # Check key overlap before merge
-        final_county_keys = set(df_final["county"].dropna().astype(str))
-        lookup_county_keys = set(county_lookup["county"].dropna().astype(str))
-        overlap_count = len(final_county_keys & lookup_county_keys)
-        print(f"  Imputation merge check - Final counties: {len(final_county_keys)}, Lookup counties: {len(lookup_county_keys)}, Overlap: {overlap_count}")
-        if overlap_count == 0 and len(final_county_keys) > 0:
-            print(f"  WARNING: No county key overlap for imputation! Sample final: {list(final_county_keys)[:5]}, Sample lookup: {list(lookup_county_keys)[:5]}")
+        final_county_set = set(df_final["county"].dropna().astype(str))
+        lookup_county_set = set(county_lookup["county"].dropna().astype(str))
+        overlap_count = len(final_county_set & lookup_county_set)
+        print(f"  Imputation merge check - Final counties: {len(final_county_set)}, Lookup counties: {len(lookup_county_set)}, Overlap: {overlap_count}")
+        if overlap_count == 0 and len(final_county_set) > 0:
+            print(f"  WARNING: No county key overlap for imputation! Sample final: {list(final_county_set)[:5]}, Sample lookup: {list(lookup_county_set)[:5]}")
         
         # Vectorized imputation: single merge + fillna (fill each column individually - column names don't match)
         df_final = df_final.merge(county_lookup, on="county", how="left", suffixes=("", "_county"))
-        missing_before = df_final[["median_home_value", "population"]].isna().sum()
         # Track which rows had home value imputed (was missing, now filled from county)
         home_was_missing = df_final["median_home_value"].isna()
+        # Fill missing values for both columns
         df_final["median_home_value"] = df_final["median_home_value"].fillna(df_final["county_median_home"])
         df_final["population"] = df_final["population"].fillna(df_final["county_population"])
         # Update home_ref: set to "County" for rows where home value was imputed
         df_final.loc[home_was_missing & df_final["median_home_value"].notna(), "home_ref"] = "County"
-        missing_after = df_final[["median_home_value", "population"]].isna().sum()
-        print(f"  Imputation: Home value {missing_before['median_home_value']} → {missing_after['median_home_value']} missing, Population {missing_before['population']} → {missing_after['population']} missing")
+        print(f"  Imputation: Home value {home_was_missing.sum()} → {df_final['median_home_value'].isna().sum()} missing, Population {pop_missing.sum()} → {df_final['population'].isna().sum()} missing")
         df_final = df_final.drop(columns=["county_median_home", "county_population"])
         
         # Report imputed places
-        imputed_mask = missing_places & (~df_final["median_home_value"].isna() | ~df_final["population"].isna())
-        if imputed_mask.sum() > 0:
-            print(f"  {imputed_mask.sum()} places imputed with county data")
+        if (missing_places & (~df_final["median_home_value"].isna() | ~df_final["population"].isna())).sum() > 0:
+            print(f"  {(missing_places & (~df_final['median_home_value'].isna() | ~df_final['population'].isna())).sum()} places imputed with county data")
     else:
         print(f"  WARNING: County-level home value or population columns not found. Available columns: {df_county.columns.tolist()[:20]}")
 
 # Step 7: Calculate reference income and affordability ratio
 # Complete transformation pipeline: check income availability → calculate ref_income → calculate affordability_ratio (omni-rule: single pass)
-print(f"\nIncome data diagnostics:")
-# Efficient condition checks: compute expensive operations only if needed (avoid computing min/max/sum when data is null)
-county_income_has_data = df_final['county_income'].notna().any()
-if county_income_has_data:
-    print(f"  county_income: {df_final['county_income'].notna().sum()} non-null values, range: [{df_final['county_income'].min():.0f}, {df_final['county_income'].max():.0f}]")
-else:
-    print(f"  county_income: ALL NULL")
-msa_income_exists = 'msa_income' in df_final.columns
-msa_income_has_data = msa_income_exists and df_final['msa_income'].notna().any()
-if msa_income_has_data:
-    print(f"  msa_income: {df_final['msa_income'].notna().sum()} non-null values, range: [{df_final['msa_income'].min():.0f}, {df_final['msa_income'].max():.0f}]")
-else:
-    print(f"  msa_income: ALL NULL")
+# Note: Diagnostic moved to after Step 10 so it includes both cities and counties
 
 # Reference income: Use MSA income if available, otherwise fall back to county income
 # This handles places not in MSAs (rural areas, micropolitan areas) correctly
@@ -496,20 +543,18 @@ df_final["ref_income"] = df_final["msa_income"].fillna(df_final["county_income"]
 
 # Calculate affordability ratio: check ref_income not null and > 0, median_home_value not null
 # Efficient condition: check null first to avoid unnecessary > 0 comparison on null values
-df_final["affordability_ratio"] = np.where(
-    df_final["ref_income"].notna() & (df_final["ref_income"] > 0) & df_final["median_home_value"].notna(),
-    df_final["median_home_value"] / df_final["ref_income"],
-    np.nan
-)
+df_final["affordability_ratio"] = afford_ratio(df_final, "ref_income")
 
 # Step 8: load and aggregate APR building permit data
 apr_path = Path(__file__).resolve().parent / "tablea2.csv"
 if not apr_path.exists():
     raise FileNotFoundError(f"APR file not found: {apr_path}")
 
-permit_years = [2021, 2022, 2023, 2024, 2025]
 bp_cols = ["BP_VLOW_INCOME_DR", "BP_VLOW_INCOME_NDR", "BP_LOW_INCOME_DR", "BP_LOW_INCOME_NDR",
            "BP_MOD_INCOME_DR", "BP_MOD_INCOME_NDR", "BP_ABOVE_MOD_INCOME"]
+
+# APR data contains years 2018-2024 inclusive, use 2021-2024 for 5-year analysis
+permit_years = [2021, 2022, 2023, 2024]
 
 df_hcd = pd.read_csv(apr_path, usecols=["JURIS_NAME", "YEAR"] + bp_cols, low_memory=False)
 df_hcd["YEAR"] = pd.to_numeric(df_hcd["YEAR"], errors="coerce")
@@ -518,14 +563,12 @@ df_hcd = df_hcd[df_hcd["YEAR"].isin(permit_years)]
 # Vectorized: convert all bp_cols to numeric and fillna in one pass
 df_hcd[bp_cols] = df_hcd[bp_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
 df_hcd["bp_total_units"] = df_hcd[bp_cols].sum(axis=1)
-df_hcd["JURIS_CLEAN"] = df_hcd["JURIS_NAME"].apply(lambda name: "" if not name else re.sub(r'\s+(city|town|CDP|village)$', '', str(name).split(',')[0], flags=re.IGNORECASE).strip().upper())
+df_hcd["JURIS_CLEAN"] = df_hcd["JURIS_NAME"].apply(clean_jurisdiction_name)
 df_hcd["is_county"] = df_hcd["JURIS_CLEAN"].str.contains("COUNTY", case=False, na=False)
 
 # Step 9: merge permits for places (no throwaway intermediate)
 df_final = df_final.merge(
-    df_hcd[~df_hcd["is_county"]].groupby(["JURIS_CLEAN", "YEAR"])["bp_total_units"]
-    .sum().unstack("YEAR").reindex(columns=permit_years).fillna(0).reset_index()
-    .rename(columns={y: f"permits_{y}" for y in permit_years}),
+    agg_permits(df_hcd, ~df_hcd["is_county"], permit_years),
     left_on="JOIN_NAME", right_on="JURIS_CLEAN", how="left"
 )
 
@@ -537,22 +580,18 @@ df_final = calculate_permit_rates(df_final, permit_years, permit_cols, rate_cols
 
 # Step 10: Create county-level rows from ACS county data
 print(f"\nCreating county-level rows...")
-# county_home_cols and county_pop_cols already created at lines 500-501 - reuse them
+# county_home_cols and county_pop_cols already created at lines 262-263 - reuse them
 
 if county_home_cols and county_pop_cols and "county" in df_county.columns:
-    county_cols_to_use = ["county", county_home_cols[0], county_pop_cols[0], "county_income"]
     name_e_in_county = "NAME_E" in df_county.columns
-    if name_e_in_county:
-        county_cols_to_use.append("NAME_E")
-    df_county_rows = df_county[county_cols_to_use].copy()
+    df_county_rows = df_county[["county", county_home_cols[0], county_pop_cols[0], "county_income"] + (["NAME_E"] if name_e_in_county else [])].copy()
     df_county_rows = df_county_rows.rename(columns={
         county_home_cols[0]: "median_home_value",
         county_pop_cols[0]: "population"
     })
     # Complete transformation pipeline: convert to numeric → replace suppression codes (omni-rule: single pass, vectorized)
     numeric_cols = ["median_home_value", "population", "county_income"]
-    df_county_rows[numeric_cols] = df_county_rows[numeric_cols].apply(pd.to_numeric, errors="coerce")
-    df_county_rows[numeric_cols] = df_county_rows[numeric_cols].replace(SUPPRESSION_CODES, np.nan)
+    df_county_rows[numeric_cols] = df_county_rows[numeric_cols].apply(pd.to_numeric, errors="coerce").replace(SUPPRESSION_CODES, np.nan)
     
     # Create JOIN_NAME for counties using county name from NAME_E (e.g., "STANISLAUS COUNTY")
     if name_e_in_county:
@@ -567,27 +606,23 @@ if county_home_cols and county_pop_cols and "county" in df_county.columns:
     df_county_rows["home_ref"] = "County"  # County rows come from county data
     
     # Counties don't need MSA income - use county income only
-    df_county_rows["msa_id"] = np.nan
-    df_county_rows["msa_income"] = np.nan
+    df_county_rows[["msa_id", "msa_income"]] = np.nan
     
     # Calculate ref_income and affordability_ratio for counties (use county income only)
     # county_income already has suppression codes replaced - no redundant replacement
     df_county_rows["ref_income"] = df_county_rows["county_income"]
     # Calculate affordability ratio: check ref_income not null and > 0, median_home_value not null
     # Efficient condition: check null first to avoid unnecessary > 0 comparison on null values
-    df_county_rows["affordability_ratio"] = np.where(
-        df_county_rows["ref_income"].notna() & (df_county_rows["ref_income"] > 0) & df_county_rows["median_home_value"].notna(),
-        df_county_rows["median_home_value"] / df_county_rows["ref_income"],
-        np.nan
-    )
+    df_county_rows["affordability_ratio"] = afford_ratio(df_county_rows, "ref_income")
     
     # Merge county-level APR permit data (no throwaway intermediate)
-    df_county_rows = df_county_rows.merge(
-        df_hcd[df_hcd["is_county"]].groupby(["JURIS_CLEAN", "YEAR"])["bp_total_units"]
-        .sum().unstack("YEAR").reindex(columns=permit_years).fillna(0).reset_index()
-        .rename(columns={y: f"permits_{y}" for y in permit_years}),
-        left_on="JOIN_NAME", right_on="JURIS_CLEAN", how="left"
-    )
+    df_permits_county = agg_permits(df_hcd, df_hcd["is_county"], permit_years)
+    df_county_rows = df_county_rows.merge(df_permits_county, left_on="JOIN_NAME", right_on="JURIS_CLEAN", how="left")
+    
+    # Ensure all permit columns exist (fill missing years with 0)
+    for col in permit_cols:
+        if col not in df_county_rows.columns:
+            df_county_rows[col] = 0
     
     # Calculate permit rates for counties (reuse same transformation)
     df_county_rows = calculate_permit_rates(df_county_rows, permit_years, permit_cols, rate_cols)
@@ -600,6 +635,21 @@ if county_home_cols and county_pop_cols and "county" in df_county.columns:
     print(f"  Combined total: {len(df_final)} rows (places + counties)")
 else:
     print(f"  WARNING: Cannot create county rows - missing required columns")
+
+# Income data diagnostics (after counties added)
+print(f"\nIncome data diagnostics (final dataset):")
+income_diagnostics = []
+for col_name, col_key in [("county_income", "county_income"), ("msa_income", "msa_income")]:
+    if col_key in df_final.columns:
+        col_notna = df_final[col_key].notna()
+        col_has_data = col_notna.any()
+        if col_has_data:
+            income_diagnostics.append(f"  {col_name}: {col_notna.sum()} non-null values, range: [{df_final[col_key].min():.0f}, {df_final[col_key].max():.0f}]")
+        else:
+            income_diagnostics.append(f"  {col_name}: ALL NULL")
+    else:
+        income_diagnostics.append(f"  {col_name}: ALL NULL")
+print("\n".join(income_diagnostics))
 
 # Suppression codes already replaced during initial cleaning (lines 343-368, 577-579) - no redundant cleanup needed
 
