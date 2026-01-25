@@ -41,7 +41,7 @@ def main():
         
         print("Filtering columns...")
         prefix_patterns = ['JURIS_NAME', 'YEAR', 'UNIT_CAT', 'TENURE', 'DR_TYPE', 'DENSITY_BONUS_TOTAL']
-        exact_match_cols = ['APN', 'STREET_ADDRESS']
+        exact_match_cols = ['APN', 'STREET_ADDRESS', 'NOTES']
         filtered_columns = [
             col for col in df.columns
             if (any(str(col).startswith(prefix) for prefix in prefix_patterns) or
