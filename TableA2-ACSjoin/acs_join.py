@@ -36,12 +36,21 @@ def nhgis_api(method, endpoint, json_data=None):
 
 
 def permit_rate(df, permit_years, permit_cols, rate_cols):
-    """Calculate permit rates and totals."""
+    """Calculate net new unit rates and totals."""
+    """
+    Transformation pipeline: fill missing values → calculate annual rates → aggregate totals
+    For each year in permit_years:
+    - Fill missing net new unit counts with 0
+    - Calculate rate per 1000 population: net_new_units / population * 1000 (returns NaN if population <= 0)
+    Then aggregate:
+    - total_net_new_units: Sum of all net new unit columns across years
+    - avg_annual_rate: Mean of all annual rate columns
+    """
     for y in permit_years:
-        df[f"permits_{y}"] = df[f"permits_{y}"].fillna(0)
-        df[f"rate_{y}"] = np.where(df["population"] > 0, df[f"permits_{y}"] / df["population"] * 1000, np.nan)
-    df["total_permits_5yr"] = df[permit_cols].sum(axis=1)
-    df["avg_annual_permit_rate"] = df[rate_cols].mean(axis=1)
+        df[f"net_new_units_{y}"] = df[f"net_new_units_{y}"].fillna(0)
+        df[f"rate_{y}"] = np.where(df["population"] > 0, df[f"net_new_units_{y}"] / df["population"] * 1000, np.nan)
+    df["total_net_new_units"] = df[permit_cols].sum(axis=1)
+    df["avg_annual_rate"] = df[rate_cols].mean(axis=1)
     return df
 
 
@@ -55,7 +64,8 @@ def juris_caps(name):
     # This removes state/county suffixes that vary between data sources
     name_part = str(name).split(',')[0]
     # Remove jurisdiction suffixes and normalize to uppercase:
-    # .re.sub(): Remove trailing suffixes (city, town, CDP, village) with case-insensitive matching
+    # re.sub() (regex): Remove trailing suffixes (city, town, CDP, village) with case-insensitive matching
+    #   Pattern r'\s+(city|town|CDP|village)$': matches whitespace + suffix at end of string
     # .strip(): Remove any remaining leading/trailing whitespace
     # .upper(): Convert to uppercase for consistent matching (e.g., "Los Angeles City" → "LOS ANGELES")
     return re.sub(r'\s+(city|town|CDP|village)$', '', name_part, flags=re.IGNORECASE).strip().upper()
@@ -81,13 +91,17 @@ def normalize_cbsaa(series):
 
 
 
-
-
-def agg_permits(df_hcd, is_county_filter, permit_years):
-    """Aggregate permit data by jurisdiction and year, returning dataframe ready for merge."""
-    return (df_hcd[is_county_filter].groupby(["JURIS_CLEAN", "YEAR"])["bp_total_units"]
+def agg_permits(df_hcd, is_county_filter, permit_years, include_county=False):
+    """Aggregate net new units by jurisdiction and year, returning dataframe ready for merge.
+    
+    Args:
+        include_county: If True, group by both JURIS_CLEAN and CNTY_CLEAN for more precise matching.
+    """
+    group_cols = ["JURIS_CLEAN", "CNTY_CLEAN", "YEAR"] if include_county else ["JURIS_CLEAN", "YEAR"]
+    index_cols = ["JURIS_CLEAN", "CNTY_CLEAN"] if include_county else ["JURIS_CLEAN"]
+    return (df_hcd[is_county_filter].groupby(group_cols)["bp_total_units"]
             .sum().unstack("YEAR").reindex(columns=permit_years).fillna(0).reset_index()
-            .rename(columns={y: f"permits_{y}" for y in permit_years}))
+            .rename(columns={y: f"net_new_units_{y}" for y in permit_years}))
 
 
 def afford_ratio(df, ref_income_col, median_home_value_col="median_home_value"):
@@ -647,20 +661,20 @@ apr_path = Path(__file__).resolve().parent / "tablea2.csv"
 if not apr_path.exists():
     raise FileNotFoundError(f"APR file not found: {apr_path}")
 
-bp_cols = ["BP_VLOW_INCOME_DR", "BP_VLOW_INCOME_NDR", "BP_LOW_INCOME_DR", "BP_LOW_INCOME_NDR",
-           "BP_MOD_INCOME_DR", "BP_MOD_INCOME_NDR", "BP_ABOVE_MOD_INCOME"]
-
 # APR data contains years 2018-2024 inclusive, use 2021-2024 for 5-year analysis
 permit_years = [2021, 2022, 2023, 2024]
 
-df_hcd = pd.read_csv(apr_path, usecols=["JURIS_NAME", "YEAR"] + bp_cols, low_memory=False)
+df_hcd = pd.read_csv(apr_path, usecols=["JURIS_NAME", "CNTY_NAME", "YEAR", "NO_OTHER_FORMS_OF_READINESS", "DEM_DES_UNITS"], low_memory=False)
 df_hcd["YEAR"] = pd.to_numeric(df_hcd["YEAR"], errors="coerce")
 df_hcd = df_hcd[df_hcd["YEAR"].isin(permit_years)]
 
-# Vectorized: convert all bp_cols to numeric and fillna in one pass
-df_hcd[bp_cols] = df_hcd[bp_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-df_hcd["bp_total_units"] = df_hcd[bp_cols].sum(axis=1)
+# Calculate net new units: certificates of occupancy minus demolitions
+df_hcd["NO_OTHER_FORMS_OF_READINESS"] = pd.to_numeric(df_hcd["NO_OTHER_FORMS_OF_READINESS"], errors="coerce").fillna(0)
+df_hcd["DEM_DES_UNITS"] = pd.to_numeric(df_hcd["DEM_DES_UNITS"], errors="coerce").fillna(0)
+df_hcd["bp_total_units"] = df_hcd["NO_OTHER_FORMS_OF_READINESS"] - df_hcd["DEM_DES_UNITS"]
 df_hcd["JURIS_CLEAN"] = df_hcd["JURIS_NAME"].apply(juris_caps)
+# Normalize county name for matching (uppercase, no trailing spaces)
+df_hcd["CNTY_CLEAN"] = df_hcd["CNTY_NAME"].astype(str).str.strip().str.upper()
 df_hcd["is_county"] = df_hcd["JURIS_CLEAN"].str.contains("COUNTY", case=False, na=False)
 
 # Step 9: merge permits for places (no throwaway intermediate)
@@ -669,7 +683,7 @@ df_final = df_final.merge(
     left_on="JOIN_NAME", right_on="JURIS_CLEAN", how="left"
 )
 
-permit_cols = [f"permits_{y}" for y in permit_years]
+permit_cols = [f"net_new_units_{y}" for y in permit_years]
 rate_cols = [f"rate_{y}" for y in permit_years]
 
 # Calculate permit rates (reuse function defined globally)
@@ -740,7 +754,7 @@ if county_home_cols and county_pop_cols and "county" in df_county.columns:
     df_county_rows = permit_rate(df_county_rows, permit_years, permit_cols, rate_cols)
     
     print(f"  Created {len(df_county_rows)} county-level rows")
-    print(f"  Counties with permit data: {(df_county_rows['total_permits_5yr'] > 0).sum()}")
+    print(f"  Counties with net new units: {(df_county_rows['total_net_new_units'] > 0).sum()}")
     
     # Combine place and county results
     df_final = pd.concat([df_final, df_county_rows], ignore_index=True)
@@ -770,11 +784,11 @@ print("\n".join(income_diagnostics))
 df_final = df_final[
     ["JOIN_NAME", "geography_type", "median_home_value", "home_ref", "population", 
      "county_income", "msa_income", "ref_income", "affordability_ratio"] 
-    + permit_cols + ["total_permits_5yr"] + rate_cols + ["avg_annual_permit_rate"]
+    + permit_cols + ["total_net_new_units"] + rate_cols + ["avg_annual_rate"]
 ].copy()
 
 print("\nSample output:")
-print(df_final[["JOIN_NAME", "affordability_ratio", "total_permits_5yr"]].head(10))
+print(df_final[["JOIN_NAME", "affordability_ratio", "total_net_new_units"]].head(10))
 
 output_path = Path(__file__).resolve().parent / "acs_join_output.csv"
 df_final.to_csv(output_path, index=False)
