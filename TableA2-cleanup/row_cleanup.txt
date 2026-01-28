@@ -1,7 +1,7 @@
-ROW CLEANUP DOCUMENTATION
+HCD APR TABLE A2 ROW CLEANUP DOCUMENTATION
 =========================
 
-The APR CSV file (tablea2.csv) has data quality issues that cause standard 
+The APR Table A2 CSV file (tablea2.csv) has data quality issues that cause standard 
 CSV parsers to misread rows. Scripts use one of three cleanup methods described below.
 
 Data Issues
@@ -13,7 +13,7 @@ Data Issues
 2. EXTRA COMMAS IN TEXT FIELDS  
    Text fields containing unquoted commas create extra columns.
    Problem columns (most likely to contain unquoted commas): 5, 6, 38, 40, 42, 49, 51
-   Fix (STANDARD/GODZILLAFILTER): Multi-anchor validation with forward and backward anchor detection.
+   Fix (GODZILLAFILTER): Multi-anchor validation with forward and backward anchor detection.
    Fix (BASICFILTER): No fix - rows with extra columns are dropped.
 
 Filter Versions
@@ -28,7 +28,7 @@ Two filters have the following features and tradeoffs:
    - Drops rows with DEMO > 99 (unreasonable demolition count - Godzilla-level destruction)
    - Date-year validation: ISS_DATE → ENT_DATE → CO_DATE fallback chain
    - Reports breakdown: triplet failures, non-numeric DEMO, DEMO > 99, date mismatches
-   - Expected data loss: 10-15% (strict quality enforcement)
+   - Expected data loss: 10-15% (robust recovery with some potential noise)
 
 2. BASICFILTER (tablea2_rowclean_basicfilter.py)
    - NO recovery - only keeps rows with exact expected column count (52)
@@ -36,7 +36,7 @@ Two filters have the following features and tradeoffs:
    - Date-year validation: ISS_DATE → ENT_DATE → CO_DATE fallback chain
    - No triplet or DEMO validation
    - Reports breakdown: extra cols, fewer cols, date mismatches by type
-   - Expected data loss: ~40-45% (no recovery + date validation)
+   - Expected data loss: 30-45% (conservative)
 
 tl;dr
 - BASICFILTER: Simple and strict on column count. Drops any row that doesn't have 
@@ -53,18 +53,16 @@ When to use each:
 Date-Year Validation
 --------------------
 To ensure data alignment, the year extracted from date columns must match
-the YEAR column value. The validation chain is:
+the YEAR column value. Validation is conditional on permit counts:
 
-  1. ISS_DATE (col 26) - Primary: Building permit issue date
-  2. ENT_DATE (col 17) - Fallback: Entitlement approval date
-  3. CO_DATE (col 35) - Fallback: Certificate of occupancy date
+  ISS_DATE (col 26) checked if NO_BUILDING_PERMITS (col 27) > 0
+  ENT_DATE (col 17) checked if NO_ENTITLEMENTS (col 18) > 0
+  CO_DATE (col 35) checked if NO_COs (col 36) > 0
 
 Logic:
-  - If ISS_DATE has a value, its year must match YEAR
-  - If ISS_DATE is empty, check ENT_DATE
-  - If ENT_DATE is empty, check CO_DATE
-  - If all three are empty, row is dropped (no date to validate against)
-  - Any date with a year that doesn't match YEAR = row dropped
+  - For each permit type with non-zero count, the corresponding date year must match YEAR
+  - If permit count is 0 or empty, that date is not validated
+  - If all permit counts are 0, the row passes (no dates to validate)
 
 This catches:
   - Rows with misaligned columns (date in wrong position)
@@ -172,21 +170,92 @@ GODZILLAFILTER scripts output detailed breakdown:
         ISS_DATE mismatch:        72,101
         ENT_DATE mismatch:         3,750
         CO_DATE mismatch:          3,106
-        All dates empty:           5,124
 
 This breakdown helps identify:
-- ISS_DATE mismatch: Date exists but year doesn't match YEAR (potential misalignment)
-- ENT_DATE/CO_DATE mismatch: Fallback dates don't match (less common)
-- All dates empty: No date columns have values (cannot validate)
+- ISS_DATE mismatch: BP_ISSUE_DT1 year doesn't match YEAR (when NO_BUILDING_PERMITS > 0)
+- ENT_DATE mismatch: ENT_APPROVED_DT1 year doesn't match YEAR (when NO_ENTITLEMENTS > 0)
+- CO_DATE mismatch: CO_ISSUE_DT1 year doesn't match YEAR (when NO_COs > 0)
 
-Note on Development
--------------------
-Column validators were designed by parsing the HCD APR data dictionary document
-using Claude Opus 4.5, with the goal of creating the most defensive validation
-possible for each column type.
 
-The two-layer approach (forward walking + backward cross-validation) provides
-defense in depth: even if one method fails, the other can catch errors.
+Decision Trees
+==============
 
-Date-year validation was added as a final quality check to catch rows where
-the anchor chain recovery succeeded but produced incorrect column alignment.
+BASICFILTER Decision Tree
+-------------------------
+For each row:
+
+  Column count == 52 (Table A2 header)
+    |
+    +-- NO --> DROP (wrong column count)
+    |
+    +-- YES --> Date-year validation:
+                  |
+                  +-- For each permit type (BP, ENT, CO):
+                  |     |
+                  |     +-- Count > 0?
+                  |           |
+                  |           +-- NO --> skip this date check
+                  |           |
+                  |           +-- YES --> Date year == YEAR?
+                  |                         |
+                  |                         +-- NO --> DROP (date mismatch)
+                  |                         |
+                  |                         +-- YES --> continue
+                  |
+                  +-- All checks passed --> KEEP
+
+
+GODZILLAFILTER Decision Tree
+----------------------------
+For each row:
+
+  Column count == 52?
+    |
+    +-- YES --> (normal row path)
+    |           |
+    |           +-- Triplet valid? (cols 0,1,2 = jurisdiction, county, year 2018-2024)
+    |                 |
+    |                 +-- NO --> DROP (triplet failed)
+    |                 |
+    |                 +-- YES --> continue to DEMO check
+    |
+    +-- NO (extra columns) --> Recovery attempt:
+                |
+                +-- Find anchors using ANCHOR_CHAIN
+                |
+                +-- Triplet valid after recovery?
+                      |
+                      +-- NO --> DROP (triplet failed)
+                      |
+                      +-- YES --> continue to DEMO check
+
+  DEMO check:
+    |
+    +-- DEMO value non-numeric and non-empty?
+    |     |
+    |     +-- YES --> DROP (non-numeric DEMO)
+    |     |
+    |     +-- NO --> continue
+    |
+    +-- DEMO value > 99?
+          |
+          +-- YES --> DROP (excessive demolition - Godzilla-level)
+          |
+          +-- NO --> continue to date-year validation
+
+  Date-year validation (same as BASICFILTER):
+    |
+    +-- For each permit type (BP, ENT, CO):
+    |     |
+    |     +-- Count > 0?
+    |           |
+    |           +-- NO --> skip this date check
+    |           |
+    |           +-- YES --> Date year == YEAR?
+    |                         |
+    |                         +-- NO --> DROP (date mismatch)
+    |                         |
+    |                         +-- YES --> continue
+    |
+    +-- All checks passed --> KEEP
+

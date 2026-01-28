@@ -23,8 +23,11 @@ malformed_path = Path(__file__).parent / "malformed_rows_basicfilter.csv"
 # Column indices
 YEAR_COL = 2
 ENT_DATE_COL = 17   # ENT_APPROVED_DT1
+ENTITLEMENTS_COL = 18  # NO_ENTITLEMENTS - first int after ENT_DATE
 ISS_DATE_COL = 26   # BP_ISSUE_DT1 (primary for year validation)
+PERMITS_COL = 27    # NO_BUILDING_PERMITS - first int after ISS_DATE
 CO_DATE_COL = 35    # CO_ISSUE_DT1
+CO_COUNT_COL = 36   # NO_COs - first int after CO_DATE
 DEMO_COL = 44       # DEM_DES_UNITS column
 
 def extract_year_from_date(val):
@@ -46,15 +49,26 @@ def extract_year_from_date(val):
             return parts[2]
     return None
 
-def validate_date_year(row, year_str, iss_pos, ent_pos, co_pos):
-    """Validate that at least one date exists and its year matches YEAR."""
+def safe_int(val):
+    """Convert val to int, returning 0 for empty/invalid values."""
+    try:
+        return int(float(val)) if str(val).strip() else 0
+    except (ValueError, TypeError):
+        return 0
+
+def validate_date_year(row, year_str, date_count_pairs):
+    """Validate date years match YEAR for permit types with non-zero counts.
+    
+    date_count_pairs: list of (date_pos, count_pos, name) tuples
+    Only validates a date if the corresponding permit count is non-zero.
+    """
     n = len(row)
-    for pos, name in [(iss_pos, "ISS_DATE"), (ent_pos, "ENT_DATE"), (co_pos, "CO_DATE")]:
-        if pos < n:
-            year = extract_year_from_date(row[pos])
-            if year:
-                return (True, None) if year == year_str else (False, f"{name} mismatch")
-    return False, "All dates empty"
+    for date_pos, count_pos, name in date_count_pairs:
+        if count_pos < n and safe_int(row[count_pos]) > 0 and date_pos < n:
+            year = extract_year_from_date(row[date_pos])
+            if year and year != year_str:
+                return False, f"{name} mismatch"
+    return True, None
 
 # Step 1: Read and join multi-line quoted fields
 print(f"Loading: {apr_path}")
@@ -109,7 +123,11 @@ for line_num, line in enumerate(joined_lines[1:], start=2):
     if n == expected_cols:
         # Exact column count - validate date-year
         year_str = parts[YEAR_COL]
-        valid, reason = validate_date_year(parts, year_str, ISS_DATE_COL, ENT_DATE_COL, CO_DATE_COL)
+        valid, reason = validate_date_year(parts, year_str, [
+            (ISS_DATE_COL, PERMITS_COL, "ISS_DATE"),
+            (ENT_DATE_COL, ENTITLEMENTS_COL, "ENT_DATE"),
+            (CO_DATE_COL, CO_COUNT_COL, "CO_DATE")
+        ])
         if not valid:
             if "ISS_DATE" in reason:
                 iss_date_mismatch_count += 1
@@ -117,8 +135,6 @@ for line_num, line in enumerate(joined_lines[1:], start=2):
                 ent_date_mismatch_count += 1
             elif "CO_DATE" in reason:
                 co_date_mismatch_count += 1
-            elif "empty" in reason:
-                all_dates_empty_count += 1
             malformed_info.append({
                 'line_number': line_num, 'column_count': n, 'diff': 0,
                 'juris_name': parts[0], 'cnty_name': parts[1], 'year': parts[2],
@@ -187,3 +203,7 @@ if malformed_info:
     df_malformed.to_csv(malformed_path, index=False)
     print(f"  Dropped rows: {malformed_path}")
     print(f"    ({len(malformed_info):,} total)")
+
+"""MIT License""
+
+""Creative Commons CC-BY-SA 4.0 2026 Diego Aguilar-Canabal"""

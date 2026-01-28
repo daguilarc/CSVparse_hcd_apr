@@ -87,15 +87,26 @@ def extract_year_from_date(val):
             return parts[2]
     return None
 
-def validate_date_year(row, year_str, iss_pos, ent_pos, co_pos):
-    """Validate that at least one date exists and its year matches YEAR."""
+def safe_int(val):
+    """Convert val to int, returning 0 for empty/invalid values."""
+    try:
+        return int(float(val)) if str(val).strip() else 0
+    except (ValueError, TypeError):
+        return 0
+
+def validate_date_year(row, year_str, date_count_pairs):
+    """Validate date years match YEAR for permit types with non-zero counts.
+    
+    date_count_pairs: list of (date_pos, count_pos, name) tuples
+    Only validates a date if the corresponding permit count is non-zero.
+    """
     n = len(row)
-    for pos, name in [(iss_pos, "ISS_DATE"), (ent_pos, "ENT_DATE"), (co_pos, "CO_DATE")]:
-        if pos < n:
-            year = extract_year_from_date(row[pos])
-            if year:
-                return (True, None) if year == year_str else (False, f"{name} mismatch")
-    return False, "All dates empty"
+    for date_pos, count_pos, name in date_count_pairs:
+        if count_pos < n and safe_int(row[count_pos]) > 0 and date_pos < n:
+            year = extract_year_from_date(row[date_pos])
+            if year and year != year_str:
+                return False, f"{name} mismatch"
+    return True, None
 
 # Validators for specific column types
 def is_apn(val):
@@ -1038,6 +1049,7 @@ ISS_DATE_COL = 26   # Second date anchor
 CO_DATE_COL = 35    # Third date anchor
 # Target columns (first int after each date anchor)
 ENTITLEMENTS_COL = 18  # NO_ENTITLEMENTS - first int after ENT_DATE (col 17)
+CO_COUNT_COL = 36      # NO_COs - first int after CO_DATE (col 35)
 PERMITS_COL = 27       # NO_BUILDING_PERMITS - first int after ISS_DATE (col 26)
 DEMO_COL = 44          # DEM_DES_UNITS - uses Owner/Renter backward anchor
 
@@ -1102,8 +1114,12 @@ for line_num, line in enumerate(joined_lines[1:], start=2):
     # BASICFILTER: Only accept rows with exact column count
     if n == expected_cols:
         juris, cnty, year = parts[0], parts[1], parts[YEAR_COL]
-        # Date-year validation
-        valid, reason = validate_date_year(parts, year, ISS_DATE_COL, ENT_DATE_COL, CO_DATE_COL)
+        # Date-year validation: only check dates for permit types with non-zero counts
+        valid, reason = validate_date_year(parts, year, [
+            (ISS_DATE_COL, PERMITS_COL, "ISS_DATE"),
+            (ENT_DATE_COL, ENTITLEMENTS_COL, "ENT_DATE"),
+            (CO_DATE_COL, CO_COUNT_COL, "CO_DATE")
+        ])
         if not valid:
             skipped_count += 1
             if "ISS_DATE" in reason:
@@ -1112,8 +1128,6 @@ for line_num, line in enumerate(joined_lines[1:], start=2):
                 ent_date_mismatch_count += 1
             elif "CO_DATE" in reason:
                 co_date_mismatch_count += 1
-            elif "empty" in reason:
-                all_dates_empty_count += 1
             malformed_rows.append({
                 'line': line_num, 'column_count': n, 'diff': 0,
                 'juris_name': juris, 'cnty_name': cnty, 'year': year,

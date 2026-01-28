@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare Los Angeles permit counts: calculated from APR vs HCD dashboard values.
 
-Uses HARDFILTER method: row recovery + triplet/DEMO/date-year validation.
+Uses GODZILLAFILTER method: row recovery + triplet/DEMO/date-year validation.
 """
 
 from pathlib import Path
@@ -14,9 +14,11 @@ HCD_DASHBOARD_LA = {2021: 19629, 2022: 22621, 2023: 18622, 2024: 17195}
 # Column indices
 YEAR_COL = 2
 ENT_DATE_COL = 17
+ENTITLEMENTS_COL = 18  # NO_ENTITLEMENTS - first int after ENT_DATE
 ISS_DATE_COL = 26
+PERMITS_COL = 27       # NO_BUILDING_PERMITS - first int after ISS_DATE
 CO_DATE_COL = 35
-PERMITS_COL = 27
+CO_COUNT_COL = 36      # NO_COs - first int after CO_DATE
 DEMO_COL = 44
 permit_years = [2021, 2022, 2023, 2024]
 
@@ -73,15 +75,26 @@ def extract_year_from_date(val):
             return parts[2]
     return None
 
-def validate_date_year(row, year_str, iss_pos, ent_pos, co_pos):
-    """Validate that at least one date exists and its year matches YEAR."""
+def safe_int(val):
+    """Convert val to int, returning 0 for empty/invalid values."""
+    try:
+        return int(float(val)) if str(val).strip() else 0
+    except (ValueError, TypeError):
+        return 0
+
+def validate_date_year(row, year_str, date_count_pairs):
+    """Validate date years match YEAR for permit types with non-zero counts.
+    
+    date_count_pairs: list of (date_pos, count_pos, name) tuples
+    Only validates a date if the corresponding permit count is non-zero.
+    """
     n = len(row)
-    for pos, name in [(iss_pos, "ISS_DATE"), (ent_pos, "ENT_DATE"), (co_pos, "CO_DATE")]:
-        if pos < n:
-            year = extract_year_from_date(row[pos])
-            if year:
-                return (True, None) if year == year_str else (False, f"{name} mismatch")
-    return False, "All dates empty"
+    for date_pos, count_pos, name in date_count_pairs:
+        if count_pos < n and safe_int(row[count_pos]) > 0 and date_pos < n:
+            year = extract_year_from_date(row[date_pos])
+            if year and year != year_str:
+                return False, f"{name} mismatch"
+    return True, None
 
 def find_date_position(parts, start, end):
     """Find a date anchor in parts[start:end]."""
@@ -121,7 +134,7 @@ header_parts = joined_lines[0].split(',')
 expected_cols = len(header_parts)
 print(f"Lines: {len(joined_lines):,}, Expected columns: {expected_cols}")
 
-# Step 2: Parse and aggregate Los Angeles permits (HARDFILTER method)
+# Step 2: Parse and aggregate Los Angeles permits (GODZILLAFILTER method)
 la_permits = {y: 0 for y in permit_years}
 la_rows = 0
 normal_count = 0
@@ -146,7 +159,7 @@ for line in joined_lines[1:]:
     if juris != "LOS ANGELES":
         continue
     
-    # HARDFILTER: Triplet validation
+    # GODZILLAFILTER: Triplet validation
     if not is_juris(parts[0]) or not is_juris(parts[1]) or not is_year(parts[2]):
         skipped_triplet += 1
         continue
@@ -177,7 +190,7 @@ for line in joined_lines[1:]:
     else:
         normal_count += 1
     
-    # HARDFILTER: DEMO validation
+    # GODZILLAFILTER: DEMO validation
     demo_val = parts[demo_pos] if demo_pos < n else ""
     if is_non_numeric_demo(demo_val):
         skipped_non_numeric_demo += 1
@@ -186,8 +199,12 @@ for line in joined_lines[1:]:
         skipped_excessive_demo += 1
         continue
     
-    # Date-year validation
-    valid, reason = validate_date_year(parts, year_str, iss_pos, ent_pos, co_pos)
+    # Date-year validation (count is 1 after each date position)
+    valid, reason = validate_date_year(parts, year_str, [
+        (iss_pos, iss_pos + 1, "ISS_DATE"),
+        (ent_pos, ent_pos + 1, "ENT_DATE"),
+        (co_pos, co_pos + 1, "CO_DATE")
+    ])
     if not valid:
         skipped_date_mismatch += 1
         continue
@@ -211,13 +228,13 @@ for line in joined_lines[1:]:
 
 # Display comparison
 print(f"\n{'='*70}")
-print(f"HARDFILTER STATISTICS (Los Angeles only)")
+print(f"GODZILLAFILTER STATISTICS (Los Angeles only)")
 print(f"{'='*70}")
 print(f"LA rows kept: {la_rows:,} (normal={normal_count:,}, recovered={recovered_count:,})")
 print(f"Skipped:")
 print(f"  - Triplet failed:      {skipped_triplet:,}")
 print(f"  - Non-numeric DEMO:    {skipped_non_numeric_demo:,}")
-print(f"  - DEMO > 99:          {skipped_excessive_demo:,}")
+print(f"  - DEMO > 99:           {skipped_excessive_demo:,}")
 print(f"  - Date mismatch:       {skipped_date_mismatch:,}")
 print(f"  - Fewer cols:          {skipped_fewer_cols:,}")
 print(f"{'='*70}")
