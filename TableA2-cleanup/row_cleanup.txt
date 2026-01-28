@@ -1,0 +1,192 @@
+ROW CLEANUP DOCUMENTATION
+=========================
+
+The APR CSV file (tablea2.csv) has data quality issues that cause standard 
+CSV parsers to misread rows. Scripts use one of three cleanup methods described below.
+
+Data Issues
+-----------
+1. MULTI-LINE QUOTED FIELDS
+   Text fields containing newlines inside quotes split across multiple lines.
+   Fix (all methods): Track quote state char-by-char, join lines inside quotes.
+
+2. EXTRA COMMAS IN TEXT FIELDS  
+   Text fields containing unquoted commas create extra columns.
+   Problem columns (most likely to contain unquoted commas): 5, 6, 38, 40, 42, 49, 51
+   Fix (STANDARD/GODZILLAFILTER): Multi-anchor validation with forward and backward anchor detection.
+   Fix (BASICFILTER): No fix - rows with extra columns are dropped.
+
+Filter Versions
+-----------------
+Two filters have the following features and tradeoffs:
+
+1. GODZILLAFILTER (tablea2_rowclean_godzillafilter.py)
+   - Named for eliminating rows that may have been "destroyed by Godzilla" (excessive demolitions)
+   - Recovers rows with extra columns by finding anchor positions and realigning
+   - Strict triplet validation: first 3 columns must be valid (jurisdiction, county, year)
+   - Drops rows with non-numeric, non-empty DEMO values
+   - Drops rows with DEMO > 99 (unreasonable demolition count - Godzilla-level destruction)
+   - Date-year validation: ISS_DATE → ENT_DATE → CO_DATE fallback chain
+   - Reports breakdown: triplet failures, non-numeric DEMO, DEMO > 99, date mismatches
+   - Expected data loss: 10-15% (strict quality enforcement)
+
+2. BASICFILTER (tablea2_rowclean_basicfilter.py)
+   - NO recovery - only keeps rows with exact expected column count (52)
+   - Rows with extra columns (from embedded commas) are dropped, not recovered
+   - Date-year validation: ISS_DATE → ENT_DATE → CO_DATE fallback chain
+   - No triplet or DEMO validation
+   - Reports breakdown: extra cols, fewer cols, date mismatches by type
+   - Expected data loss: ~40-45% (no recovery + date validation)
+
+tl;dr
+- BASICFILTER: Simple and strict on column count. Drops any row that doesn't have 
+  exactly 52 columns. Validates date years match. No recovery attempted.
+- GODZILLAFILTER: Tries to salvage malformed rows by finding anchors and realigning columns.
+  Also enforces stricter data quality checks (valid triplet, numeric DEMO, DEMO <= 99).
+  Eliminates rows with Godzilla-level demolition counts (>99 units demolished).
+  Same date-year validation as basicfilter.
+
+When to use each:
+- GODZILLAFILTER: Production joining, strict data quality with recovery
+- BASICFILTER: Baseline comparison, understanding raw data quality without recovery
+
+Date-Year Validation
+--------------------
+To ensure data alignment, the year extracted from date columns must match
+the YEAR column value. The validation chain is:
+
+  1. ISS_DATE (col 26) - Primary: Building permit issue date
+  2. ENT_DATE (col 17) - Fallback: Entitlement approval date
+  3. CO_DATE (col 35) - Fallback: Certificate of occupancy date
+
+Logic:
+  - If ISS_DATE has a value, its year must match YEAR
+  - If ISS_DATE is empty, check ENT_DATE
+  - If ENT_DATE is empty, check CO_DATE
+  - If all three are empty, row is dropped (no date to validate against)
+  - Any date with a year that doesn't match YEAR = row dropped
+
+This catches:
+  - Rows with misaligned columns (date in wrong position)
+  - Data entry errors (wrong year in date field)
+
+Column Schema (parsed from HCD data dictionary using Claude Opus 4.5)
+---------------------------------------------------------------------
+The data dictionary was parsed into defensive column validators:
+
+  0-1:  JURIS_NAME, CNTY_NAME - text, no commas (REQUIRED - triplet validation)
+  2:    YEAR - int (2018-2024) (REQUIRED - triplet validation)
+  3-4:  APNs - digits and dashes only
+  5:    STREET_ADDRESS - PROBLEM (can have commas)
+  6:    PROJECT_NAME - PROBLEM (can have commas)
+  7:    JURIS_TRACKING_ID - digits/dashes
+  8:    UNIT_CAT - short string, no commas
+  9:    TENURE_DESC - "Owner" or "Renter" only
+  10-16: Income tier unit counts (ints)
+  17:   ENT_DATE - DATE ANCHOR (used for year validation fallback)
+  18:   NO_ENTITLEMENTS (int) - first int after ENT_DATE
+  19-25: Income tier unit counts (ints)
+  26:   ISS_DATE - PRIMARY DATE ANCHOR (used for year validation)
+  27:   NO_BUILDING_PERMITS (int) - PERMITS_COL, first int after ISS_DATE
+  28-34: Income tier unit counts (ints)
+  35:   CO_DATE - DATE ANCHOR (used for year validation fallback)
+  36-37: Unit counts (ints)
+  38:   APPROVE_SB35 - PROBLEM (can have commas)
+  39:   INFILL_UNITS - Y/N/Yes/No only
+  40:   FIN_ASSIST_NAME - PROBLEM (can have commas)
+  41:   DR_TYPE - short string, no commas
+  42:   NO_FA_DR - PROBLEM (can have commas)
+  43:   TERM_AFF_DR (int)
+  44:   DEM_DES_UNITS (int) - DEMO_COL, NOT a year (2018-2024), max 99
+  45:   DEM_OR_DES_UNITS - no commas or quotes
+  46:   DEM_DES_UNITS_OWN_RENT - "Owner" or "Renter" only
+  47:   DENSITY_BONUS_TOTAL (float/int)
+  48:   DENSITY_BONUS_NUMBER_OTHER_INCENTIVES (int)
+  49:   DENSITY_BONUS_INCENTIVES - PROBLEM (can have commas)
+  50:   DENSITY_BONUS_RECEIVE_REDUCTION - Y/N/Yes/No only
+  51:   NOTES - PROBLEM (can have commas)
+
+Date Format Handling
+--------------------
+Dates are parsed with format fallback:
+  Primary format:  YYYY-MM-DD (e.g., 2021-03-15)
+  Fallback format: MM/DD/YYYY (e.g., 03/15/2021)
+
+The year is extracted for validation against the YEAR column.
+
+
+
+Anchor Chain Cross-Validation
+-----------------------------
+Each anchor is cross-validated against its neighbors to ensure spacings match:
+
+  YEAR (col 2) --7--> TENURE (col 9) --8--> ENT_DATE (col 17) --9--> ISS_DATE (col 26)
+       --9--> CO_DATE (col 35) --4--> INFILL (col 39) --6--> DEM_OR_DES (col 45)
+       --1--> DEM_OWN_RENT (col 46) --4--> Y/N (col 50)
+
+When cross-validation fails (spacing mismatch), it indicates corruption between
+those two anchor positions.
+
+Cumulative Shift Tracking
+-------------------------
+Core strategy: A single PROBLEM column (e.g., ADDRESS) can have MULTIPLE commas,
+creating multiple extra columns from one field. We track cumulative shift at
+each anchor to handle this correctly.
+
+4-Step Defensive Recovery:
+
+  1. Find YEAR anchor (fixed at position 2 - triplet validated)
+  2. For each subsequent anchor in ANCHOR_CHAIN:
+     - Expected position = canonical_col + cumulative_shift_so_far
+     - Search forward from expected position
+     - When found: this_shift = actual_pos - canonical_col
+     - Delta shift = this_shift - previous_shift (extras between anchors)
+  3. Track WHERE shifts occur to identify which PROBLEM columns have commas
+  4. Build cleaned row: for each canonical column, use shift from nearest preceding anchor
+
+
+Output Files
+------------
+
+Godzillafilter:
+- tablea2_cleaned_godzillafilter.csv: Strictly filtered rows
+- malformed_rows_godzillafilter.csv: Rows dropped or recovered
+- acs_join_output_godzillafilter.csv: Final joined output
+
+Basicfilter:
+- tablea2_cleaned_basicfilter.csv: Only exact-column-count rows
+- malformed_rows_basicfilter.csv: All dropped rows
+- acs_join_output_basicfilter.csv: Final joined output
+
+All malformed files include: line number, jurisdiction, year, column count, reason, preview
+
+Diagnostic Output
+-----------------
+GODZILLAFILTER scripts output detailed breakdown:
+
+  Rows dropped:                   96,532 (12.3%)
+    - Triplet validation failed:     224 ( 0.03%)
+    - Non-numeric DEMO:           11,820 ( 1.50%)
+    - DEMO > 99:                     407 ( 0.05%)
+    - Date/YEAR mismatch:         84,081 (10.70%)
+        ISS_DATE mismatch:        72,101
+        ENT_DATE mismatch:         3,750
+        CO_DATE mismatch:          3,106
+        All dates empty:           5,124
+
+This breakdown helps identify:
+- ISS_DATE mismatch: Date exists but year doesn't match YEAR (potential misalignment)
+- ENT_DATE/CO_DATE mismatch: Fallback dates don't match (less common)
+- All dates empty: No date columns have values (cannot validate)
+
+Note on Development
+-------------------
+Column validators were designed by parsing the HCD APR data dictionary document
+using Claude Opus 4.5, with the goal of creating the most defensive validation
+possible for each column type.
+
+The two-layer approach (forward walking + backward cross-validation) provides
+defense in depth: even if one method fails, the other can catch errors.
+
+Date-year validation was added as a final quality check to catch rows where
+the anchor chain recovery succeeded but produced incorrect column alignment.
