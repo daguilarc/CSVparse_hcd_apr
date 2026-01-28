@@ -4,3 +4,4 @@ TableA2-ACSjoin/tablea2.csv
 **/tablea2_cleaned.csv
 **/malformed_rows.csv
 *.csv
+**/.DS_Store
