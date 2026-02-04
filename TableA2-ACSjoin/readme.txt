@@ -141,10 +141,15 @@ Step 7: Calculate reference income and affordability
   - affordability_ratio: median_home_value / ref_income
     (only calculated when both values are non-null and > 0)
 
-Step 8: Load APR permit data
-  - Reads tablea2.csv
+Step 8: Load APR permit data (GODZILLAFILTER HYBRID)
+  - HYBRID APPROACH: pandas.read_csv() for clean rows, anchor recovery for bad lines
+  - pandas handles properly quoted fields and multiline content automatically
+  - on_bad_lines callback applies anchor recovery to rows with extra columns
+  - Validates triplet (jurisdiction, county, year) for all rows
+  - Validates DEMO values (non-numeric or >999 dropped)
+  - Date-year validation: checks ISS_DATE, ENT_DATE, CO_DATE against YEAR
+  - Extracts 5 columns: JURIS_NAME, CNTY_NAME, YEAR, NO_BUILDING_PERMITS, DEM_DES_UNITS
   - Filters to permit years (2021-2025)
-  - Aggregates building permit columns into bp_total_units
   - Normalizes jurisdiction names for joining
 
 Step 9: Merge permits for places

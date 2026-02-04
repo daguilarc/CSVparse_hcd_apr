@@ -1,7 +1,14 @@
 TableA2-ACSjoin/tablea2.csv
-.DS_Store
+# * = any filename; ** = any directory depth
+**/.DS_Store
 **/tablea2.csv
 **/tablea2_cleaned.csv
 **/malformed_rows.csv
 *.csv
-**/.DS_Store
+*.png
+*.json
+
+# Cursor: ignore local/state, keep rules in version control
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**

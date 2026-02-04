@@ -10,6 +10,27 @@ import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta
 
+# APR dedup: same project (jurisdiction, county, year, location, counts) can appear multiple times and inflate totals
+APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]
+
+
+def _deduplicate_apr(df):
+    """Deduplicate APR rows on project identity. Returns (df_deduped, n_removed)."""
+    cols = [c for c in APR_DEDUP_COLS if c in df.columns]
+    if len(cols) != len(APR_DEDUP_COLS):
+        return df, 0
+    n_before = len(df)
+    df = (
+        df.copy()
+        .assign(
+            NO_BUILDING_PERMITS=pd.to_numeric(df["NO_BUILDING_PERMITS"], errors="coerce"),
+            DEM_DES_UNITS=pd.to_numeric(df["DEM_DES_UNITS"], errors="coerce"),
+        )
+        .drop_duplicates(subset=cols, keep="first")
+    )
+    return df, n_before - len(df)
+
+
 # Configuration
 NHGIS_API_BASE = "https://api.ipums.org"
 NHGIS_DATASET = "2019_2023_ACS5a"
@@ -446,11 +467,16 @@ def juris_caps(name):
     # This removes state/county suffixes that vary between data sources
     name_part = str(name).split(',')[0]
     # Fix encoding corruption and normalize Spanish characters
+    # Handle multi-encoded UTF-8: ñ → Ã± → ÃÂ± → Ã\x83Â± (occurs in Census API responses)
+    # Order matters: handle most-corrupted patterns first
     name_part = (name_part
-        .replace("±", "")                        # remove ± encoding artifact
-        .replace("Ã±", "n").replace("Ã'", "N")  # UTF-8 as Latin-1
-        .replace("Â", "")                        # encoding artifact
-        .replace("ñ", "n").replace("Ñ", "N"))   # proper characters
+        .replace("Ã\x83Â±", "n").replace("Ã\x83'", "N")  # triple-encoded UTF-8
+        .replace("ÃÂ±", "n").replace("ÃÂ'", "N")        # double-encoded UTF-8
+        .replace("Ã±", "n").replace("Ã'", "N")          # single-encoded UTF-8 as Latin-1
+        .replace("±", "").replace("Â", "").replace("Ã", "")  # encoding artifacts
+        .replace("ñ", "n").replace("Ñ", "N"))           # proper characters
+    # Remove any remaining non-ASCII bytes
+    name_part = ''.join(c if ord(c) < 128 else '' for c in name_part)
     # Remove jurisdiction suffixes and normalize to uppercase:
     # re.sub() (regex): Remove trailing lowercase suffixes (city, town, cdp, village)
     #   Pattern r'\s+(city|town|cdp|village)$': matches whitespace + lowercase suffix at end of string
@@ -481,14 +507,17 @@ def normalize_cbsaa(series):
 
 
 
-def agg_permits(df_hcd, is_county_filter, permit_years, value_col, prefix):
-    """Aggregate permit counts by jurisdiction and year, returning dataframe ready for merge.
+def agg_permits(df_hcd, row_filter, permit_years, value_col, prefix, group_col="JURIS_CLEAN"):
+    """Aggregate permit counts by group_col and year, returning dataframe ready for merge.
     
     Args:
+        row_filter: Boolean series to filter rows (or None to use all rows)
         value_col: Column to sum (e.g., "gross_permits" or "net_permits")
         prefix: Output column prefix (e.g., "permit_units" or "net_permits")
+        group_col: Column to group by (default: JURIS_CLEAN for jurisdictions, CNTY_MATCH for counties)
     """
-    return (df_hcd[is_county_filter].groupby(["JURIS_CLEAN", "YEAR"])[value_col]
+    df_filtered = df_hcd[row_filter] if row_filter is not None else df_hcd
+    return (df_filtered.groupby([group_col, "YEAR"])[value_col]
             .sum().unstack("YEAR").reindex(columns=permit_years).fillna(0).reset_index()
             .rename(columns={y: f"{prefix}_{y}" for y in permit_years}))
 
@@ -1067,367 +1096,293 @@ def find_date_position(parts, start, end):
             return i
     return None
 
-with open(apr_path, 'r', encoding='utf-8', errors='replace') as f:
-    content = f.read()
+# Step 8: Load APR data using HYBRID approach
+# - pandas read_csv handles clean rows (including properly quoted multiline fields)
+# - on_bad_lines callback handles rows with extra columns using anchor recovery
+print(f"Loading APR data: {apr_path}")
 
-# Join multi-line quoted fields by tracking quote state
-joined_lines = []
-current_line = []
-in_quote = False
-for char in content:
-    if char == '"':
-        in_quote = not in_quote
-        current_line.append(char)
-    elif char == '\n':
-        if in_quote:
-            current_line.append(' ')  # Replace newline with space inside quotes
-        else:
-            joined_lines.append(''.join(current_line))
-            current_line = []
-    else:
-        current_line.append(char)
-if current_line:
-    joined_lines.append(''.join(current_line))
-
-# Diagnostic: check if quote-joining completed properly
-if in_quote:
-    print(f"WARNING: File ended with unclosed quote - last line may be corrupted")
-
-# Get expected columns from header
-header_parts = joined_lines[0].split(',')
-expected_cols = len(header_parts)
-print(f"APR: {len(joined_lines)} lines, {expected_cols} columns expected")
-
-# Step 2: Parse joined lines (skip header at index 0)
-# HARDFILTER MODE: Drop rows that fail mandatory triplet or have non-numeric DEMO
+# Counters for statistics
 rows = []
-recovered_count = 0
+recovered_rows = []
+malformed_rows = []
 skipped_count = 0
-triplet_failed_count = 0  # Track rows dropped due to triplet validation failure
-non_numeric_demo_count = 0  # Track rows dropped due to non-numeric DEMO
-excessive_demo_count = 0  # Track rows dropped due to DEMO > 999
-# Date/YEAR mismatch breakdown
+triplet_failed_count = 0
+non_numeric_demo_count = 0
+excessive_demo_count = 0
 iss_date_mismatch_count = 0
 ent_date_mismatch_count = 0
 co_date_mismatch_count = 0
 all_dates_empty_count = 0
-malformed_rows = []  # Track rows that can't be confidently recovered
+recovered_count = 0
+bad_line_number = [0]
 
-debug_demo_values = []  # Collect (juris, year, demo_value, demo_pos, n, extra) for review
-anchor_failures = {}  # Track which anchor pairs fail cross-validation
-anchor_missing = {}   # Track which anchors are not found
-anchor_empty = {}     # Track which anchors are empty (valid but no value)
 
-for line_num, line in enumerate(joined_lines[1:], start=2):
-    if not line.strip():
-        continue
-    parts = line.split(',')
-    n = len(parts)
-    if n < 3:
+def handle_bad_line(bad_line):
+    """Process lines with extra columns using anchor recovery.
+    
+    This callback receives rows that pandas couldn't parse (extra columns).
+    We apply anchor recovery and validation, storing results in outer scope.
+    """
+    global skipped_count, triplet_failed_count, non_numeric_demo_count
+    global excessive_demo_count, iss_date_mismatch_count, ent_date_mismatch_count
+    global co_date_mismatch_count, recovered_count
+    
+    bad_line_number[0] += 1
+    n = len(bad_line)
+    expected_cols = 52
+    
+    if n <= expected_cols:
         skipped_count += 1
         malformed_rows.append({
-            'line': line_num, 'juris_name': parts[0] if parts else '', 'cnty_name': '',
-            'year': '', 'n': n, 'extra': n - expected_cols, 'reason': 'Too few columns',
-            'preview': line[:200]
+            'line': f'bad_{bad_line_number[0]}', 'juris_name': bad_line[0] if bad_line else '',
+            'cnty_name': bad_line[1] if n > 1 else '', 'year': bad_line[2] if n > 2 else '',
+            'n': n, 'extra': n - expected_cols, 'reason': f'Too few columns ({n})',
+            'preview': ','.join(bad_line[:10])
+        })
+        return None
+    
+    extra = n - expected_cols
+    
+    # Triplet validation
+    if not is_juris(bad_line[0]):
+        skipped_count += 1
+        triplet_failed_count += 1
+        malformed_rows.append({
+            'line': f'bad_{bad_line_number[0]}', 'juris_name': bad_line[0],
+            'cnty_name': bad_line[1] if n > 1 else '', 'year': bad_line[2] if n > 2 else '',
+            'n': n, 'extra': extra, 'reason': 'HARDFILTER: invalid JURIS_NAME',
+            'preview': ','.join(bad_line[:10])
+        })
+        return None
+    
+    if not is_juris(bad_line[1]):
+        skipped_count += 1
+        triplet_failed_count += 1
+        malformed_rows.append({
+            'line': f'bad_{bad_line_number[0]}', 'juris_name': bad_line[0],
+            'cnty_name': bad_line[1], 'year': bad_line[2] if n > 2 else '',
+            'n': n, 'extra': extra, 'reason': 'HARDFILTER: invalid CNTY_NAME',
+            'preview': ','.join(bad_line[:10])
+        })
+        return None
+    
+    if not is_year(bad_line[2]):
+        skipped_count += 1
+        triplet_failed_count += 1
+        malformed_rows.append({
+            'line': f'bad_{bad_line_number[0]}', 'juris_name': bad_line[0],
+            'cnty_name': bad_line[1], 'year': bad_line[2],
+            'n': n, 'extra': extra, 'reason': 'HARDFILTER: invalid YEAR',
+            'preview': ','.join(bad_line[:10])
+        })
+        return None
+    
+    juris, cnty, year = bad_line[0], bad_line[1], bad_line[2]
+    
+    # Find anchors with cumulative shift tracking
+    year_pos = 2
+    anchor_shifts, missing, empty = find_anchor_with_cumulative_shift(bad_line, n, extra, year_pos)
+    anchors = {col: pos for col, (pos, _) in anchor_shifts.items()}
+    
+    # Find PERMITS position using anchors
+    iss_date_pos = anchors.get(26)
+    ent_date_pos = anchors.get(17)
+    co_date_pos = anchors.get(35)
+    
+    permits_pos = None
+    if iss_date_pos is not None:
+        permits_pos = iss_date_pos + 1
+    elif ent_date_pos is not None:
+        permits_pos = ent_date_pos + 10
+    elif co_date_pos is not None:
+        permits_pos = co_date_pos - 8
+    else:
+        permits_shift = find_shift_at_column(bad_line, n, extra, year_pos, PERMITS_COL)
+        permits_pos = PERMITS_COL + permits_shift
+    
+    # Find DEMO position using anchors
+    col46_pos = anchors.get(46)
+    col50_pos = anchors.get(50)
+    
+    demo_pos = None
+    if col46_pos is not None and col50_pos is not None and col50_pos - col46_pos == 4:
+        demo_pos = col46_pos - 2
+    elif col46_pos is not None:
+        demo_pos = col46_pos - 2
+    elif col50_pos is not None:
+        demo_pos = col50_pos - 6
+    else:
+        demo_shift = find_shift_at_column(bad_line, n, extra, year_pos, DEMO_COL)
+        demo_pos = DEMO_COL + demo_shift
+    
+    permits = bad_line[permits_pos] if permits_pos is not None and 0 <= permits_pos < n else ""
+    demo = bad_line[demo_pos] if demo_pos is not None and 0 <= demo_pos < n else ""
+    
+    # DEMO validation
+    if is_non_numeric_demo(demo):
+        skipped_count += 1
+        non_numeric_demo_count += 1
+        malformed_rows.append({
+            'line': f'bad_{bad_line_number[0]}', 'juris_name': juris, 'cnty_name': cnty,
+            'year': year, 'n': n, 'extra': extra,
+            'reason': f'HARDFILTER: non-numeric DEMO: {demo[:50]}',
+            'preview': ','.join(bad_line[:10])
+        })
+        return None
+    
+    if is_excessive_demo(demo):
+        skipped_count += 1
+        excessive_demo_count += 1
+        malformed_rows.append({
+            'line': f'bad_{bad_line_number[0]}', 'juris_name': juris, 'cnty_name': cnty,
+            'year': year, 'n': n, 'extra': extra,
+            'reason': f'HARDFILTER: DEMO > 999: {demo}',
+            'preview': ','.join(bad_line[:10])
+        })
+        return None
+    
+    # Date-year validation using shifted positions
+    iss_pos = iss_date_pos if iss_date_pos is not None else n
+    ent_pos = ent_date_pos if ent_date_pos is not None else n
+    co_pos = co_date_pos if co_date_pos is not None else n
+    valid, reason = validate_date_year(bad_line, year, [
+        (iss_pos, iss_pos + 1, "ISS_DATE"),
+        (ent_pos, ent_pos + 1, "ENT_DATE"),
+        (co_pos, co_pos + 1, "CO_DATE")
+    ])
+    if not valid:
+        skipped_count += 1
+        if "ISS_DATE" in reason:
+            iss_date_mismatch_count += 1
+        elif "ENT_DATE" in reason:
+            ent_date_mismatch_count += 1
+        elif "CO_DATE" in reason:
+            co_date_mismatch_count += 1
+        malformed_rows.append({
+            'line': f'bad_{bad_line_number[0]}', 'juris_name': juris, 'cnty_name': cnty,
+            'year': year, 'n': n, 'extra': extra,
+            'reason': f'GODZILLAFILTER: {reason}',
+            'preview': ','.join(bad_line[:10])
+        })
+        return None
+    
+    # Recovery successful - add to rows (8 cols for dedup key; APN/address/project not available in bad-line recovery)
+    recovered_count += 1
+    recovered_rows.append([juris, cnty, year, "", "", "", permits, demo])
+    malformed_rows.append({
+        'line': f'bad_{bad_line_number[0]}', 'juris_name': juris, 'cnty_name': cnty,
+        'year': year, 'n': n, 'extra': extra,
+        'reason': f'RECOVERED (+{extra} columns)',
+        'preview': ','.join(bad_line[:10])
+    })
+    return None
+
+
+# Load with pandas - clean rows handled automatically, bad lines go to callback
+df_apr = pd.read_csv(apr_path, low_memory=False, on_bad_lines=handle_bad_line)
+expected_cols = len(df_apr.columns)
+print(f"APR: {len(df_apr):,} rows loaded by pandas, {expected_cols} columns")
+print(f"Bad lines processed by anchor recovery: {bad_line_number[0]:,}, recovered: {recovered_count:,}")
+
+# Validate clean rows from pandas and extract the 5 columns we need
+for idx, row in df_apr.iterrows():
+    juris = str(row['JURIS_NAME'])
+    cnty = str(row['CNTY_NAME'])
+    year = str(row['YEAR'])
+    permits = str(row['NO_BUILDING_PERMITS'])
+    demo = str(row['DEM_DES_UNITS'])
+    
+    # Triplet validation
+    if not is_juris(juris) or not is_juris(cnty) or not is_year(year):
+        skipped_count += 1
+        triplet_failed_count += 1
+        malformed_rows.append({
+            'line': idx + 2, 'juris_name': juris, 'cnty_name': cnty,
+            'year': year, 'n': expected_cols, 'extra': 0,
+            'reason': 'HARDFILTER: triplet validation failed',
+            'preview': f'{juris},{cnty},{year}'
         })
         continue
     
-    if n == expected_cols:
-        # HARDFILTER: Validate triplet even for normal rows
-        if not is_juris(parts[0]) or not is_juris(parts[1]) or not is_year(parts[2]):
-            skipped_count += 1
-            triplet_failed_count += 1
-            malformed_rows.append({
-                'line': line_num, 'juris_name': parts[0], 'cnty_name': parts[1],
-                'year': parts[2], 'n': n, 'extra': 0,
-                'reason': 'HARDFILTER: triplet validation failed (normal row)',
-                'preview': line[:200]
-            })
-            continue
-        juris, cnty, year = parts[0], parts[1], parts[YEAR_COL]
-        permits, demo = parts[PERMITS_COL], parts[DEMO_COL]
-        # HARDFILTER: Drop rows with non-numeric DEMO values
-        if is_non_numeric_demo(demo):
-            skipped_count += 1
-            non_numeric_demo_count += 1
-            malformed_rows.append({
-                'line': line_num, 'juris_name': juris, 'cnty_name': cnty,
-                'year': year, 'n': n, 'extra': 0,
-                'reason': f'HARDFILTER: non-numeric DEMO value: {repr(demo.strip())}',
-                'preview': line[:200]
-            })
-            continue
-        # HARDFILTER: Drop rows with DEMO > 999
-        if is_excessive_demo(demo):
-            skipped_count += 1
-            excessive_demo_count += 1
-            malformed_rows.append({
-                'line': line_num, 'juris_name': juris, 'cnty_name': cnty,
-                'year': year, 'n': n, 'extra': 0,
-                'reason': f'HARDFILTER: DEMO > 999: {demo.strip()}',
-                'preview': line[:200]
-            })
-            continue
-        # GODZILLAFILTER: Date-year validation - only check dates for permit types with non-zero counts
-        valid, reason = validate_date_year(parts, year, [
-            (ISS_DATE_COL, PERMITS_COL, "ISS_DATE"),
-            (ENT_DATE_COL, ENTITLEMENTS_COL, "ENT_DATE"),
-            (CO_DATE_COL, CO_COUNT_COL, "CO_DATE")
-        ])
-        if not valid:
-            skipped_count += 1
-            if "ISS_DATE" in reason:
-                iss_date_mismatch_count += 1
-            elif "ENT_DATE" in reason:
-                ent_date_mismatch_count += 1
-            elif "CO_DATE" in reason:
-                co_date_mismatch_count += 1
-            malformed_rows.append({
-                'line': line_num, 'juris_name': juris, 'cnty_name': cnty,
-                'year': year, 'n': n, 'extra': 0,
-                'reason': f'HARDFILTER: {reason}',
-                'preview': line[:200]
-            })
-            continue
-        debug_demo_values.append((juris, year, demo, DEMO_COL, n, 0, "normal"))
-    elif n > expected_cols:
-        extra = n - expected_cols
-        
-        # HARDFILTER: Mandatory triplet validation - JURIS_NAME, CNTY_NAME, YEAR at positions 0, 1, 2
-        # These columns never contain commas, so their positions are always exact
-        if not is_juris(parts[0]):
-            skipped_count += 1
-            triplet_failed_count += 1
-            malformed_rows.append({
-                'line': line_num, 'juris_name': parts[0], 'cnty_name': parts[1] if n > 1 else '',
-                'year': parts[2] if n > 2 else '',
-                'n': n, 'extra': extra, 'reason': 'HARDFILTER: invalid JURIS_NAME at position 0',
-                'preview': line[:200]
-            })
-            continue
-        
-        if not is_juris(parts[1]):
-            skipped_count += 1
-            triplet_failed_count += 1
-            malformed_rows.append({
-                'line': line_num, 'juris_name': parts[0], 'cnty_name': parts[1],
-                'year': parts[2] if n > 2 else '',
-                'n': n, 'extra': extra, 'reason': 'HARDFILTER: invalid CNTY_NAME at position 1',
-                'preview': line[:200]
-            })
-            continue
-        
-        if not is_year(parts[2]):
-            skipped_count += 1
-            triplet_failed_count += 1
-            malformed_rows.append({
-                'line': line_num, 'juris_name': parts[0], 'cnty_name': parts[1],
-                'year': parts[2],
-                'n': n, 'extra': extra, 'reason': 'HARDFILTER: invalid YEAR at position 2',
-                'preview': line[:200]
-            })
-            continue
-        
-        year_pos = 2  # Fixed position - JURIS_NAME/CNTY_NAME never have commas
-        juris, cnty = parts[0], parts[1]
-        year = parts[year_pos]
-        
-        # Find all anchors with cumulative shift tracking
-        anchor_shifts, missing, empty = find_anchor_with_cumulative_shift(parts, n, extra, year_pos)
-        
-        # Validate anchor spacings
-        valid_pairs, invalid_pairs, failed_info = validate_anchor_spacings(anchor_shifts)
-        
-        # Track diagnostics
-        for name1, name2, actual, expected in failed_info:
-            key = f"{name1}->{name2}"
-            anchor_failures[key] = anchor_failures.get(key, 0) + 1
-        for name in missing:
-            anchor_missing[name] = anchor_missing.get(name, 0) + 1
-        for name in empty:
-            anchor_empty[name] = anchor_empty.get(name, 0) + 1
-        
-        # Convert anchor_shifts to anchors dict for compatibility with existing code
-        anchors = {col: pos for col, (pos, _) in anchor_shifts.items()}
-        
-        # Log if anchor chain has spacing mismatches
-        if invalid_pairs > 0:
-            malformed_rows.append({
-                'line': line_num, 'juris_name': parts[0], 'cnty_name': parts[1],
-                'year': parts[year_pos], 'n': n, 'extra': extra,
-                'reason': f'Anchor chain spacing mismatch: {invalid_pairs} invalid, {valid_pairs} valid',
-                'preview': line[:200]
-            })
-        
-        # === PERMITS: Use validated anchors or fall back to date search ===
-        # Prefer anchors from chain if ISS_DATE (col 26) was found and validated
-        ent_date_pos = anchors.get(17)
-        iss_date_pos = anchors.get(26)
-        co_date_pos = anchors.get(35)
-        
-        permits_pos = None
-        permits_conf = "none"
-        
-        # Cross-validate: check if date spacings are consistent
-        ent_iss_ok = ent_date_pos is not None and iss_date_pos is not None and iss_date_pos - ent_date_pos == 9
-        iss_co_ok = iss_date_pos is not None and co_date_pos is not None and co_date_pos - iss_date_pos == 9
-        
-        if ent_iss_ok and iss_co_ok:
-            permits_pos = iss_date_pos + 1
-            permits_conf = "high"  # All three dates with correct spacing
-        elif iss_co_ok:
-            permits_pos = iss_date_pos + 1
-            permits_conf = "high-iss-co"  # Two dates with correct spacing
-        elif ent_iss_ok:
-            permits_pos = iss_date_pos + 1
-            permits_conf = "high-ent-iss"  # Two dates with correct spacing
-        elif iss_date_pos is not None:
-            permits_pos = iss_date_pos + 1
-            permits_conf = "medium-iss"  # Only ISS_DATE found
-        elif co_date_pos is not None:
-            permits_pos = co_date_pos - 8
-            permits_conf = "medium-co"  # Only CO_DATE found
-        elif ent_date_pos is not None:
-            permits_pos = ent_date_pos + 10  # ENT_DATE + 10 = PERMITS
-            permits_conf = "medium-ent"
-        else:
-            # Fallback to forward anchor walking
-            permits_shift = find_shift_at_column(parts, n, extra, year_pos, PERMITS_COL)
-            permits_pos = PERMITS_COL + permits_shift
-            permits_conf = "fallback"
-        
-        # === DEMO: Use validated anchors from chain ===
-        # Anchors 46 (Owner/Renter) and 50 (Y/N) already found and cross-validated in find_and_validate_anchors
-        col46_pos = anchors.get(46)
-        col50_pos = anchors.get(50)
-        
-        # If chain didn't find them, try forward search as fallback
-        if col46_pos is None:
-            col46_pos = find_exact_anchor(parts, DEMO_COL, min(DEMO_COL + extra + 8, n), ("OWNER", "RENTER"))
-        
-        demo_pos = None
-        demo_conf = "none"
-        
-        if col46_pos is not None and col50_pos is not None and col50_pos - col46_pos == 4:
-            demo_pos = col46_pos - 2
-            demo_conf = "high"
-        elif col46_pos is not None and col50_pos is not None:
-            # Both found but wrong spacing - log as malformed, skip DEMO extraction
-            malformed_rows.append({
-                'line': line_num, 'juris_name': juris, 'cnty_name': cnty, 'year': year,
-                'n': n, 'extra': extra, 
-                'reason': f'DEMO anchor spacing mismatch: col46@{col46_pos}, col50@{col50_pos}, diff={col50_pos-col46_pos} (expected 4)',
-                'preview': line[:200]
-            })
-            demo_pos = None
-            demo_conf = "failed"
-        elif col46_pos is not None:
-            demo_pos = col46_pos - 2
-            demo_conf = "medium-46"
-        elif col50_pos is not None:
-            demo_pos = col50_pos - 6
-            demo_conf = "medium-50"
-        else:
-            # No anchors found - log as malformed, use fallback
-            demo_shift = find_shift_at_column(parts, n, extra, year_pos, DEMO_COL)
-            demo_pos = DEMO_COL + demo_shift
-            demo_conf = "fallback"
-            malformed_rows.append({
-                'line': line_num, 'juris_name': juris, 'cnty_name': cnty, 'year': year,
-                'n': n, 'extra': extra,
-                'reason': f'No DEMO backward anchors found, using fallback shift={demo_shift}',
-                'preview': line[:200]
-            })
-        
-        # Skip row if DEMO confidence failed (anchor mismatch)
-        if demo_conf == "failed":
-            skipped_count += 1
-            continue
-        
-        permits = parts[permits_pos] if permits_pos is not None and 0 <= permits_pos < n else ""
-        demo = parts[demo_pos] if demo_pos is not None and 0 <= demo_pos < n else ""
-        
-        # HARDFILTER: Drop rows with non-numeric DEMO values
-        if is_non_numeric_demo(demo):
-            skipped_count += 1
-            non_numeric_demo_count += 1
-            malformed_rows.append({
-                'line': line_num, 'juris_name': juris, 'cnty_name': cnty,
-                'year': year, 'n': n, 'extra': extra,
-                'reason': f'HARDFILTER: non-numeric DEMO value: {repr(demo.strip())}',
-                'preview': line[:200]
-            })
-            continue
-        # HARDFILTER: Drop rows with DEMO > 999
-        if is_excessive_demo(demo):
-            skipped_count += 1
-            excessive_demo_count += 1
-            malformed_rows.append({
-                'line': line_num, 'juris_name': juris, 'cnty_name': cnty,
-                'year': year, 'n': n, 'extra': extra,
-                'reason': f'HARDFILTER: DEMO > 999: {demo.strip()}',
-                'preview': line[:200]
-            })
-            continue
-        # GODZILLAFILTER: Date-year validation using shifted positions (count is 1 after date)
-        iss_pos = iss_date_pos if iss_date_pos is not None else n
-        ent_pos = ent_date_pos if ent_date_pos is not None else n
-        co_pos = co_date_pos if co_date_pos is not None else n
-        valid, reason = validate_date_year(parts, year, [
-            (iss_pos, iss_pos + 1, "ISS_DATE"),
-            (ent_pos, ent_pos + 1, "ENT_DATE"),
-            (co_pos, co_pos + 1, "CO_DATE")
-        ])
-        if not valid:
-            skipped_count += 1
-            if "ISS_DATE" in reason:
-                iss_date_mismatch_count += 1
-            elif "ENT_DATE" in reason:
-                ent_date_mismatch_count += 1
-            elif "CO_DATE" in reason:
-                co_date_mismatch_count += 1
-            malformed_rows.append({
-                'line': line_num, 'juris_name': juris, 'cnty_name': cnty,
-                'year': year, 'n': n, 'extra': extra,
-                'reason': f'GODZILLAFILTER: {reason}',
-                'preview': line[:200]
-            })
-            continue
-        
-        debug_demo_values.append((juris, year, demo, demo_pos, n, extra, demo_conf))
-        recovered_count += 1
-    else:
+    # DEMO validation
+    if is_non_numeric_demo(demo):
         skipped_count += 1
+        non_numeric_demo_count += 1
         malformed_rows.append({
-            'line': line_num, 'juris_name': parts[0], 'cnty_name': parts[1] if len(parts) > 1 else '',
-            'year': parts[2] if len(parts) > 2 else '',
-            'n': n, 'extra': n - expected_cols, 'reason': 'Fewer columns than expected',
-            'preview': line[:200]
+            'line': idx + 2, 'juris_name': juris, 'cnty_name': cnty,
+            'year': year, 'n': expected_cols, 'extra': 0,
+            'reason': f'HARDFILTER: non-numeric DEMO: {demo[:50]}',
+            'preview': f'{juris},{cnty},{year}'
         })
         continue
-    rows.append([juris, cnty, year, permits, demo])
+    
+    if is_excessive_demo(demo):
+        skipped_count += 1
+        excessive_demo_count += 1
+        malformed_rows.append({
+            'line': idx + 2, 'juris_name': juris, 'cnty_name': cnty,
+            'year': year, 'n': expected_cols, 'extra': 0,
+            'reason': f'HARDFILTER: DEMO > 999: {demo}',
+            'preview': f'{juris},{cnty},{year}'
+        })
+        continue
+    
+    # Date-year validation using column names
+    bp_issue_dt = str(row.get('BP_ISSUE_DT1', ''))
+    ent_approve_dt = str(row.get('ENT_APPROVE_DT1', ''))
+    co_issue_dt = str(row.get('CO_ISSUE_DT1', ''))
+    no_permits = safe_int(permits)
+    no_entitlements = safe_int(str(row.get('NO_ENTITLEMENTS', '')))
+    no_cos = safe_int(str(row.get('NO_COs', '')))
+    
+    # Check each date only if corresponding count > 0
+    date_year_failed = False
+    fail_reason = None
+    if no_permits > 0:
+        date_year = extract_year_from_date(bp_issue_dt)
+        if date_year and date_year != year:
+            date_year_failed = True
+            fail_reason = "ISS_DATE mismatch"
+            iss_date_mismatch_count += 1
+    if not date_year_failed and no_entitlements > 0:
+        date_year = extract_year_from_date(ent_approve_dt)
+        if date_year and date_year != year:
+            date_year_failed = True
+            fail_reason = "ENT_DATE mismatch"
+            ent_date_mismatch_count += 1
+    if not date_year_failed and no_cos > 0:
+        date_year = extract_year_from_date(co_issue_dt)
+        if date_year and date_year != year:
+            date_year_failed = True
+            fail_reason = "CO_DATE mismatch"
+            co_date_mismatch_count += 1
+    
+    if date_year_failed:
+        skipped_count += 1
+        malformed_rows.append({
+            'line': idx + 2, 'juris_name': juris, 'cnty_name': cnty,
+            'year': year, 'n': expected_cols, 'extra': 0,
+            'reason': f'GODZILLAFILTER: {fail_reason}',
+            'preview': f'{juris},{cnty},{year}'
+        })
+        continue
+    
+    # Append in APR_DEDUP_COLS order: JURIS_NAME, CNTY_NAME, YEAR, APN, STREET_ADDRESS, PROJECT_NAME, NO_BUILDING_PERMITS, DEM_DES_UNITS
+    apn = str(row.get("APN", "")) if pd.notna(row.get("APN")) else ""
+    street = str(row.get("STREET_ADDRESS", "")) if pd.notna(row.get("STREET_ADDRESS")) else ""
+    project = str(row.get("PROJECT_NAME", "")) if pd.notna(row.get("PROJECT_NAME")) else ""
+    rows.append([juris, cnty, year, apn, street, project, permits, demo])
 
-# Summary counts by confidence level
-conf_counts = {}
-suspicious_count, non_numeric_count = 0, 0
-for entry in debug_demo_values:
-    juris, year, demo, demo_pos, n, extra, demo_conf = entry
-    conf_counts[demo_conf] = conf_counts.get(demo_conf, 0) + 1
-    try:
-        demo_int = int(float(demo)) if demo.strip() else 0
-        if demo_int > 100:
-            suspicious_count += 1
-    except ValueError:
-        if demo.strip():
-            non_numeric_count += 1
+# Combine clean rows with recovered rows
+rows.extend(recovered_rows)
 
-# Calculate total rows processed (before filtering)
-total_data_lines = len(joined_lines) - 1  # Exclude header
+# Calculate totals
+total_data_lines = len(df_apr) + bad_line_number[0]
 total_kept = len(rows)
 
-# HARDFILTER statistics
+# GODZILLAFILTER statistics (HYBRID)
 print(f"\n{'='*70}")
-print(f"HARDFILTER STATISTICS")
+print(f"GODZILLAFILTER STATISTICS (HYBRID)")
 print(f"{'='*70}")
 print(f"Total data rows processed: {total_data_lines:,}")
 print(f"Rows kept: {total_kept:,} ({100*total_kept/total_data_lines:.2f}%)")
@@ -1452,7 +1407,15 @@ if malformed_rows:
     df_malformed.to_csv(malformed_path, index=False)
     print(f"\nMalformed rows exported: {malformed_path}")
 
-df_hcd = pd.DataFrame(rows, columns=["JURIS_NAME", "CNTY_NAME", "YEAR", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"])
+# Build 8-column DataFrame for deduplication (same project can appear multiple times and inflate totals)
+df_apr_clean = pd.DataFrame(rows, columns=APR_DEDUP_COLS)
+df_apr_clean, n_dup = _deduplicate_apr(df_apr_clean)
+if n_dup > 0:
+    pct_dedup = 100 * n_dup / (len(df_apr_clean) + n_dup)
+    print(f"APR deduplication: removed {n_dup:,} duplicate rows ({pct_dedup:.1f}% of pre-dedup total)")
+
+# Select 5 columns for permit aggregation
+df_hcd = df_apr_clean[["JURIS_NAME", "CNTY_NAME", "YEAR", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]].copy()
 df_hcd["YEAR"] = pd.to_numeric(df_hcd["YEAR"], errors="coerce")
 df_hcd = df_hcd[df_hcd["YEAR"].isin(permit_years)]
 
@@ -1468,7 +1431,8 @@ df_hcd["net_permits"] = df_hcd["NO_BUILDING_PERMITS"] - df_hcd["DEM_DES_UNITS"]
 
 df_hcd["JURIS_CLEAN"] = df_hcd["JURIS_NAME"].apply(juris_caps)
 # Normalize county name for matching (uppercase, no trailing spaces)
-df_hcd["CNTY_CLEAN"] = df_hcd["CNTY_NAME"].astype(str).str.strip().str.upper()
+df_hcd["CNTY_CLEAN"] = df_hcd["CNTY_NAME"].apply(lambda x: juris_caps(x) if pd.notna(x) else "")
+df_hcd["CNTY_MATCH"] = df_hcd["CNTY_CLEAN"] + " COUNTY"
 df_hcd["is_county"] = df_hcd["JURIS_CLEAN"].str.contains("COUNTY", case=False, na=False)
 
 # Keywords to identify unincorporated CDPs in APR data
@@ -1641,14 +1605,14 @@ if county_home_cols and county_pop_cols and "county" in df_county.columns:
     # Efficient condition: check null first to avoid unnecessary > 0 comparison on null values
     df_county_rows["affordability_ratio"] = afford_ratio(df_county_rows, "ref_income")
     
-    # Merge county-level APR permit data
+    # Merge county-level APR permit data: sum ALL projects in each county by CNTY_NAME
     # Gross permits first
-    county_gross = agg_permits(df_hcd, df_hcd["is_county"], permit_years, "gross_permits", "permit_units")
+    county_gross = agg_permits(df_hcd, None, permit_years, "gross_permits", "permit_units", group_col="CNTY_MATCH")
     county_join_set = set(df_county_rows["JURISDICTION"].dropna().astype(str))
-    permit_join_set = set(county_gross["JURIS_CLEAN"].dropna().astype(str))
+    permit_join_set = set(county_gross["CNTY_MATCH"].dropna().astype(str))
     overlap = county_join_set & permit_join_set
-    print(f"  County permit merge - County JURISDICTIONs: {len(county_join_set)}, "
-          f"Permit JURIS_CLEANs: {len(permit_join_set)}, Overlap: {len(overlap)}")
+    print(f"  County permit merge (all projects in county) - County JURISDICTIONs: {len(county_join_set)}, "
+          f"Permit CNTY_MATCHs: {len(permit_join_set)}, Overlap: {len(overlap)}")
     if len(overlap) == 0 and len(county_join_set) > 0:
         print(f"  WARNING: No county name overlap! Sample county names: {list(county_join_set)[:5]}, "
               f"Sample permit names: {list(permit_join_set)[:5]}")
@@ -1718,6 +1682,13 @@ df_final = df_final[
     + demo_cols + ["total_demolitions"] + demo_rate_cols + ["avg_annual_demo_rate"]  # demolitions
     + net_permit_cols + ["total_net_permits"] + net_rate_cols + ["avg_annual_net_rate"]  # net permits
 ].sort_values(["geography_type", "JURISDICTION"]).reset_index(drop=True)
+
+# San Francisco city-county check: should appear in both City and County geography_types
+sf_check = df_final[df_final['JURISDICTION'].str.contains('SAN FRANCISCO', case=False, na=False)]
+print(f"\nSan Francisco city-county check:")
+for geo_type in ['City', 'County']:
+    sf_geo = sf_check[sf_check['geography_type'] == geo_type]
+    print(f"  {geo_type}: {len(sf_geo)} rows - {sf_geo['JURISDICTION'].tolist() if len(sf_geo) > 0 else 'MISSING'}")
 
 print("\nSample output:")
 print(df_final[["JURISDICTION", "affordability_ratio", "total_permit_units", "total_demolitions", "total_net_permits"]].head(10))
