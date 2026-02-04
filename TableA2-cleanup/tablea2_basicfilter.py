@@ -63,10 +63,8 @@ def extract_year_from_date(val):
     if '-' in v and len(v) >= 10 and v[:4].isdigit():
         return int(v[:4])
     # Fallback format: MM/DD/YYYY
-    if '/' in v:
-        parts = v.split('/')
-        if len(parts) == 3 and len(parts[2]) == 4 and parts[2].isdigit():
-            return int(parts[2])
+    if '/' in v and len(parts := v.split('/')) == 3 and len(parts[2]) == 4 and parts[2].isdigit():
+        return int(parts[2])
     return None
 
 
