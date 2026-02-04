@@ -1,0 +1,228 @@
+California HCD APR TABLE A2 ROW CLEANUP DOCUMENTATION
+=========================
+
+The APR Table A2 CSV file (tablea2.csv) has data quality issues. The cleanup method
+used is BASICFILTER (tablea2_basicfilter.py), described below.
+
+Data Issues
+-----------
+1.. DUPLICATE ROWS (same project reported multiple times)
+   The same project (same jurisdiction, county, year, location, and permit/demo counts)
+   can appear on multiple rows and inflate jurisdiction totals (e.g. Folsom).
+   Fix: After date-year (and year) validation, BASICFILTER deduplicates on: JURIS_NAME, CNTY_NAME, YEAR, APN, STREET_ADDRESS, PROJECT_NAME,
+        NO_BUILDING_PERMITS, DEM_DES_UNITS. One row per unique combination is kept (first).
+        Scripts print removed count and % of pre-dedup total when duplicates are dropped.
+
+2. MULTI-LINE QUOTED FIELDS
+   Text fields containing newlines inside quotes split across multiple lines.
+   Fix: pandas.read_csv() handles this automatically.
+
+3. EXTRA COMMAS IN TEXT FIELDS  
+   Text fields containing unquoted commas create extra columns.
+   Problem columns (most likely to contain unquoted commas): 5, 6, 38, 40, 42, 49, 51
+   Fix: pandas.read_csv() handles quoted commas; unquoted commas cause
+        misaligned rows that skip validation (kept but not validated).
+
+tablea2_basicfilter.py features
+--------------------------------
+- Uses pandas.read_csv() for standard CSV parsing (handles quoted fields automatically)
+- NO column count filtering - keeps all rows pandas can parse
+- No validation of jurisdiction/county/year or DEMO values
+- Date-year validation only: checks ISS_DATE, ENT_DATE, CO_DATE against YEAR column
+- Matches HCD dashboard logic: only excludes records where activity date ≠ APR year
+- Row deduplication: after date-year and year filter, drops duplicate rows on project identity (see Data Issues #0)
+- Misaligned rows (from unquoted commas) skip validation but are kept
+- Expected data loss: ~10-12% (date mismatches only); additional rows removed by dedup (~2-3% typical)
+
+tl;dr: Simple pandas parsing with date-year validation only. This follows HCD's stated
+  methodology: "HCD does not display data reported outside of the APR year."
+
+Date-Year Validation
+--------------------
+To match HCD dashboard logic, the year extracted from date columns must match
+the YEAR column value. Validation is conditional on permit counts:
+
+  BP_ISSUE_DT1 (col 26) checked if NO_BUILDING_PERMITS (col 27) > 0
+  ENT_APPROVE_DT1 (col 17) checked if NO_ENTITLEMENTS (col 18) > 0
+  CO_ISSUE_DT1 (col 35) checked if NO_OTHER_FORMS_OF_READINESS (col 36) > 0
+
+Conditional logic:
+  - For each permit type with non-zero count, the corresponding date year must match YEAR
+  - If permit count is 0 or empty, that date is not validated
+  - If all permit counts are 0, the row passes (no dates to validate)
+
+This matches HCD's stated methodology:
+  "HCD does not display data reported outside of the APR year. For example, a building
+   permit reported on the 2021 APR with a date that did not occur in 2021 will not
+   be displayed."
+
+Column Schema (parsed from HCD data dictionary using Claude Opus 4.5)
+---------------------------------------------------------------------
+The data dictionary was parsed into defensive column validators:
+
+  0-1:  JURIS_NAME, CNTY_NAME - text, no commas
+  2:    YEAR - int (2018-2024)
+  3-4:  APNs - digits and dashes only
+  5:    STREET_ADDRESS - PROBLEM (can have commas)
+  6:    PROJECT_NAME - PROBLEM (can have commas)
+  7:    JURIS_TRACKING_ID - digits/dashes
+  8:    UNIT_CAT - short string, no commas
+  9:    TENURE_DESC - "Owner" or "Renter" only
+  10-16: Income tier unit counts (ints)
+  17:   ENT_DATE - DATE ANCHOR (used for year validation fallback)
+  18:   NO_ENTITLEMENTS (int) - first int after ENT_DATE
+  19-25: Income tier unit counts (ints)
+  26:   ISS_DATE - PRIMARY DATE ANCHOR (used for year validation)
+  27:   NO_BUILDING_PERMITS (int) - PERMITS_COL, first int after ISS_DATE
+  28-34: Income tier unit counts (ints)
+  35:   CO_DATE - DATE ANCHOR (used for year validation fallback)
+  36-37: Unit counts (ints)
+  38:   APPROVE_SB35 - PROBLEM (can have commas)
+  39:   INFILL_UNITS - Y/N/Yes/No only
+  40:   FIN_ASSIST_NAME - PROBLEM (can have commas)
+  41:   DR_TYPE - short string, no commas
+  42:   NO_FA_DR - PROBLEM (can have commas)
+  43:   TERM_AFF_DR (int)
+  44:   DEM_DES_UNITS (int) - DEMO_COL, NOT a year (2018-2024), max 99
+  45:   DEM_OR_DES_UNITS - no commas or quotes
+  46:   DEM_DES_UNITS_OWN_RENT - "Owner" or "Renter" only
+  47:   DENSITY_BONUS_TOTAL (float/int)
+  48:   DENSITY_BONUS_NUMBER_OTHER_INCENTIVES (int)
+  49:   DENSITY_BONUS_INCENTIVES - PROBLEM (can have commas)
+  50:   DENSITY_BONUS_RECEIVE_REDUCTION - Y/N/Yes/No only
+  51:   NOTES - PROBLEM (can have commas)
+
+Date Format Handling
+--------------------
+Dates are parsed with format fallback:
+  Primary format:  YYYY-MM-DD (e.g., 2021-03-15)
+  Fallback format: MM/DD/YYYY (e.g., 03/15/2021)
+
+The year is extracted for validation against the YEAR column.
+
+
+Row Deduplication
+-----------------
+After validation, BASICFILTER deduplicates on project identity so the same project is
+not counted multiple times. Key columns: JURIS_NAME, CNTY_NAME, YEAR, APN, STREET_ADDRESS,
+PROJECT_NAME, NO_BUILDING_PERMITS, DEM_DES_UNITS. Numeric permit/demo columns are coerced
+before comparison. When duplicates are removed, the script prints the count and the
+percentage of the pre-dedup total (e.g. "removed 17,752 duplicate rows (2.6% of pre-dedup total)").
+Output CSV files contain the deduplicated rows.
+
+Output Files
+------------
+- tablea2_cleaned_basicfilter.csv: All rows passing date-year (and year) validation, then deduplicated
+- malformed_rows_basicfilter.csv: Rows dropped for date-year mismatch
+
+Diagnostic Output
+-----------------
+The script prints kept/dropped counts. Date mismatch breakdown identifies:
+- ISS_DATE mismatch: BP_ISSUE_DT1 year doesn't match YEAR (when NO_BUILDING_PERMITS > 0)
+- ENT_DATE mismatch: ENT_APPROVED_DT1 year doesn't match YEAR (when NO_ENTITLEMENTS > 0)
+- CO_DATE mismatch: CO_ISSUE_DT1 year doesn't match YEAR (when NO_COs > 0)
+
+
+
+BASICFILTER Decision Tree
+-------------------------
+For each row (parsed by pandas.read_csv):
+
+  Date-year validation:
+    |
+    +-- For each permit type (BP, ENT, CO):
+    |     |
+    |     +-- Count column numeric and > 0?
+    |           |
+    |           +-- NO (0, empty, or non-numeric) --> skip this date check
+    |           |
+    |           +-- YES --> Date year == YEAR?
+    |                         |
+    |                         +-- NO --> DROP (date mismatch)
+    |                         |
+    |                         +-- YES --> continue
+    |
+    +-- All checks passed (or skipped) --> KEEP
+
+  Then: Deduplicate kept rows on project identity (JURIS_NAME, CNTY_NAME, YEAR, APN,
+        STREET_ADDRESS, PROJECT_NAME, NO_BUILDING_PERMITS, DEM_DES_UNITS); output is deduplicated.
+
+Note: Rows with misaligned columns (from unquoted commas that pandas can't fix)
+will have non-numeric values in count columns, causing validation to be skipped.
+These rows are kept but not validated.
+
+
+DIAGNOSTICS: Feb 4, 2026
+
+======================================================================
+Total rows loaded:                   786,023
+
+  Rows kept:                         685,596 ( 87.2%)
+  ─────────────────────────────────────────────
+  Rows dropped (date mismatch):      100,427 ( 12.8%)
+        ISS_DATE mismatch:            72,825
+        ENT_DATE mismatch:            37,382
+        CO_DATE mismatch:             15,500
+======================================================================
+    - Extra columns:                 250,762
+ 
+
+
+
+City of Los Angeles Comparison to HCD Dashboard
+
+
+
+Before De-duplication:
+
+LOS ANGELES PERMIT BASIC FILTER STATISTICS:
+
+LA rows loaded:                       80,443
+LA rows kept:                         53,280 (66.2%)
+Dropped (date mismatch):              27,163 (33.8%)
+        ISS_DATE mismatch:            25,960
+        ENT_DATE mismatch:                 0
+        CO_DATE mismatch:              1,303
+======================================================================
+
+LOS ANGELES PERMIT COMPARISON: Calculated vs HCD Dashboard
+======================================================================
+Year          Calculated   HCD Dashboard      Difference
+-------- --------------- --------------- ---------------
+2021              19,323          19,629            -306
+2022              23,242          22,621            +621
+2023              18,362          18,622            -260
+2024              17,169          17,195             -26
+-------- --------------- --------------- ---------------
+TOTAL             78,096          78,067             +29
+======================================================================
+
+Calculated is +0.0% higher than HCD Dashboard
+
+
+
+After de-duplication:
+
+BASICFILTER STATISTICS (Los Angeles only)
+======================================================================
+LA rows loaded:                       80,443
+LA rows kept:                         52,652 (65.5%)
+Dropped (date mismatch):              27,163 (33.8%)
+        ISS_DATE mismatch:            25,960
+        ENT_DATE mismatch:                 0
+        CO_DATE mismatch:              1,303
+======================================================================
+
+LOS ANGELES PERMIT COMPARISON: Calculated vs HCD Dashboard
+======================================================================
+Year          Calculated   HCD Dashboard      Difference
+-------- --------------- --------------- ---------------
+2021              19,273          19,629            -356
+2022              23,064          22,621            +443
+2023              18,242          18,622            -380
+2024              16,944          17,195            -251
+-------- --------------- --------------- ---------------
+TOTAL             77,523          78,067            -544
+======================================================================
+
+Calculated is -0.7% lower than HCD Dashboard

@@ -1,0 +1,15 @@
+---
+description: OMNI rule — structure, efficiency, accumulate-then-apply
+alwaysApply: true
+---
+
+# OMNI Rule
+
+- **Data flow**: Map what enters, transforms, and exits. Reuse structures; avoid throwaway intermediates.
+- **Nesting**: Max 3 levels. Extract helpers or use early returns.
+- **Efficiency**: Prefer O(1) where it matters. Loops: compute in the loop; **mutate once after** (accumulate results, then apply in one step). Do not repeatedly mutate shared state (e.g. adding DataFrame columns one-by-one).
+- **Accumulate then apply**: When building mutations in a loop, read from the accumulator for later steps—not from the original structure until the mutation has been applied.
+- **Repetition**: Same operation on multiple variables → loop, function, or vectorized op. No copy-paste blocks that differ only by name.
+- **Imports**: Global. No dead code.
+- **Defensive code**: Only where the condition is possible given actual data flow.
+- **Verification**: After each change, check rules and intermediate state; fix violations before finishing.
