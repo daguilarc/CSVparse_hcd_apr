@@ -1,5 +1,6 @@
 TableA2-ACSjoin/tablea2.csv
 # * = any filename; ** = any directory depth
+**/__pycache__/
 **/.DS_Store
 **/tablea2.csv
 **/tablea2_cleaned.csv
