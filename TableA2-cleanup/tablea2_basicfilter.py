@@ -14,6 +14,7 @@ Outputs:
 - malformed_rows_basicfilter.csv: Rows dropped for date-year mismatch
 """
 
+import numpy as np
 import pandas as pd
 from pathlib import Path
 
@@ -98,21 +99,37 @@ df = pd.read_csv(apr_path, low_memory=False, on_bad_lines='warn')
 print(f"Rows loaded: {len(df):,}, Columns: {len(df.columns)}")
 
 # Step 2: Date-year validation
-# Check each permit type: ISS_DATE, ENT_DATE, CO_DATE
-iss_mismatch = df.apply(lambda r: check_date_year_mismatch(r, YEAR_COL, ISS_DATE_COL, PERMITS_COL), axis=1)
-ent_mismatch = df.apply(lambda r: check_date_year_mismatch(r, YEAR_COL, ENT_DATE_COL, ENTITLEMENTS_COL), axis=1)
-co_mismatch = df.apply(lambda r: check_date_year_mismatch(r, YEAR_COL, CO_DATE_COL, CO_COUNT_COL), axis=1)
+# One row pass: check all three permit types (ISS_DATE, ENT_DATE, CO_DATE)
+_DATE_CHECK_CONFIG = [
+    (ISS_DATE_COL, PERMITS_COL, "ISS_DATE mismatch"),
+    (ENT_DATE_COL, ENTITLEMENTS_COL, "ENT_DATE mismatch"),
+    (CO_DATE_COL, CO_COUNT_COL, "CO_DATE mismatch"),
+]
+
+def _row_date_mismatches(row):
+    """Return (iss_mismatch, ent_mismatch, co_mismatch) for one row."""
+    return tuple(
+        check_date_year_mismatch(row, YEAR_COL, date_col, count_col)
+        for date_col, count_col, _ in _DATE_CHECK_CONFIG
+    )
+
+_mismatch_tuples = df.apply(_row_date_mismatches, axis=1)
+iss_mismatch = _mismatch_tuples.apply(lambda t: t[0])
+ent_mismatch = _mismatch_tuples.apply(lambda t: t[1])
+co_mismatch = _mismatch_tuples.apply(lambda t: t[2])
 
 # Combine: drop if ANY date mismatches
 any_mismatch = iss_mismatch | ent_mismatch | co_mismatch
 df_after_mismatch = df[~any_mismatch].copy()
 df_dropped_mismatch = df[any_mismatch].copy()
 
-# Add mismatch reason to dropped rows
-df_dropped_mismatch['mismatch_reason'] = ''
-df_dropped_mismatch.loc[iss_mismatch[any_mismatch], 'mismatch_reason'] = 'ISS_DATE mismatch'
-df_dropped_mismatch.loc[ent_mismatch[any_mismatch] & (df_dropped_mismatch['mismatch_reason'] == ''), 'mismatch_reason'] = 'ENT_DATE mismatch'
-df_dropped_mismatch.loc[co_mismatch[any_mismatch] & (df_dropped_mismatch['mismatch_reason'] == ''), 'mismatch_reason'] = 'CO_DATE mismatch'
+# Assign mismatch reason once: first matching type (ISS, then ENT, then CO)
+_reasons = pd.Series(
+    np.where(iss_mismatch[any_mismatch].values, _DATE_CHECK_CONFIG[0][2],
+    np.where(ent_mismatch[any_mismatch].values, _DATE_CHECK_CONFIG[1][2], _DATE_CHECK_CONFIG[2][2])),
+    index=df_dropped_mismatch.index,
+)
+df_dropped_mismatch = df_dropped_mismatch.assign(mismatch_reason=_reasons)
 
 # Step 3: Filter to valid years (2018-2024 = APR data range)
 VALID_YEARS = [2018, 2019, 2020, 2021, 2022, 2023, 2024]
