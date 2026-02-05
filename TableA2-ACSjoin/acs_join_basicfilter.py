@@ -780,20 +780,36 @@ print(f"Loading APR data: {apr_path}")
 df_apr = pd.read_csv(apr_path, low_memory=False, on_bad_lines='warn')
 print(f"APR: {len(df_apr):,} rows loaded, {len(df_apr.columns)} columns")
 
-# Date-year validation
-iss_mismatch = df_apr.apply(lambda r: check_date_year_mismatch_row(r, 'YEAR', 'BP_ISSUE_DT1', 'NO_BUILDING_PERMITS'), axis=1)
-ent_mismatch = df_apr.apply(lambda r: check_date_year_mismatch_row(r, 'YEAR', 'ENT_APPROVE_DT1', 'NO_ENTITLEMENTS'), axis=1)
-co_mismatch = df_apr.apply(lambda r: check_date_year_mismatch_row(r, 'YEAR', 'CO_ISSUE_DT1', 'NO_OTHER_FORMS_OF_READINESS'), axis=1)
+# Date-year validation: one row pass, config-driven (omni-rule: no repetition, mutate once)
+_APR_DATE_CHECK_CONFIG = [
+    ('BP_ISSUE_DT1', 'NO_BUILDING_PERMITS', 'ISS_DATE mismatch'),
+    ('ENT_APPROVE_DT1', 'NO_ENTITLEMENTS', 'ENT_DATE mismatch'),
+    ('CO_ISSUE_DT1', 'NO_OTHER_FORMS_OF_READINESS', 'CO_DATE mismatch'),
+]
+
+def _row_date_mismatches_apr(row):
+    """Return (iss_mismatch, ent_mismatch, co_mismatch) for one APR row."""
+    return tuple(
+        check_date_year_mismatch_row(row, 'YEAR', date_col, count_col)
+        for date_col, count_col, _ in _APR_DATE_CHECK_CONFIG
+    )
+
+_mismatch_tuples = df_apr.apply(_row_date_mismatches_apr, axis=1)
+iss_mismatch = _mismatch_tuples.apply(lambda t: t[0])
+ent_mismatch = _mismatch_tuples.apply(lambda t: t[1])
+co_mismatch = _mismatch_tuples.apply(lambda t: t[2])
 
 any_mismatch = iss_mismatch | ent_mismatch | co_mismatch
 df_apr_clean = df_apr[~any_mismatch].copy()
 df_apr_dropped = df_apr[any_mismatch].copy()
 
-# Add mismatch reason to dropped rows
-df_apr_dropped['mismatch_reason'] = ''
-df_apr_dropped.loc[iss_mismatch[any_mismatch], 'mismatch_reason'] = 'ISS_DATE mismatch'
-df_apr_dropped.loc[ent_mismatch[any_mismatch] & (df_apr_dropped['mismatch_reason'] == ''), 'mismatch_reason'] = 'ENT_DATE mismatch'
-df_apr_dropped.loc[co_mismatch[any_mismatch] & (df_apr_dropped['mismatch_reason'] == ''), 'mismatch_reason'] = 'CO_DATE mismatch'
+# Assign mismatch reason once: first matching type (ISS, then ENT, then CO)
+_reasons = pd.Series(
+    np.where(iss_mismatch[any_mismatch].values, _APR_DATE_CHECK_CONFIG[0][2],
+    np.where(ent_mismatch[any_mismatch].values, _APR_DATE_CHECK_CONFIG[1][2], _APR_DATE_CHECK_CONFIG[2][2])),
+    index=df_apr_dropped.index,
+)
+df_apr_dropped = df_apr_dropped.assign(mismatch_reason=_reasons)
 
 # Statistics
 total_rows = len(df_apr)
