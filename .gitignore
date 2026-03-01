@@ -8,6 +8,8 @@ TableA2-ACSjoin/tablea2.csv
 *.csv
 *.png
 *.json
+*.zip
+*.xlsx
 
 # Cursor: ignore local/state, keep rules in version control
 .cursor/*

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract top 20 DB owner projects by unit count (all years)."""
+"""Extract top 50 DB owner projects by unit count (all years)."""
 
 import pandas as pd
 from pathlib import Path
@@ -25,13 +25,13 @@ df['NO_BUILDING_PERMITS'] = pd.to_numeric(df['NO_BUILDING_PERMITS'], errors='coe
 db_owner = df[df['has_db'] & df['is_owner']].copy()
 print(f"  DB owner rows: {len(db_owner):,}")
 
-# Sort by unit count descending, take top 20
-top20 = db_owner.nlargest(20, 'NO_BUILDING_PERMITS')
+# Sort by unit count descending, take top 50
+top50 = db_owner.nlargest(50, 'NO_BUILDING_PERMITS')
 
 # Output CSV with all columns
-out_path = OUTPUT_DIR / "top20_db_owner_projects.csv"
-top20.to_csv(out_path, index=False)
+out_path = OUTPUT_DIR / "top50_db_owner_projects.csv"
+top50.to_csv(out_path, index=False)
 
-print(f"\nTop 20 DB owner projects by unit count:")
+print(f"\nTop 50 DB owner projects by unit count:")
 print(f"  Output: {out_path}")
-print(f"\n{top20[['YEAR', 'JURIS_NAME', 'CNTY_NAME', 'NO_BUILDING_PERMITS', 'PROJECT_NAME']].to_string(index=False)}")
+print(f"\n{top50[['YEAR', 'JURIS_NAME', 'CNTY_NAME', 'NO_BUILDING_PERMITS', 'PROJECT_NAME']].to_string(index=False)}")

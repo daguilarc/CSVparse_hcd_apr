@@ -1,30 +1,13 @@
 #!/usr/bin/env python3
 """Generate charts from BASICFILTER cleaned APR data.
 
-Creates 20 charts:
-1. permits_builds_total.png - Building permits vs completions (net of demolitions)
-2a. tenure_total_cos.png - Completions by tenure type (Owner/Rental)
-2b. tenure_total_bp.png - Building permits by tenure type (Owner/Rental)
-3a. db_vs_inc_cos.png - Completions by deed restriction type (DB vs INC)
-3b. db_vs_inc_bp.png - Building permits by deed restriction type (DB vs INC)
-4a. income_permits.png - Affordable permits by income and tenure (solid=For-Sale, dashed=Rental)
-4b. income_cos.png - Affordable completions by income and tenure
-5. dr_permits.png - Affordable permits by income tier and deed restriction
-6. dr_cos.png - Affordable completions by income tier and deed restriction
-5c. db_ownr_dr_permits.png - Density Bonus For-Sale building permits by income tier and DR
-5d. db_ownr_dr_cos.png - Density Bonus For-Sale completions by income tier and DR
-5e. db_rent_dr_permits.png - Density Bonus Rental building permits by income tier and DR
-5f. db_rent_dr_cos.png - Density Bonus Rental completions by income tier and DR
-7. db_permits_income.png - Density Bonus permits by income tier
-8. db_cos_income.png - Density Bonus completions by income tier
-9. inc_permits_income.png - Non-Bonus Inclusionary permits by income tier
-10. inc_cos_income.png - Non-Bonus Inclusionary completions by income tier
-11-18. db/inc_ownr/rent_cos/bp.png - By DR type + tenure, line charts by income tier
+Charts are numbered sequentially in output; see chart_counter below.
 
 Color scheme: blue, orange, purple, gray (colorblind-friendly)
 Style: Excel-like, simple and clean
 """
 
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -138,26 +121,41 @@ df['YEAR'] = to_numeric_safe(df['YEAR']).astype(int)
 df['NO_BUILDING_PERMITS'] = to_numeric_safe(df['NO_BUILDING_PERMITS'])
 df['NO_OTHER_FORMS_OF_READINESS'] = to_numeric_safe(df['NO_OTHER_FORMS_OF_READINESS'])
 df['DEM_DES_UNITS'] = to_numeric_safe(df['DEM_DES_UNITS'])
+df['NO_ENTITLEMENTS'] = to_numeric_safe(df['NO_ENTITLEMENTS'])
 
-# Calculate net values
-df['bp_net'] = df['NO_BUILDING_PERMITS'] - df['DEM_DES_UNITS']
-df['co_net'] = df['NO_OTHER_FORMS_OF_READINESS'] - df['DEM_DES_UNITS']
+# Per-row DEM assignment: assign DEM to BP if BP > 0, else CO if CO > 0, else ENT if ENT > 0
+bp = df['NO_BUILDING_PERMITS']
+co = df['NO_OTHER_FORMS_OF_READINESS']
+ent = df['NO_ENTITLEMENTS']
+dem = df['DEM_DES_UNITS']
+df['dem_bp'] = np.where(bp > 0, dem, 0)
+df['dem_co'] = np.where((bp == 0) & (co > 0), dem, 0)
+df['dem_ent'] = np.where((bp == 0) & (co == 0) & (ent > 0), dem, 0)
+df['bp_net'] = bp - df['dem_bp']
+df['co_net'] = co - df['dem_co']
+df['ent_net'] = ent - df['dem_ent']
 
 # Get years (source data already filtered to valid years by basicfilter)
 years = sorted(df['YEAR'].unique())
 print(f"  Years: {years}")
 
 setup_excel_style()
+chart_counter = [0]
+def next_chart(filename):
+    """Increment and print sequential chart number."""
+    chart_counter[0] += 1
+    print(f"\nChart {chart_counter[0]}: {filename}")
 
 # =============================================================================
-# Chart 1: permits_builds_total.png
+# permits_builds_total.png
 # Building permits vs completions (net of demolitions)
 # =============================================================================
-print("\nChart 1: permits_builds_total.png")
+next_chart('permits_builds_total.png')
 
 agg1 = df.groupby('YEAR').agg({
     'bp_net': 'sum',
     'co_net': 'sum',
+    'ent_net': 'sum',
 }).reindex(years).fillna(0)
 
 fig, ax = plt.subplots(figsize=(8, 5))
@@ -165,8 +163,10 @@ ax.plot(agg1.index, agg1['bp_net'], marker='o', color=COLORS['blue'],
         linewidth=2, markersize=6, label='Building Permits')
 ax.plot(agg1.index, agg1['co_net'], marker='s', color=COLORS['orange'], 
         linewidth=2, markersize=6, label='Completions')
+ax.plot(agg1.index, agg1['ent_net'], marker='^', color=COLORS['purple'], 
+        linewidth=2, markersize=6, label='Entitlements')
 
-ax.set_title('Building Permits and Completions\n(net of demolitions)')
+ax.set_title('Building Permits, Completions, and Entitlements\n(net of demolitions)')
 ax.set_xlabel('Year')
 ax.set_ylabel('Units')
 ax.set_xticks(years)
@@ -186,14 +186,13 @@ df['TENURE_CLEAN'] = df['TENURE'].astype(str).str.strip().str.upper()
 df['is_owner'] = df['TENURE_CLEAN'].isin(['OWNER', 'O'])
 df['is_rental'] = df['TENURE_CLEAN'].isin(['RENTER', 'R', 'RENTAL'])
 
-# Chart specs: (net_col, title_type, filename, chart_label)
 tenure_specs = [
-    ('co_net', 'Completions', 'tenure_total_cos.png', '2a'),
-    ('bp_net', 'Building Permits', 'tenure_total_bp.png', '2b'),
+    ('co_net', 'Completions', 'tenure_total_cos.png'),
+    ('bp_net', 'Building Permits', 'tenure_total_bp.png'),
 ]
 
-for net_col, title_type, filename, chart_label in tenure_specs:
-    print(f"\nChart {chart_label}: {filename}")
+for net_col, title_type, filename in tenure_specs:
+    next_chart(filename)
     
     agg_owner = df[df['is_owner']].groupby('YEAR')[net_col].sum().reindex(years).fillna(0)
     agg_rental = df[df['is_rental']].groupby('YEAR')[net_col].sum().reindex(years).fillna(0)
@@ -228,37 +227,43 @@ df['DR_TYPE_STR'] = df['DR_TYPE'].astype(str).str.upper()
 df['has_db'] = df['DR_TYPE_STR'].str.contains('DB', na=False)
 df['has_inc_only'] = df['DR_TYPE_STR'].str.contains('INC', na=False) & ~df['has_db']
 
-# Chart specs: (net_col, raw_col, title_type, filename, chart_label)
 db_inc_specs = [
-    ('co_net', 'NO_OTHER_FORMS_OF_READINESS', 'Completions', 'db_vs_inc_cos.png', '3a'),
-    ('bp_net', 'NO_BUILDING_PERMITS', 'Building Permits', 'db_vs_inc_bp.png', '3b'),
+    ('co_net', 'NO_OTHER_FORMS_OF_READINESS', 'Completions', 'db_vs_inc_cos.png'),
+    ('bp_net', 'NO_BUILDING_PERMITS', 'Building Permits', 'db_vs_inc_bp.png'),
 ]
 
-for net_col, raw_col, title_type, filename, chart_label in db_inc_specs:
-    print(f"\nChart {chart_label}: {filename}")
-    
-    # Total uses net (minus demolitions), DB/INC use raw counts
-    agg_total = df.groupby('YEAR')[net_col].sum().reindex(years).fillna(0)
-    agg_db = df[df['has_db']].groupby('YEAR')[raw_col].sum().reindex(years).fillna(0)
-    agg_inc = df[df['has_inc_only']].groupby('YEAR')[raw_col].sum().reindex(years).fillna(0)
-    
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(years, agg_total, marker='o', color=COLORS['blue'], 
-            linewidth=2, markersize=6, label=f'Net {title_type}')
-    ax.plot(years, agg_db, marker='s', color=COLORS['orange'], 
-            linewidth=2, markersize=6, label='Density Bonus')
-    ax.plot(years, agg_inc, marker='^', color=COLORS['purple'], 
-            linewidth=2, markersize=6, label='Non-Bonus Inclusionary')
-    
-    ax.set_title(f'Housing {title_type} by Deed Restriction Type')
-    ax.set_xlabel('Year')
-    ax.set_ylabel('Units')
-    ax.set_xticks(years)
-    ax.legend(loc='best')
-    ax.set_xlim(min(years), max(years))
-    set_y_padding(ax)
-    
-    save_chart(fig, filename)
+# Multifamily = exclude SFD and ADU (UNIT_CAT)
+mfh_mask = ~df['UNIT_CAT'].isin(['SFD', 'ADU'])
+
+# Variants: (row_mask_or_none, title_prefix, filename_suffix); None = all rows
+db_inc_variants = [
+    (None, '', ''),
+    (mfh_mask, 'Multifamily ', '_mfh'),
+]
+
+for net_col, raw_col, title_type, filename in db_inc_specs:
+    for variant_mask, title_prefix, file_suffix in db_inc_variants:
+        out_filename = filename.replace('.png', f'{file_suffix}.png')
+        next_chart(out_filename)
+        sub = df if variant_mask is None else df[variant_mask]
+        agg_total = sub.groupby('YEAR')[net_col].sum().reindex(years).fillna(0)
+        agg_db = sub[sub['has_db']].groupby('YEAR')[raw_col].sum().reindex(years).fillna(0)
+        agg_inc = sub[sub['has_inc_only']].groupby('YEAR')[raw_col].sum().reindex(years).fillna(0)
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(years, agg_total, marker='o', color=COLORS['blue'],
+                linewidth=2, markersize=6, label='Net of Demolitions')
+        ax.plot(years, agg_db, marker='s', color=COLORS['orange'],
+                linewidth=2, markersize=6, label='Density Bonus')
+        ax.plot(years, agg_inc, marker='^', color=COLORS['purple'],
+                linewidth=2, markersize=6, label='Non-Bonus Inclusionary')
+        ax.set_title(f'{title_prefix}Housing {title_type}')
+        ax.set_xlabel('Year')
+        ax.set_ylabel('Units')
+        ax.set_xticks(years)
+        ax.legend(loc='best')
+        ax.set_xlim(min(years), max(years))
+        set_y_padding(ax)
+        save_chart(fig, out_filename)
 
 # =============================================================================
 # Charts 4a & 4b: income_permits.png and income_cos.png
@@ -275,10 +280,9 @@ all_income_cols = [
 for col in all_income_cols:
     df[col] = to_numeric_safe(df[col])
 
-# Chart specs: (prefix, title_type, filename, chart_label)
 income_chart_specs = [
-    ('BP', 'Building Permits', 'income_permits.png', '4a'),
-    ('CO', 'Completions', 'income_cos.png', '4b'),
+    ('BP', 'Building Permits', 'income_permits.png'),
+    ('CO', 'Completions', 'income_cos.png'),
 ]
 
 # Income tiers (highest to lowest) - excludes Above Moderate (market rate)
@@ -288,8 +292,8 @@ income_tier_defs = [
     ('VLOW_INCOME', 'Very Low', COLORS['blue']),
 ]
 
-for prefix, title_type, filename, chart_label in income_chart_specs:
-    print(f"\nChart {chart_label}: {filename}")
+for prefix, title_type, filename in income_chart_specs:
+    next_chart(filename)
     
     # Aggregate each income tier by tenure (DR + NDR combined)
     agg_data = {}
@@ -328,10 +332,9 @@ for prefix, title_type, filename, chart_label in income_chart_specs:
 # Affordable permits/completions by income tier and DR type (excludes above moderate)
 # =============================================================================
 
-# Define chart specs: (prefix, title_type, filename, chart_num)
 dr_chart_specs = [
-    ('BP', 'Building Permits', 'dr_permits.png', 5),
-    ('CO', 'Completions', 'dr_cos.png', 6),
+    ('BP', 'Building Permits', 'dr_permits.png'),
+    ('CO', 'Completions', 'dr_cos.png'),
 ]
 
 # Income tier structure (shared between both charts)
@@ -347,8 +350,8 @@ income_tier_structure = [
     ('EXTR_LOW', 'Extremely Low', COLORS['gray'], '-'),
 ]
 
-for prefix, title_type, filename, chart_num in dr_chart_specs:
-    print(f"\nChart {chart_num}: {filename}")
+for prefix, title_type, filename in dr_chart_specs:
+    next_chart(filename)
     
     # Build column specs for this prefix (EXTR_LOW has no prefix; others are {prefix}_{suffix})
     col_specs = [(('EXTR_LOW_INCOME_UNITS' if suffix == 'EXTR_LOW' else f'{prefix}_{suffix}'), label, color, ls)
@@ -384,15 +387,15 @@ for prefix, title_type, filename, chart_num in dr_chart_specs:
 # =============================================================================
 
 db_ownr_dr_specs = [
-    ('BP', 'Building Permits', 'db_ownr_dr_permits.png', '5c'),
-    ('CO', 'Completions', 'db_ownr_dr_cos.png', '5d'),
+    ('BP', 'Building Permits', 'db_ownr_dr_permits.png'),
+    ('CO', 'Completions', 'db_ownr_dr_cos.png'),
 ]
 
 # Filter to DB + owner
 mask_db_owner = df['has_db'] & df['is_owner']
 
-for prefix, title_type, filename, chart_label in db_ownr_dr_specs:
-    print(f"\nChart {chart_label}: {filename}")
+for prefix, title_type, filename in db_ownr_dr_specs:
+    next_chart(filename)
     
     # Build column specs for this prefix
     col_specs = [(('EXTR_LOW_INCOME_UNITS' if suffix == 'EXTR_LOW' else f'{prefix}_{suffix}'), label, color, ls)
@@ -425,14 +428,14 @@ for prefix, title_type, filename, chart_label in db_ownr_dr_specs:
 # =============================================================================
 
 db_rent_dr_specs = [
-    ('BP', 'Building Permits', 'db_rent_dr_permits.png', '5e'),
-    ('CO', 'Completions', 'db_rent_dr_cos.png', '5f'),
+    ('BP', 'Building Permits', 'db_rent_dr_permits.png'),
+    ('CO', 'Completions', 'db_rent_dr_cos.png'),
 ]
 
 mask_db_rental = df['has_db'] & df['is_rental']
 
-for prefix, title_type, filename, chart_label in db_rent_dr_specs:
-    print(f"\nChart {chart_label}: {filename}")
+for prefix, title_type, filename in db_rent_dr_specs:
+    next_chart(filename)
 
     col_specs = [(('EXTR_LOW_INCOME_UNITS' if suffix == 'EXTR_LOW' else f'{prefix}_{suffix}'), label, color, ls)
                  for suffix, label, color, ls in income_tier_structure]
@@ -462,12 +465,11 @@ for prefix, title_type, filename, chart_label in db_rent_dr_specs:
 # db_permits_income, inc_permits_income, db_cos_income, inc_cos_income
 # =============================================================================
 
-# Chart specs: (dr_filter, dr_label, prefix, title_type, filename, chart_num)
 dr_income_chart_specs = [
-    ('has_db', 'Density Bonus', 'BP', 'Building Permits', 'db_permits_income.png', 7),
-    ('has_db', 'Density Bonus', 'CO', 'Completions', 'db_cos_income.png', 8),
-    ('has_inc_only', 'Non-Bonus Inclusionary', 'BP', 'Building Permits', 'inc_permits_income.png', 9),
-    ('has_inc_only', 'Non-Bonus Inclusionary', 'CO', 'Completions', 'inc_cos_income.png', 10),
+    ('has_db', 'Density Bonus', 'BP', 'Building Permits', 'db_permits_income.png'),
+    ('has_db', 'Density Bonus', 'CO', 'Completions', 'db_cos_income.png'),
+    ('has_inc_only', 'Non-Bonus Inclusionary', 'BP', 'Building Permits', 'inc_permits_income.png'),
+    ('has_inc_only', 'Non-Bonus Inclusionary', 'CO', 'Completions', 'inc_cos_income.png'),
 ]
 
 # Income tier structure for these charts (highest to lowest, combined DR+NDR)
@@ -479,8 +481,8 @@ income_tier_combined = [
     ('EXTR_LOW', 'Extremely Low Income', COLORS['gray']),
 ]
 
-for dr_filter, dr_label, prefix, title_type, filename, chart_num in dr_income_chart_specs:
-    print(f"\nChart {chart_num}: {filename}")
+for dr_filter, dr_label, prefix, title_type, filename in dr_income_chart_specs:
+    next_chart(filename)
     
     # Filter to rows matching the DR type
     mask = df[dr_filter]
@@ -510,6 +512,89 @@ for dr_filter, dr_label, prefix, title_type, filename, chart_num in dr_income_ch
     save_chart(fig, filename)
 
 # =============================================================================
+# Chart: income_by_unitcat.png - Income proportions by UNIT_CAT (entitlement stage)
+# 100% stacked horizontal bar: Very Low, Low, Moderate, Above Moderate by unit type
+# =============================================================================
+next_chart('income_by_unitcat.png')
+
+ent_income_cols = [
+    'VLOW_INCOME_DR', 'VLOW_INCOME_NDR', 'LOW_INCOME_DR', 'LOW_INCOME_NDR',
+    'MOD_INCOME_DR', 'MOD_INCOME_NDR', 'ABOVE_MOD_INCOME',
+]
+for col in ent_income_cols:
+    df[col] = to_numeric_safe(df[col])
+
+UNIT_CAT_ORDER = ['SFD', 'ADU', '5+', 'SFA', '2 to 4', 'MH']
+mask_cat = df['UNIT_CAT'].isin(UNIT_CAT_ORDER)
+agg_cat = df.loc[mask_cat].groupby('UNIT_CAT')[ent_income_cols].sum().reindex(UNIT_CAT_ORDER).fillna(0)
+stack_keys = ['VLOW', 'LOW', 'MOD', 'ABOVE_MOD']
+dr_ndr_pairs = [
+    ('VLOW', 'VLOW_INCOME_DR', 'VLOW_INCOME_NDR'),
+    ('LOW', 'LOW_INCOME_DR', 'LOW_INCOME_NDR'),
+    ('MOD', 'MOD_INCOME_DR', 'MOD_INCOME_NDR'),
+]
+for key, dr_col, ndr_col in dr_ndr_pairs:
+    agg_cat[key] = agg_cat[dr_col] + agg_cat[ndr_col]
+agg_cat['ABOVE_MOD'] = agg_cat['ABOVE_MOD_INCOME']
+total = agg_cat[stack_keys].sum(axis=1)
+pct = agg_cat[stack_keys].div(total, axis=0) * 100
+
+fig, ax = plt.subplots(figsize=(8, 5))
+y_pos = np.arange(len(UNIT_CAT_ORDER))
+left = np.zeros(len(UNIT_CAT_ORDER))
+for key, label, color_key in [
+    ('VLOW', 'Very Low Income', 'blue'),
+    ('LOW', 'Low Income', 'orange'),
+    ('MOD', 'Moderate Income', 'purple'),
+    ('ABOVE_MOD', 'Above Moderate Income', 'gray'),
+]:
+    vals = pct[key].values
+    ax.barh(y_pos, vals, 0.65, left=left, label=label, color=COLORS[color_key])
+    left += vals
+
+ax.set_yticks(y_pos)
+ax.set_yticklabels(UNIT_CAT_ORDER)
+ax.set_xlabel('Percentage of entitlement units')
+ax.set_title('Income Category Proportions by Unit Type\n(entitlement stage, BASICFILTER cleaned)')
+ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=2, handlelength=4)
+ax.set_xlim(0, 100)
+fig.tight_layout()
+fig.subplots_adjust(bottom=0.22)
+save_chart(fig, 'income_by_unitcat.png')
+
+# =============================================================================
+# Charts: dr_vs_ndr_ent.png, dr_vs_ndr_bp.png, dr_vs_ndr_cos.png
+# Deed-restricted vs non-DR units by income tier (entitlement, building permits, completions)
+# =============================================================================
+tiers = [
+    ('VLOW_INCOME', 'Very Low Income', COLORS['blue']),
+    ('LOW_INCOME', 'Low Income', COLORS['orange']),
+    ('MOD_INCOME', 'Moderate Income', COLORS['purple']),
+]
+tier_labels = [label for _, label, _ in tiers]
+dr_ndr_specs = [
+    ('', 'entitlement', 'Entitlement units', 'dr_vs_ndr_ent.png'),
+    ('BP_', 'building permits', 'Building permit units', 'dr_vs_ndr_bp.png'),
+    ('CO_', 'completions', 'Completion units', 'dr_vs_ndr_cos.png'),
+]
+for prefix, stage_name, ylabel, filename in dr_ndr_specs:
+    next_chart(filename)
+    dr_vals = [df[f'{prefix}{t}_DR'].sum() for t, _, _ in tiers]
+    ndr_vals = [df[f'{prefix}{t}_NDR'].sum() for t, _, _ in tiers]
+    x = np.arange(len(tier_labels))
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.bar(x - 0.175, dr_vals, 0.35, label='Deed-restricted (DR)', color=COLORS['blue'])
+    ax.bar(x + 0.175, ndr_vals, 0.35, label='Non-deed-restricted (NDR)', color=COLORS['orange'])
+    ax.set_xticks(x)
+    ax.set_xticklabels(tier_labels)
+    ax.set_ylabel(ylabel)
+    ax.set_title(f'Deed-Restricted vs Non-Deed-Restricted by Income Tier\n({stage_name}, BASICFILTER cleaned)')
+    ax.legend(loc='upper right')
+    ax.set_ylim(bottom=0)
+    set_y_padding(ax)
+    save_chart(fig, filename)
+
+# =============================================================================
 # Charts 11-18: DB and INC by tenure, line charts by income tier
 # =============================================================================
 
@@ -535,11 +620,10 @@ income_line_tiers = [
     ('EXTR_LOW', 'Extremely Low', COLORS['gray']),
 ]
 
-chart_num = 11
 for dr_filter, dr_label, tenure_filter, tenure_label, base_filename in tenure_income_base_specs:
     for prefix, title_type, file_suffix in line_type_specs:
         filename = f'{base_filename}{file_suffix}.png'
-        print(f"\nChart {chart_num}: {filename}")
+        next_chart(filename)
         
         # Combined mask: DR type AND tenure
         mask = df[dr_filter] & df[tenure_filter]
@@ -567,9 +651,8 @@ for dr_filter, dr_label, tenure_filter, tenure_label, base_filename in tenure_in
         set_y_padding(ax)
         
         save_chart(fig, filename)
-        chart_num += 1
 
-print("\nAll charts generated successfully.")
+print(f"\nAll {chart_counter[0]} charts generated successfully.")
 
 """MIT License
 
