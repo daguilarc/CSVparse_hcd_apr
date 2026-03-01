@@ -113,31 +113,34 @@ def _row_date_mismatches(row):
         for date_col, count_col, _ in _DATE_CHECK_CONFIG
     )
 
+# Single pass: row-wise tuple of (iss, ent, co) mismatch; unpack once into columns (omni: no repeated apply)
 _mismatch_tuples = df.apply(_row_date_mismatches, axis=1)
-iss_mismatch = _mismatch_tuples.apply(lambda t: t[0])
-ent_mismatch = _mismatch_tuples.apply(lambda t: t[1])
-co_mismatch = _mismatch_tuples.apply(lambda t: t[2])
+_mismatch_df = pd.DataFrame(_mismatch_tuples.tolist(), index=df.index)
+iss_mismatch = _mismatch_df[0]
+ent_mismatch = _mismatch_df[1]
+co_mismatch = _mismatch_df[2]
 
 # Combine: drop if ANY date mismatches
 any_mismatch = iss_mismatch | ent_mismatch | co_mismatch
 df_after_mismatch = df[~any_mismatch].copy()
 df_dropped_mismatch = df[any_mismatch].copy()
 
-# Assign mismatch reason once: first matching type (ISS, then ENT, then CO)
+# Assign mismatch reason once: first matching type (ISS, then ENT, then CO) from tuple array (omni: one pass)
+_dropped_arr = np.array(_mismatch_tuples[any_mismatch].tolist())
+first_true_idx = np.argmax(_dropped_arr.astype(int), axis=1)
 _reasons = pd.Series(
-    np.where(iss_mismatch[any_mismatch].values, _DATE_CHECK_CONFIG[0][2],
-    np.where(ent_mismatch[any_mismatch].values, _DATE_CHECK_CONFIG[1][2], _DATE_CHECK_CONFIG[2][2])),
+    [_DATE_CHECK_CONFIG[i][2] for i in first_true_idx],
     index=df_dropped_mismatch.index,
 )
 df_dropped_mismatch = df_dropped_mismatch.assign(mismatch_reason=_reasons)
 
-# Step 3: Filter to valid years (2018-2024 = APR data range)
+# Step 3: Filter to valid years (2018-2024 = APR data range) (omni: one numeric series, no add/drop column)
 VALID_YEARS = [2018, 2019, 2020, 2021, 2022, 2023, 2024]
-df_after_mismatch['YEAR_numeric'] = pd.to_numeric(df_after_mismatch[YEAR_COL], errors='coerce')
-invalid_year_mask = ~df_after_mismatch['YEAR_numeric'].isin(VALID_YEARS)
+year_numeric = pd.to_numeric(df_after_mismatch[YEAR_COL], errors='coerce')
+invalid_year_mask = ~year_numeric.isin(VALID_YEARS)
 df_dropped_year = df_after_mismatch[invalid_year_mask].copy()
 df_dropped_year['mismatch_reason'] = 'Invalid YEAR'
-df_clean = df_after_mismatch[~invalid_year_mask].drop(columns=['YEAR_numeric'])
+df_clean = df_after_mismatch[~invalid_year_mask].copy()
 
 # Deduplicate: same project (jurisdiction, county, year, location, counts) can appear multiple times
 df_clean, n_dedup = _deduplicate_apr(df_clean)
@@ -148,30 +151,30 @@ if n_dedup > 0:
 # Combine all dropped rows
 df_dropped = pd.concat([df_dropped_mismatch, df_dropped_year], ignore_index=True)
 
-# Counts
-iss_count = iss_mismatch.sum()
-ent_count = ent_mismatch.sum()
-co_count = co_mismatch.sum()
+# Counts (omni: one sum over mismatch columns, then unpack)
+_mismatch_counts = _mismatch_df.sum()
+iss_count, ent_count, co_count = int(_mismatch_counts[0]), int(_mismatch_counts[1]), int(_mismatch_counts[2])
 invalid_year_count = len(df_dropped_year)
 total_dropped = len(df_dropped)
 total_kept = len(df_clean)
 total_rows = len(df)
 
-# Results
+# Results (omni: pct scale once, then use in all lines)
+_pct = 100.0 / total_rows if total_rows else 0.0
 print(f"\n{'='*70}")
 print(f"BASICFILTER ROW CLEANING RESULTS")
 print(f"{'='*70}")
 print(f"Total rows loaded:                {total_rows:>10,}")
 print(f"")
-print(f"  Rows kept:                      {total_kept:>10,} ({100*total_kept/total_rows:>5.1f}%)")
+print(f"  Rows kept:                      {total_kept:>10,} ({total_kept*_pct:>5.1f}%)")
 print(f"  ─────────────────────────────────────────────")
-print(f"  Rows dropped (date mismatch):   {len(df_dropped_mismatch):>10,} ({100*len(df_dropped_mismatch)/total_rows:>5.1f}%)")
+print(f"  Rows dropped (date mismatch):   {len(df_dropped_mismatch):>10,} ({len(df_dropped_mismatch)*_pct:>5.1f}%)")
 print(f"        ISS_DATE mismatch:        {iss_count:>10,}")
 print(f"        ENT_DATE mismatch:        {ent_count:>10,}")
 print(f"        CO_DATE mismatch:         {co_count:>10,}")
-print(f"  Rows dropped (invalid YEAR):    {invalid_year_count:>10,} ({100*invalid_year_count/total_rows:>5.1f}%)")
+print(f"  Rows dropped (invalid YEAR):    {invalid_year_count:>10,} ({invalid_year_count*_pct:>5.1f}%)")
 print(f"  ─────────────────────────────────────────────")
-print(f"  Total dropped:                  {total_dropped:>10,} ({100*total_dropped/total_rows:>5.1f}%)")
+print(f"  Total dropped:                  {total_dropped:>10,} ({total_dropped*_pct:>5.1f}%)")
 print(f"{'='*70}")
 
 # Export

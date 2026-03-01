@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Fetch annual (1-year) ACS population from NHGIS via IPUMS API.
+"""Fetch annual (1-year) ACS data from NHGIS via IPUMS API.
 
-ACS 1-year = one estimate per calendar year (e.g. 2021_ACS1, 2022_ACS1).
-Place-level 1-year is only published for places with 65,000+ population (Folsom qualifies).
-2020 standard 1-year was not released (COVID); use 2019, 2021, 2022, 2023, 2024 as available.
+Requests population (B01003), median home value (B25077), and median household income (B19013)
+for place, county, and CBSA. Used by the join script with annual-first, 5-year fallback.
+2020 standard 1-year was not released (COVID); use 2019, 2021, 2022, 2023 as available.
 
 Usage:
   Set IPUMS_API_KEY in environment, or pass when prompted.
   Run: python fetch_acs1_annual_population.py
+  Output: nhgis_acs1_annual.zip (cached separately from 5-year in join script).
 """
 
 import os
 import time
 import zipfile
 import io
-import json
 import requests
 from pathlib import Path
 
@@ -22,9 +22,11 @@ NHGIS_API_BASE = "https://api.ipums.org"
 
 # 1-year ACS dataset names (one per year). 2020_ACS1 not available (COVID).
 ACS1_DATASETS = ["2019_ACS1", "2021_ACS1", "2022_ACS1", "2023_ACS1"]
-# 2024_ACS1 may exist; add to list if metadata shows it
-POPULATION_TABLE = "B01003"
-GEOG_LEVELS = ["place"]
+# B01003=Total pop, B25077=Median home value, B19013=Median household income
+ACS1_TABLES = ["B01003", "B25077", "B19013"]
+# Place (65k+), county, CBSA (MSA) — all available in ACS 1-year
+GEOG_LEVELS = ["place", "county", "cbsa"]
+OUT_ZIP = "nhgis_acs1_annual.zip"
 
 
 def get_api_key():
@@ -66,12 +68,11 @@ def main():
     except Exception as e:
         print(f"  Metadata request failed (continuing with hardcoded names): {e}")
 
-    # 2) Request extract: multiple 1-year datasets, B01003 (Total Population), place level
-    # ACS has estimate + MOE; default breakdown is usually first (estimate only) or use single_file
+    # 2) Request extract: multiple 1-year datasets, pop + home value + income, place + county + cbsa
     datasets_spec = {}
     for ds_name in ACS1_DATASETS:
         datasets_spec[ds_name] = {
-            "dataTables": [POPULATION_TABLE],
+            "dataTables": ACS1_TABLES,
             "geogLevels": GEOG_LEVELS,
         }
 
@@ -79,10 +80,10 @@ def main():
         "datasets": datasets_spec,
         "dataFormat": "csv_header",
         "breakdownAndDataTypeLayout": "single_file",
-        "description": "ACS 1-year total population by place (annual)",
+        "description": "ACS 1-year population, median home value, income by place/county/cbsa (annual)",
     }
 
-    print("Submitting NHGIS extract request (annual ACS 1-year population, place)...")
+    print("Submitting NHGIS extract request (annual ACS 1-year: pop, B25077, B19013 × place, county, cbsa)...")
     result = nhgis_post(api_key, "/extracts?collection=nhgis&version=2", body)
     if "errors" in result and result["errors"]:
         print("Extract errors:", result["errors"])
@@ -115,28 +116,17 @@ def main():
     down = requests.get(table_url, headers={"Authorization": api_key}, timeout=60)
     down.raise_for_status()
     out_dir = Path(__file__).resolve().parent
-    zip_path = out_dir / "nhgis_acs1_annual_population.zip"
+    zip_path = out_dir / OUT_ZIP
     zip_path.write_bytes(down.content)
     print(f"  Saved: {zip_path}")
 
-    # 5) Unzip and show Folsom if present
     with zipfile.ZipFile(io.BytesIO(down.content)) as zf:
         for name in zf.namelist():
             if name.endswith(".csv"):
                 zf.extract(name, out_dir)
                 print(f"  Extracted: {name}")
-                # Quick check for Folsom in place file
-                with zf.open(name) as f:
-                    raw = f.read().decode("utf-8", errors="replace")
-                    if "Folsom" in raw or "FOLSOM" in raw:
-                        for line in raw.splitlines()[:2]:
-                            print(f"    Header/sample: {line[:120]}...")
-                        for line in raw.splitlines():
-                            if "Folsom" in line or "FOLSOM" in line:
-                                print(f"    Folsom row: {line[:200]}...")
-                                break
 
-    print("Done. Use the extracted CSV(s) for annual population by place (one year per dataset/file).")
+    print("Done. Use nhgis_acs1_annual.zip in the join script (annual cache separate from 5-year).")
 
 
 if __name__ == "__main__":

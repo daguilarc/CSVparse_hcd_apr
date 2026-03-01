@@ -1,0 +1,144 @@
+================================================================================
+TABLE A2 EXPLORATION: ANALYSIS SCRIPT AND CONCLUSIONS
+================================================================================
+Data: tablea2_cleaned_basicfilter.csv (BASICFILTER cleaned: date-year validation,
+      valid years 2018-2024) with in-script deduplication on APR_DEDUP_COLS.
+      Final row count: 667,724.
+================================================================================
+
+--- ANALYSIS SCRIPT (Python 3) ---
+
+import pandas as pd
+import numpy as np
+
+df = pd.read_csv('/Users/diegoaguilar-canabal/Desktop/work/CAY/CSVparse_hcd_apr/TableA2-cleanup/tablea2_cleaned_basicfilter.csv', low_memory=False)
+APR_DEDUP_COLS = ['JURIS_NAME','CNTY_NAME','YEAR','APN','STREET_ADDRESS','PROJECT_NAME','NO_BUILDING_PERMITS','DEM_DES_UNITS']
+df = df.assign(
+    NO_BUILDING_PERMITS=pd.to_numeric(df['NO_BUILDING_PERMITS'], errors='coerce'),
+    DEM_DES_UNITS=pd.to_numeric(df['DEM_DES_UNITS'], errors='coerce'),
+).drop_duplicates(subset=APR_DEDUP_COLS, keep='first')
+
+income_cols = ['VLOW_INCOME_DR', 'VLOW_INCOME_NDR', 'LOW_INCOME_DR', 'LOW_INCOME_NDR',
+               'MOD_INCOME_DR', 'MOD_INCOME_NDR', 'ABOVE_MOD_INCOME']
+for col in income_cols:
+    df[col + '_n'] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+df['total_units'] = sum(df[c + '_n'] for c in income_cols)
+df['affordable_units'] = df['total_units'] - df['ABOVE_MOD_INCOME_n']
+
+bp_cols = ['BP_VLOW_INCOME_DR', 'BP_VLOW_INCOME_NDR', 'BP_LOW_INCOME_DR', 'BP_LOW_INCOME_NDR',
+           'BP_MOD_INCOME_DR', 'BP_MOD_INCOME_NDR', 'BP_ABOVE_MOD_INCOME']
+co_cols = ['CO_VLOW_INCOME_DR', 'CO_VLOW_INCOME_NDR', 'CO_LOW_INCOME_DR', 'CO_LOW_INCOME_NDR',
+           'CO_MOD_INCOME_DR', 'CO_MOD_INCOME_NDR', 'CO_ABOVE_MOD_INCOME']
+for col in bp_cols + co_cols:
+    df[col + '_n'] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+df['bp_total'] = sum(df[c + '_n'] for c in bp_cols)
+df['co_total'] = sum(df[c + '_n'] for c in co_cols)
+df['bp_aff'] = df['bp_total'] - df['BP_ABOVE_MOD_INCOME_n']
+df['co_aff'] = df['co_total'] - df['CO_ABOVE_MOD_INCOME_n']
+
+# Year-over-year pipeline
+for yr in sorted(df['YEAR'].unique()):
+    m = df['YEAR'] == yr
+    print(f"{yr}: rows={m.sum()}, ent_total={df.loc[m,'total_units'].sum():.0f}, ent_aff={df.loc[m,'affordable_units'].sum():.0f}, bp_total={df.loc[m,'bp_total'].sum():.0f}, bp_aff={df.loc[m,'bp_aff'].sum():.0f}, co_total={df.loc[m,'co_total'].sum():.0f}, co_aff={df.loc[m,'co_aff'].sum():.0f}")
+
+# ADU share by year
+for yr in sorted(df['YEAR'].unique()):
+    yr_df = df[df['YEAR'] == yr]
+    adu = (yr_df['UNIT_CAT'] == 'ADU').sum()
+    print(f"{yr}: {adu}/{len(yr_df)} = {adu/len(yr_df)*100:.1f}%")
+
+# Above-mod dominance
+t = df['total_units'].sum()
+a = df['ABOVE_MOD_INCOME_n'].sum()
+print(f"Total: {t:.0f}, Above-mod: {a:.0f} ({a/t*100:.1f}%), Affordable: {t-a:.0f} ({(t-a)/t*100:.1f}%)")
+
+# Affordable by tenure
+for ten in ['Owner', 'Renter']:
+    m = df['TENURE'] == ten
+    tot = df.loc[m, 'total_units'].sum()
+    ab = df.loc[m, 'ABOVE_MOD_INCOME_n'].sum()
+    af = tot - ab
+    if tot > 0:
+        print(f"{ten}: total={tot:.0f}, aff={af:.0f} ({af/tot*100:.1f}%), above={ab:.0f} ({ab/tot*100:.1f}%)")
+
+# Pipeline stage presence
+ent = pd.to_numeric(df['NO_ENTITLEMENTS'], errors='coerce')
+bp = pd.to_numeric(df['NO_BUILDING_PERMITS'], errors='coerce')
+co = pd.to_numeric(df['NO_OTHER_FORMS_OF_READINESS'], errors='coerce')
+n = len(df)
+print(f"ENT: {(ent>0).sum()} ({(ent>0).sum()/n*100:.1f}%)")
+print(f"BP: {(bp>0).sum()} ({(bp>0).sum()/n*100:.1f}%)")
+print(f"CO: {(co>0).sum()} ({(co>0).sum()/n*100:.1f}%)")
+
+# Pipeline by UNIT_CAT
+for cat in ['SFD', 'ADU', '2 - 4', '5+', 'MH', 'SFA']:
+    m = df['UNIT_CAT'] == cat
+    nn = m.sum()
+    if nn == 0:
+        continue
+    print(f"{cat}: n={nn}, ENT={(ent[m]>0).sum()/nn*100:.1f}%, BP={(bp[m]>0).sum()/nn*100:.1f}%, CO={(co[m]>0).sum()/nn*100:.1f}%")
+
+# DR vs NDR (entitlement stage)
+print("=== DR vs NDR ===")
+for tier in ['VLOW_INCOME', 'LOW_INCOME', 'MOD_INCOME']:
+    dr = df[tier + '_DR_n'].sum()
+    ndr = df[tier + '_NDR_n'].sum()
+    ratio = dr / ndr if ndr > 0 else float('inf')
+    print(f"{tier}: DR={dr:.0f}, NDR={ndr:.0f}, ratio={ratio:.2f}")
+
+# Infill by year, SB35 by year, DEM/DES by year, ELI by year, etc. (abbreviated)
+# ... same pattern: group by YEAR or UNIT_CAT, sum or count as needed.
+
+================================================================================
+CONCLUSIONS (from exploration of BASICFILTER-cleaned Table A2)
+================================================================================
+
+1. ADU explosion
+   ADU share of rows went from 15.7% (2018) to 38.1% (2024) — nearly 2.5x in share.
+   ADUs have the worst completion gap: 67.9% get building permits, only 28.1% reach
+   certificate of occupancy.
+
+2. Affordable units are overwhelmingly rental
+   Owner-occupied housing is 90.7% above-moderate income. Rental is "only" 65.6% above-mod.
+   Nearly all affordable production flows through rental.
+
+3. DR/NDR reversal at moderate tier
+   Very-low: DR/NDR ratio 5.90 (DR dominates). Low: 3.72. Moderate: 0.35 (NDR dominates).
+   Moderate-income units are overwhelmingly not deed-restricted.
+
+4. Infill share doubled in two years
+   ~23–25% infill (2019–2022) jumped to 48.7% (2023) and 53.3% (2024). Likely a
+   reporting/definitional change rather than a real shift.
+
+5. SB35 is barely used
+   Peaked at 0.97% of rows in 2019, dropped to 0.15% in 2021, recovering to 0.89% in 2024.
+   SB 9 (2021) duplex/lot split only adds ~1,000–1,200 rows total.
+
+6. Pipeline lag tracked COVID
+   ENT-to-CO median went from ~169 days (2018–2020) up to 202 days (2022), then back to
+   ~177 days (2024).
+
+7. County tenure extremes
+   LA is 69.8% renter rows. Fresno is 94.4% owner. Sacramento is 89.3% owner but has
+   46.4% affordable share (far above any other top county).
+
+8. Financial assistance concentrated in 5+
+   14.2% of 5+ rows get FA vs 0.7% for SFD and 1.1% for ADU.
+
+9. ELI growing steadily
+   Extremely low income units: 2,588 (2018) to 6,118 (2024), roughly 2.4x growth.
+
+10. Demolished units show suspicious spikes
+    2020=14.6K, 2021=19.8K, 2022=32.8K, then drop to 2.3K in 2023. Data quality concern.
+
+11. Income profile by unit type (entitlement stage)
+    SFD is ~91.5% above-mod; ADU ~58.6%; 5+ ~68.8%; MH has much higher VLOW/LOW share.
+    Density bonus (DR) drives most VLOW/LOW affordable units in 5+ and MH; in SFD/ADU,
+    DB contribution to affordable is minimal.
+
+================================================================================
+Charts added to basic_apr_charts.py from this exploration
+================================================================================
+- income_by_unitcat.png   : 100% stacked horizontal bar of income proportions by UNIT_CAT (entitlement).
+- dr_vs_ndr_ent.png       : Grouped bar of deed-restricted vs non-DR units by income tier (VLOW, LOW, MOD) at entitlement stage.
+================================================================================
