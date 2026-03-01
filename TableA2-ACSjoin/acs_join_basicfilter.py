@@ -24,8 +24,8 @@ import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta
 
-# APR dedup: same project (jurisdiction, county, year, location, counts) can appear multiple times and inflate totals
-APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]
+# APR dedup: project identity only; a project can appear at multiple pipeline stages (ENT, BP, CO)
+APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME"]
 
 
 def _deduplicate_apr(df):
@@ -34,14 +34,7 @@ def _deduplicate_apr(df):
     if len(cols) != len(APR_DEDUP_COLS):
         return df, 0
     n_before = len(df)
-    df = (
-        df.copy()
-        .assign(
-            NO_BUILDING_PERMITS=pd.to_numeric(df["NO_BUILDING_PERMITS"], errors="coerce"),
-            DEM_DES_UNITS=pd.to_numeric(df["DEM_DES_UNITS"], errors="coerce"),
-        )
-        .drop_duplicates(subset=cols, keep="first")
-    )
+    df = df.drop_duplicates(subset=cols, keep="first")
     return df, n_before - len(df)
 
 
