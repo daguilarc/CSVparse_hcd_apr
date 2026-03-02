@@ -24,17 +24,20 @@ import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta
 
-# APR dedup: project identity only; a project can appear at multiple pipeline stages (ENT, BP, CO)
-APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME"]
+# APR dedup: project identity + pipeline counts; preserves different pipeline stages (ENT, BP, CO)
+APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]
 
 
 def _deduplicate_apr(df):
-    """Deduplicate APR rows on project identity. Returns (df_deduped, n_removed)."""
+    """Deduplicate APR rows on project identity + pipeline counts. Returns (df_deduped, n_removed)."""
     cols = [c for c in APR_DEDUP_COLS if c in df.columns]
     if len(cols) != len(APR_DEDUP_COLS):
         return df, 0
     n_before = len(df)
-    df = df.drop_duplicates(subset=cols, keep="first")
+    df = df.assign(
+        NO_BUILDING_PERMITS=pd.to_numeric(df['NO_BUILDING_PERMITS'], errors='coerce').fillna(0),
+        DEM_DES_UNITS=pd.to_numeric(df['DEM_DES_UNITS'], errors='coerce').fillna(0),
+    ).drop_duplicates(subset=cols, keep="first")
     return df, n_before - len(df)
 
 
@@ -980,6 +983,15 @@ if len(df_apr_dropped) > 0:
     df_apr_dropped.to_csv(malformed_path, index=False)
     print(f"Dropped rows exported: {malformed_path}")
 
+# Fix year-entered-as-demolition-count (Colfax 2021, Ceres 2020, Hesperia 2022, Campbell 2024)
+df_apr_clean['DEM_DES_UNITS'] = pd.to_numeric(df_apr_clean['DEM_DES_UNITS'], errors='coerce').fillna(0)
+df_apr_clean['YEAR'] = pd.to_numeric(df_apr_clean['YEAR'], errors='coerce')
+dem_year_mask = (df_apr_clean['DEM_DES_UNITS'] >= 2000) & (abs(df_apr_clean['DEM_DES_UNITS'] - df_apr_clean['YEAR']) <= 5)
+n_dem_fix = dem_year_mask.sum()
+if n_dem_fix > 0:
+    df_apr_clean.loc[dem_year_mask, 'DEM_DES_UNITS'] = 1
+    print(f"DEM year-entry fix: corrected {n_dem_fix} rows where YEAR was entered as DEM_DES_UNITS")
+
 # Deduplicate APR rows: same project (jurisdiction, county, year, location, permit/demo counts) can appear multiple times and inflate totals
 df_apr_clean, n_dup = _deduplicate_apr(df_apr_clean)
 if n_dup > 0:
@@ -1000,8 +1012,8 @@ df_hcd = df_hcd[df_hcd["YEAR"].isin(permit_years)]
 df_hcd["NO_BUILDING_PERMITS"] = pd.to_numeric(df_hcd["NO_BUILDING_PERMITS"], errors="coerce").fillna(0)
 df_hcd["DEM_DES_UNITS"] = pd.to_numeric(df_hcd["DEM_DES_UNITS"], errors="coerce").fillna(0)
 df_hcd["gross_permits"] = df_hcd["NO_BUILDING_PERMITS"]
-df_hcd["demolitions"] = df_hcd["DEM_DES_UNITS"]
-df_hcd["net_permits"] = df_hcd["NO_BUILDING_PERMITS"] - df_hcd["DEM_DES_UNITS"]
+df_hcd["demolitions"] = np.where(df_hcd["NO_BUILDING_PERMITS"] > 0, df_hcd["DEM_DES_UNITS"], 0)
+df_hcd["net_permits"] = df_hcd["gross_permits"] - df_hcd["demolitions"]
 
 df_hcd["JURIS_CLEAN"] = df_hcd["JURIS_NAME"].apply(juris_caps)
 # Normalize county name for matching (uppercase, no trailing spaces)

@@ -104,17 +104,20 @@ def _row_date_mismatches_apr(row):
     )
 
 
-# APR dedup: project identity only; a project can appear at multiple pipeline stages (ENT, BP, CO)
-APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME"]
+# APR dedup: project identity + pipeline counts; preserves different pipeline stages (ENT, BP, CO)
+APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]
 
 
 def _deduplicate_apr(df):
-    """Deduplicate APR rows on project identity. Returns (df_deduped, n_removed)."""
+    """Deduplicate APR rows on project identity + pipeline counts. Returns (df_deduped, n_removed)."""
     cols = [c for c in APR_DEDUP_COLS if c in df.columns]
     if len(cols) != len(APR_DEDUP_COLS):
         return df, 0
     n_before = len(df)
-    df = df.drop_duplicates(subset=cols, keep="first")
+    df = df.assign(
+        NO_BUILDING_PERMITS=pd.to_numeric(df['NO_BUILDING_PERMITS'], errors='coerce').fillna(0),
+        DEM_DES_UNITS=pd.to_numeric(df['DEM_DES_UNITS'], errors='coerce').fillna(0),
+    ).drop_duplicates(subset=cols, keep="first")
     return df, n_before - len(df)
 
 
@@ -2810,6 +2813,16 @@ if __name__ == "__main__":
     # Load full APR with all columns needed for: date-year validation, DB/INC filters, zipcode extraction
     print("\nLoading APR data (single load with zipcode)...")
     df_apr_master = load_a2_csv(apr_path, usecols=None)  # Load all columns
+
+    # Fix year-entered-as-demolition-count (Colfax 2021, Ceres 2020, Hesperia 2022, Campbell 2024)
+    df_apr_master['DEM_DES_UNITS'] = pd.to_numeric(df_apr_master['DEM_DES_UNITS'], errors='coerce').fillna(0)
+    apr_year = pd.to_numeric(df_apr_master['YEAR'], errors='coerce')
+    dem_year_mask = (df_apr_master['DEM_DES_UNITS'] >= 2000) & (abs(df_apr_master['DEM_DES_UNITS'] - apr_year) <= 5)
+    n_dem_fix = dem_year_mask.sum()
+    if n_dem_fix > 0:
+        df_apr_master.loc[dem_year_mask, 'DEM_DES_UNITS'] = 1
+        print(f"  DEM year-entry fix: corrected {n_dem_fix} rows where YEAR was entered as DEM_DES_UNITS")
+
     df_apr_master, n_dup = _deduplicate_apr(df_apr_master)
     if n_dup > 0:
         pct_dedup = 100 * n_dup / (len(df_apr_master) + n_dup)

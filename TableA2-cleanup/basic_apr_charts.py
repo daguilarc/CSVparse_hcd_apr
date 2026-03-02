@@ -12,17 +12,20 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-# APR dedup: project identity only; a project can appear at multiple pipeline stages (ENT, BP, CO)
-APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME"]
+# APR dedup: project identity + pipeline counts; preserves different pipeline stages (ENT, BP, CO)
+APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]
 
 
 def _deduplicate_apr(df):
-    """Deduplicate APR rows on project identity. Returns (df_deduped, n_removed)."""
+    """Deduplicate APR rows on project identity + pipeline counts. Returns (df_deduped, n_removed)."""
     cols = [c for c in APR_DEDUP_COLS if c in df.columns]
     if len(cols) != len(APR_DEDUP_COLS):
         return df, 0
     n_before = len(df)
-    df = df.drop_duplicates(subset=cols, keep="first")
+    df = df.assign(
+        NO_BUILDING_PERMITS=pd.to_numeric(df['NO_BUILDING_PERMITS'], errors='coerce').fillna(0),
+        DEM_DES_UNITS=pd.to_numeric(df['DEM_DES_UNITS'], errors='coerce').fillna(0),
+    ).drop_duplicates(subset=cols, keep="first")
     return df, n_before - len(df)
 
 
@@ -36,37 +39,30 @@ COLORS = {
     'orange': '#ED7D31',
     'purple': '#7030A0',
     'gray': '#808080',
-    'green': '#70AD47',
-    'red': '#C00000',
-    'teal': '#00B0F0',
-    'brown': '#997300',
 }
 
 # Marker styles for line charts
 MARKERS = ['o', 's', '^', 'D', 'v', '<', '>']
 
-# Excel-like chart style settings
-def setup_excel_style():
-    """Configure matplotlib to produce Excel-like charts."""
-    plt.rcParams.update({
-        'font.family': 'sans-serif',
-        'font.size': 10,
-        'axes.titlesize': 12,
-        'axes.titleweight': 'bold',
-        'axes.labelsize': 10,
-        'axes.grid': True,
-        'axes.axisbelow': True,
-        'grid.alpha': 0.3,
-        'grid.linestyle': '-',
-        'legend.frameon': True,
-        'legend.fancybox': False,
-        'legend.edgecolor': 'black',
-        'legend.fontsize': 9,
-        'figure.facecolor': 'white',
-        'axes.facecolor': 'white',
-        'axes.edgecolor': 'black',
-        'axes.linewidth': 0.8,
-    })
+plt.rcParams.update({
+    'font.family': 'sans-serif',
+    'font.size': 10,
+    'axes.titlesize': 12,
+    'axes.titleweight': 'bold',
+    'axes.labelsize': 10,
+    'axes.grid': True,
+    'axes.axisbelow': True,
+    'grid.alpha': 0.3,
+    'grid.linestyle': '-',
+    'legend.frameon': True,
+    'legend.fancybox': False,
+    'legend.edgecolor': 'black',
+    'legend.fontsize': 9,
+    'figure.facecolor': 'white',
+    'axes.facecolor': 'white',
+    'axes.edgecolor': 'black',
+    'axes.linewidth': 0.8,
+})
 
 
 def save_chart(fig, filename):
@@ -103,6 +99,16 @@ def get_income_cols(prefix, tier_suffix):
 # Load data
 print(f"Loading: {DATA_PATH}")
 df = pd.read_csv(DATA_PATH, low_memory=False)
+
+# Fix year-entered-as-demolition-count (Colfax 2021, Ceres 2020, Hesperia 2022, Campbell 2024)
+df['DEM_DES_UNITS'] = pd.to_numeric(df['DEM_DES_UNITS'], errors='coerce').fillna(0)
+df['YEAR'] = pd.to_numeric(df['YEAR'], errors='coerce')
+dem_year_mask = (df['DEM_DES_UNITS'] >= 2000) & (abs(df['DEM_DES_UNITS'] - df['YEAR']) <= 5)
+n_dem_fix = dem_year_mask.sum()
+if n_dem_fix > 0:
+    df.loc[dem_year_mask, 'DEM_DES_UNITS'] = 1
+    print(f"  DEM year-entry fix: corrected {n_dem_fix} rows where YEAR was entered as DEM_DES_UNITS")
+
 df, n_dedup = _deduplicate_apr(df)
 if n_dedup > 0:
     pct_dedup = 100 * n_dedup / (len(df) + n_dedup)
@@ -132,7 +138,6 @@ df['ent_net'] = ent - df['dem_ent']
 years = sorted(df['YEAR'].unique())
 print(f"  Years: {years}")
 
-setup_excel_style()
 chart_counter = [0]
 def next_chart(filename):
     """Increment and print sequential chart number."""
@@ -170,7 +175,7 @@ set_y_padding(ax)
 save_chart(fig, 'permits_builds_total.png')
 
 # =============================================================================
-# Charts 2a & 2b: tenure_total_cos.png and tenure_total_bp.png
+# tenure_total_cos.png and tenure_total_bp.png
 # Completions/Permits by tenure type (filled line graph)
 # =============================================================================
 
@@ -211,7 +216,7 @@ for net_col, title_type, filename in tenure_specs:
     save_chart(fig, filename)
 
 # =============================================================================
-# Charts 3a & 3b: db_vs_inc_cos.png and db_vs_inc_bp.png
+# db_vs_inc_cos.png and db_vs_inc_bp.png
 # Completions/Permits by deed restriction type
 # =============================================================================
 
@@ -259,7 +264,7 @@ for net_col, raw_col, title_type, filename in db_inc_specs:
         save_chart(fig, out_filename)
 
 # =============================================================================
-# Charts 4a & 4b: income_permits.png and income_cos.png
+# income_permits.png and income_cos.png
 # By income category with tenure breakdown (solid = For-Sale, dashed = Rental)
 # =============================================================================
 
@@ -321,18 +326,10 @@ for prefix, title_type, filename in income_chart_specs:
     save_chart(fig, filename)
 
 # =============================================================================
-# Charts 5 & 6: dr_permits.png and dr_cos.png
-# Affordable permits/completions by income tier and DR type (excludes above moderate)
+# DR income-tier charts: all affordable, DB for-sale, DB rental
+# Format: (suffix, label, color, linestyle) - EXTR_LOW has no prefix
 # =============================================================================
 
-dr_chart_specs = [
-    ('BP', 'Building Permits', 'dr_permits.png'),
-    ('CO', 'Completions', 'dr_cos.png'),
-]
-
-# Income tier structure (shared between both charts)
-# Format: (suffix, label, color, linestyle) - highest to lowest income
-# EXTR_LOW uses special handling (single column, no prefix)
 income_tier_structure = [
     ('MOD_INCOME_DR', 'Moderate (DR)', COLORS['purple'], '-'),
     ('MOD_INCOME_NDR', 'Moderate (Non-DR)', COLORS['purple'], '--'),
@@ -343,118 +340,53 @@ income_tier_structure = [
     ('EXTR_LOW', 'Extremely Low', COLORS['gray'], '-'),
 ]
 
-for prefix, title_type, filename in dr_chart_specs:
-    next_chart(filename)
-    
-    # Build column specs for this prefix (EXTR_LOW has no prefix; others are {prefix}_{suffix})
-    col_specs = [(('EXTR_LOW_INCOME_UNITS' if suffix == 'EXTR_LOW' else f'{prefix}_{suffix}'), label, color, ls)
-                 for suffix, label, color, ls in income_tier_structure]
-    
-    # Convert columns to numeric and aggregate
-    for col, _, _, _ in col_specs:
-        df[col] = to_numeric_safe(df[col])
-    agg_data = {col: df.groupby('YEAR')[col].sum().reindex(years).fillna(0) 
-                for col, _, _, _ in col_specs}
-    
-    # Create chart
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for i, (col, label, color, ls) in enumerate(col_specs):
-        ax.plot(years, agg_data[col], marker=MARKERS[i], linestyle=ls,
-                color=color, linewidth=1.5, markersize=5, label=label)
-    
-    ax.set_title(f'Affordable {title_type} by Income Tier and Deed Restriction')
-    ax.set_xlabel('Year')
-    ax.set_ylabel('Units')
-    ax.set_xticks(years)
-    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=4, handlelength=4)
-    ax.set_xlim(min(years), max(years))
-    set_y_padding(ax)
-    
-    fig.tight_layout()
-    fig.subplots_adjust(bottom=0.22)
-    save_chart(fig, filename)
+# Convert all income-tier DR columns to numeric once upfront
+for col in {('EXTR_LOW_INCOME_UNITS' if s == 'EXTR_LOW' else f'{p}_{s}')
+            for p in ['BP', 'CO'] for s, _, _, _ in income_tier_structure}:
+    df[col] = to_numeric_safe(df[col])
 
-# =============================================================================
-# Charts 5c & 5d: db_ownr_dr_permits.png and db_ownr_dr_cos.png
-# DB For-Sale units by income tier and DR type
-# =============================================================================
-
-db_ownr_dr_specs = [
-    ('BP', 'Building Permits', 'db_ownr_dr_permits.png'),
-    ('CO', 'Completions', 'db_ownr_dr_cos.png'),
+# (mask_or_None, title_prefix, stage_specs)
+dr_tier_groups = [
+    (None, 'Affordable',
+     [('BP', 'Building Permits', 'dr_permits.png'),
+      ('CO', 'Completions', 'dr_cos.png')]),
+    (df['has_db'] & df['is_owner'], 'Density Bonus For-Sale',
+     [('BP', 'Building Permits', 'db_ownr_dr_permits.png'),
+      ('CO', 'Completions', 'db_ownr_dr_cos.png')]),
+    (df['has_db'] & df['is_rental'], 'Density Bonus Rental',
+     [('BP', 'Building Permits', 'db_rent_dr_permits.png'),
+      ('CO', 'Completions', 'db_rent_dr_cos.png')]),
 ]
 
-# Filter to DB + owner
-mask_db_owner = df['has_db'] & df['is_owner']
+for mask, title_prefix, stage_specs in dr_tier_groups:
+    sub = df if mask is None else df[mask]
+    for prefix, title_type, filename in stage_specs:
+        next_chart(filename)
+        col_specs = [(('EXTR_LOW_INCOME_UNITS' if suffix == 'EXTR_LOW' else f'{prefix}_{suffix}'), label, color, ls)
+                     for suffix, label, color, ls in income_tier_structure]
 
-for prefix, title_type, filename in db_ownr_dr_specs:
-    next_chart(filename)
-    
-    # Build column specs for this prefix
-    col_specs = [(('EXTR_LOW_INCOME_UNITS' if suffix == 'EXTR_LOW' else f'{prefix}_{suffix}'), label, color, ls)
-                 for suffix, label, color, ls in income_tier_structure]
-    
-    # Aggregate filtered data
-    agg_data = {col: to_numeric_safe(df.loc[mask_db_owner, col]).groupby(
-        df.loc[mask_db_owner, 'YEAR']).sum().reindex(years).fillna(0) for col, _, _, _ in col_specs}
-    
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for i, (col, label, color, ls) in enumerate(col_specs):
-        ax.plot(years, agg_data[col], marker=MARKERS[i], linestyle=ls,
-                color=color, linewidth=1.5, markersize=5, label=label)
-    
-    ax.set_title(f'Density Bonus For-Sale {title_type} by Income Tier and Deed Restriction')
-    ax.set_xlabel('Year')
-    ax.set_ylabel('Units')
-    ax.set_xticks(years)
-    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=4, handlelength=4)
-    ax.set_xlim(min(years), max(years))
-    set_y_padding(ax)
-    
-    fig.tight_layout()
-    fig.subplots_adjust(bottom=0.22)
-    save_chart(fig, filename)
+        agg_data = {col: sub.groupby('YEAR')[col].sum().reindex(years).fillna(0)
+                    for col, _, _, _ in col_specs}
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for i, (col, label, color, ls) in enumerate(col_specs):
+            ax.plot(years, agg_data[col], marker=MARKERS[i], linestyle=ls,
+                    color=color, linewidth=1.5, markersize=5, label=label)
+
+        ax.set_title(f'{title_prefix} {title_type} by Income Tier and Deed Restriction')
+        ax.set_xlabel('Year')
+        ax.set_ylabel('Units')
+        ax.set_xticks(years)
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=4, handlelength=4)
+        ax.set_xlim(min(years), max(years))
+        set_y_padding(ax)
+
+        fig.tight_layout()
+        fig.subplots_adjust(bottom=0.22)
+        save_chart(fig, filename)
 
 # =============================================================================
-# Charts 5e & 5f: db_rent_dr_permits.png and db_rent_dr_cos.png
-# DB Rental units by income tier and DR type (equivalent of 5c/5d for rentals)
-# =============================================================================
-
-db_rent_dr_specs = [
-    ('BP', 'Building Permits', 'db_rent_dr_permits.png'),
-    ('CO', 'Completions', 'db_rent_dr_cos.png'),
-]
-
-mask_db_rental = df['has_db'] & df['is_rental']
-
-for prefix, title_type, filename in db_rent_dr_specs:
-    next_chart(filename)
-
-    col_specs = [(('EXTR_LOW_INCOME_UNITS' if suffix == 'EXTR_LOW' else f'{prefix}_{suffix}'), label, color, ls)
-                 for suffix, label, color, ls in income_tier_structure]
-
-    agg_data = {col: to_numeric_safe(df.loc[mask_db_rental, col]).groupby(
-        df.loc[mask_db_rental, 'YEAR']).sum().reindex(years).fillna(0) for col, _, _, _ in col_specs}
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for i, (col, label, color, ls) in enumerate(col_specs):
-        ax.plot(years, agg_data[col], marker=MARKERS[i], linestyle=ls,
-                color=color, linewidth=1.5, markersize=5, label=label)
-
-    ax.set_title(f'Density Bonus Rental {title_type} by Income Tier and Deed Restriction')
-    ax.set_xlabel('Year')
-    ax.set_ylabel('Units')
-    ax.set_xticks(years)
-    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=4, handlelength=4)
-    ax.set_xlim(min(years), max(years))
-    set_y_padding(ax)
-
-    fig.tight_layout()
-    fig.subplots_adjust(bottom=0.22)
-    save_chart(fig, filename)
-
-# =============================================================================
-# Charts 7-10: DB and INC income breakdown
+# DB and INC income breakdown
 # db_permits_income, inc_permits_income, db_cos_income, inc_cos_income
 # =============================================================================
 
@@ -518,8 +450,7 @@ for col in ent_income_cols:
     df[col] = to_numeric_safe(df[col])
 
 UNIT_CAT_ORDER = ['SFD', 'ADU', '5+', 'SFA', '2 to 4', 'MH']
-mask_cat = df['UNIT_CAT'].isin(UNIT_CAT_ORDER)
-agg_cat = df.loc[mask_cat].groupby('UNIT_CAT')[ent_income_cols].sum().reindex(UNIT_CAT_ORDER).fillna(0)
+agg_cat = df.loc[df['UNIT_CAT'].isin(UNIT_CAT_ORDER)].groupby('UNIT_CAT')[ent_income_cols].sum().reindex(UNIT_CAT_ORDER).fillna(0)
 stack_keys = ['VLOW', 'LOW', 'MOD', 'ABOVE_MOD']
 dr_ndr_pairs = [
     ('VLOW', 'VLOW_INCOME_DR', 'VLOW_INCOME_NDR'),
@@ -529,8 +460,7 @@ dr_ndr_pairs = [
 for key, dr_col, ndr_col in dr_ndr_pairs:
     agg_cat[key] = agg_cat[dr_col] + agg_cat[ndr_col]
 agg_cat['ABOVE_MOD'] = agg_cat['ABOVE_MOD_INCOME']
-total = agg_cat[stack_keys].sum(axis=1)
-pct = agg_cat[stack_keys].div(total, axis=0) * 100
+pct = agg_cat[stack_keys].div(agg_cat[stack_keys].sum(axis=1), axis=0) * 100
 
 fig, ax = plt.subplots(figsize=(8, 5))
 y_pos = np.arange(len(UNIT_CAT_ORDER))
@@ -588,7 +518,7 @@ for prefix, stage_name, ylabel, filename in dr_ndr_specs:
     save_chart(fig, filename)
 
 # =============================================================================
-# Charts 11-18: DB and INC by tenure, line charts by income tier
+# DB and INC by tenure, line charts by income tier
 # =============================================================================
 
 # Base specs: (dr_filter, dr_label, tenure_filter, tenure_label, base_filename)
