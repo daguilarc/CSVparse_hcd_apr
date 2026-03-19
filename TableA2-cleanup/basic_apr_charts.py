@@ -230,14 +230,19 @@ db_inc_specs = [
     ('bp_net', 'NO_BUILDING_PERMITS', 'Building Permits', 'db_vs_inc_bp.png'),
 ]
 
-# Multifamily = exclude SFD and ADU (UNIT_CAT)
-mfh_mask = ~df['UNIT_CAT'].isin(['SFD', 'ADU'])
+# Multifamily = only projects with 5+ units (UNIT_CAT column)
+mfh_mask = (df['UNIT_CAT'].astype(str).str.strip() == '5+')
 
 # Variants: (row_mask_or_none, title_prefix, filename_suffix); None = all rows
 db_inc_variants = [
     (None, '', ''),
     (mfh_mask, 'Multifamily ', '_mfh'),
 ]
+
+# Note: "Net of Demolitions" (blue) uses net_col (co_net/bp_net), i.e. completions/permits minus
+# demolitions. "Density Bonus" and "Non-Bonus Inclusionary" (orange, purple) use raw_col
+# (NO_OTHER_FORMS_OF_READINESS / NO_BUILDING_PERMITS), i.e. gross counts with no demolition
+# subtraction. DB/INC lines therefore count all project units; the total line is net.
 
 for net_col, raw_col, title_type, filename in db_inc_specs:
     for variant_mask, title_prefix, file_suffix in db_inc_variants:

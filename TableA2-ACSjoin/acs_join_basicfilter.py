@@ -798,6 +798,15 @@ df_final["ref_mfi"] = df_final["msa_mfi"].fillna(df_final["county_mfi"])
 print(f"  After merge - rows with county_income: {(~df_final['county_income'].isna()).sum()}, "
       f"rows with msa_income: {(~df_final['msa_income'].isna()).sum() if 'msa_income' in df_final.columns else 0}, "
       f"rows with ref_mfi: {(~df_final['ref_mfi'].isna()).sum() if 'ref_mfi' in df_final.columns else 0}")
+# Diagnostic: jurisdictions in an MSA should have msa_income; report any with msa_id but missing msa_income
+if msa_id_in_final and "msa_income" in df_final.columns:
+    in_msa = df_final["msa_id"].notna()
+    has_msa_income = df_final["msa_income"].notna()
+    in_msa_no_income = in_msa & ~has_msa_income
+    if in_msa_no_income.sum() > 0:
+        print(f"  Note: {in_msa_no_income.sum()} jurisdiction(s) in an MSA have no MSA income (using county fallback)")
+    else:
+        print(f"  All jurisdictions in an MSA have MSA median income")
 
 # Step 6: place-to-county imputation for missing place ACS data
 # (No redundant cleaning - data already cleaned before merge)
@@ -873,9 +882,13 @@ if (missing_count := missing_places.sum()) > 0:
 # Complete transformation pipeline: check income availability → calculate ref_income → calculate affordability_ratio (omni-rule: single pass)
 # Note: Diagnostic moved to after Step 10 so it includes both cities and counties
 
-# Reference income: Use MSA income if available, otherwise fall back to county income
-# This handles places not in MSAs (rural areas, micropolitan areas) correctly
+# Reference income: MSA median (household) income for jurisdictions in an MSA, else county median income.
+# Ensures jurisdictions in an MSA use the MSA-level median income (B19013) for designations and affordability.
 df_final["ref_income"] = df_final["msa_income"].fillna(df_final["county_income"])
+df_final["ref_income_source"] = np.where(
+    df_final["msa_income"].notna(), "MSA",
+    np.where(df_final["county_income"].notna(), "County", "")
+)
 
 # Calculate affordability ratio: check ref_income not null and > 0, median_home_value not null
 # Efficient condition: check null first to avoid unnecessary > 0 comparison on null values
@@ -1135,6 +1148,7 @@ if county_pop_cols and "county" in df_county.columns:
     # Calculate ref_income and affordability_ratio for counties (use county income only)
     # county_income already has suppression codes replaced - no redundant replacement
     df_county_rows["ref_income"] = df_county_rows["county_income"]
+    df_county_rows["ref_income_source"] = "County"
     # Calculate affordability ratio: check ref_income not null and > 0, median_home_value not null
     # Efficient condition: check null first to avoid unnecessary > 0 comparison on null values
     df_county_rows["affordability_ratio"] = afford_ratio(df_county_rows, "ref_income")
@@ -1215,12 +1229,21 @@ df_final["mfi_vs_acs"] = (
 # Income data diagnostics (after counties added)
 print(f"\nIncome data diagnostics (final dataset):")
 income_diagnostics = []
-for col_name in ["county_income", "msa_income", "ref_mfi"]:
-    if col_name in df_final.columns and (col_notna := (col_data := df_final[col_name]).notna()).any():
-        income_diagnostics.append(f"  {col_name}: {col_notna.sum()} non-null values, "
-                                  f"range: [{col_data.min():.0f}, {col_data.max():.0f}]")
+for col_name in ["county_income", "msa_income", "ref_mfi", "ref_income_source"]:
+    if col_name in df_final.columns and col_name != "ref_income_source":
+        col_data = df_final[col_name]
+        col_notna = col_data.notna()
+        if col_notna.any():
+            income_diagnostics.append(f"  {col_name}: {col_notna.sum()} non-null values, "
+                                      f"range: [{col_data.min():.0f}, {col_data.max():.0f}]")
+        else:
+            income_diagnostics.append(f"  {col_name}: ALL NULL")
+    elif col_name == "ref_income_source" and col_name in df_final.columns:
+        vc = df_final["ref_income_source"].value_counts()
+        income_diagnostics.append(f"  ref_income_source: {vc.to_dict()}")
     else:
-        income_diagnostics.append(f"  {col_name}: ALL NULL")
+        if col_name != "ref_income_source":
+            income_diagnostics.append(f"  {col_name}: ALL NULL")
 print("\n".join(income_diagnostics))
 
 # Suppression codes already replaced during initial cleaning (lines 276-283) - no redundant cleanup needed
@@ -1229,7 +1252,7 @@ print("\n".join(income_diagnostics))
 # Sort by geography_type (City first, County second), then alphabetically by JURISDICTION
 df_final = df_final[
     ["JURISDICTION", "geography_type", "median_home_value", "home_ref", "population_5year",
-     "county_income", "msa_income", "ref_mfi", "ref_income", "affordability_ratio", "mfi_affordability_ratio"]
+     "county_income", "msa_income", "ref_mfi", "ref_income", "ref_income_source", "affordability_ratio", "mfi_affordability_ratio"]
     + gross_permit_cols + ["total_permit_units"] + gross_rate_cols + ["avg_annual_permit_rate"]  # gross permits
     + demo_cols + ["total_demolitions"] + demo_rate_cols + ["avg_annual_demo_rate"]  # demolitions
     + net_permit_cols + ["total_net_permits"] + net_rate_cols + ["avg_annual_net_rate", "acs_designation", "acs_builder", "acs_build_5pct", "mfi_designation", "mfi_builder", "mfi_build_5pct", "mfi_vs_acs"]  # net permits + designation + builder
