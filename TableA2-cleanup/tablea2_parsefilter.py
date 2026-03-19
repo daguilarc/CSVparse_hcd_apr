@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""Clean APR TableA2 CSV with BASICFILTER: pandas parsing + date-year validation only.
+"""Clean APR TableA2 CSV with PARSEFILTER: structural parse repair + basic filters.
 
-Uses pandas.read_csv() which handles:
-1. Quoted fields with embedded commas
-2. Multi-line quoted fields
-3. Standard CSV parsing rules
+Uses a two-pass raw-text structural repair before pandas parsing:
+1. Fix malformed opener pattern that starts ambiguous quoted fields
+2. Fix orphaned closer pattern at start of subsequent lines
 
-Only drops rows that fail date-year validation (matching HCD dashboard logic).
-This is the simplest filter that matches HCD's stated methodology.
+Then applies date-year validation and year-range filters.
 
 Outputs:
 - tablea2_cleaned_basicfilter.csv: All rows that pass date-year validation
 - malformed_rows_basicfilter.csv: Rows dropped for date-year mismatch
+- before_quote_fix.csv: Only rows affected by quote-fix logic (before repair)
+- after_quote_fix.csv: Only rows affected by quote-fix logic (after repair)
 """
 
+import io
+import csv
 import numpy as np
 import pandas as pd
+import re
 from pathlib import Path
 
 # APR dedup: project identity + pipeline counts; preserves different pipeline stages (ENT, BP, CO)
@@ -35,9 +38,13 @@ def _deduplicate_apr(df):
     return df, n_before - len(df)
 
 
-apr_path = Path(__file__).parent / "tablea2.csv"
-cleaned_path = Path(__file__).parent / "tablea2_cleaned_basicfilter.csv"
-malformed_path = Path(__file__).parent / "malformed_rows_basicfilter.csv"
+_out_dir = Path(__file__).parent
+apr_path = _out_dir / "tablea2.csv"
+cleaned_path = _out_dir / "tablea2_cleaned_basicfilter.csv"
+malformed_path = _out_dir / "malformed_rows_basicfilter.csv"
+before_fix_path = _out_dir / "before_quote_fix.csv"
+after_fix_path = _out_dir / "after_quote_fix.csv"
+recovery_summary_path = _out_dir / "recovery_summary.csv"
 
 # Column names (from CSV header - verified with head -1)
 YEAR_COL = 'YEAR'
@@ -89,10 +96,106 @@ def check_date_year_mismatch(row, year_col, date_col, count_col):
     return date_year != row_year
 
 
-# Step 1: Read CSV with pandas (handles quotes and multi-line fields)
+def _repair_quote_corruption(raw_text):
+    """Repair known structural quote corruption using text patterns only."""
+    quote = chr(34)
+    backslash = chr(92)
+    opener = "," + quote + backslash + backslash + quote + quote
+    closer_pattern = re.compile(r"^([A-Z][A-Z ]*?)" + quote * 3 + r"([,\n\r])")
+    lines = raw_text.splitlines(keepends=True)
+    repaired_lines = []
+    opener_lines = set()
+    closer_lines = set()
+    replaced_openers = 0
+    replaced_closers = 0
+
+    for line_no, line in enumerate(lines, start=1):
+        cursor = 0
+        out = []
+        replaced_any = False
+        while True:
+            pos = line.find(opener, cursor)
+            if pos == -1:
+                out.append(line[cursor:])
+                break
+            after = pos + len(opener)
+            if after < len(line) and line[after] == " ":
+                out.append(line[cursor:after])
+                cursor = after
+                continue
+            out.append(line[cursor:pos])
+            out.append("," + backslash + backslash)
+            cursor = after
+            replaced_openers += 1
+            replaced_any = True
+        repaired = "".join(out)
+        repaired, n_close = closer_pattern.subn(r"\1\2", repaired)
+        if replaced_any:
+            opener_lines.add(line_no)
+        if n_close:
+            replaced_closers += n_close
+            closer_lines.add(line_no)
+        repaired_lines.append(repaired)
+
+    return "".join(repaired_lines), replaced_openers, replaced_closers, (opener_lines | closer_lines)
+
+
+def _parse_csv_with_line_ranges(csv_text):
+    """Parse CSV while tracking source line ranges for each accepted row."""
+    rows = []
+    ranges = []
+    reader = csv.reader(io.StringIO(csv_text))
+    header = next(reader)
+    expected_len = len(header)
+    prev_line = reader.line_num
+    for row in reader:
+        start_line = prev_line + 1
+        end_line = reader.line_num
+        prev_line = end_line
+        if len(row) != expected_len:
+            continue
+        rows.append(row)
+        ranges.append((start_line, end_line))
+    return pd.DataFrame(rows, columns=header), ranges
+
+
+def _subset_rows_by_line_hits(df, ranges, line_hits):
+    """Keep rows whose source line interval intersects touched line set."""
+    if not line_hits:
+        return df.iloc[0:0].copy()
+    keep = [any(line in line_hits for line in range(start, end + 1)) for start, end in ranges]
+    return df.loc[keep].copy()
+
+
+# Step 1: Read + structurally repair + parse with skip policy
 print(f"Loading: {apr_path}")
-df = pd.read_csv(apr_path, low_memory=False, on_bad_lines='warn')
+raw_csv = apr_path.read_text(encoding="utf-8", errors="replace")
+fixed_csv, n_openers, n_closers, touched_lines = _repair_quote_corruption(raw_csv)
+df_before_parse, before_ranges = _parse_csv_with_line_ranges(raw_csv)
+df_after_parse, after_ranges = _parse_csv_with_line_ranges(fixed_csv)
+df = pd.read_csv(io.StringIO(fixed_csv), low_memory=False, on_bad_lines="skip")
+affected_before = _subset_rows_by_line_hits(df_before_parse, before_ranges, touched_lines)
+affected_after = _subset_rows_by_line_hits(df_after_parse, after_ranges, touched_lines)
+affected_before.to_csv(before_fix_path, index=False)
+affected_after.to_csv(after_fix_path, index=False)
+print(f"Quote repair replacements: openers={n_openers:,}, closers={n_closers:,}")
+print(f"Quote-fix diagnostics exported: {before_fix_path.name} ({len(affected_before):,} rows), {after_fix_path.name} ({len(affected_after):,} rows)")
 print(f"Rows loaded: {len(df):,}, Columns: {len(df.columns)}")
+
+pd.DataFrame(
+    [
+        ("rows_parsed_before_fix", len(df_before_parse)),
+        ("rows_parsed_after_fix", len(df_after_parse)),
+        ("rows_loaded_main_pipeline", len(df)),
+        ("net_row_delta_after_minus_before", len(df_after_parse) - len(df_before_parse)),
+        ("affected_rows_before_fix", len(affected_before)),
+        ("affected_rows_after_fix", len(affected_after)),
+        ("affected_row_delta_after_minus_before", len(affected_after) - len(affected_before)),
+        ("opener_replacements", n_openers),
+        ("closer_replacements", n_closers),
+    ],
+    columns=["metric", "value"],
+).to_csv(recovery_summary_path, index=False)
 
 # Step 2: Date-year validation
 # One row pass: check all three permit types (ISS_DATE, ENT_DATE, CO_DATE)
@@ -138,18 +241,6 @@ df_dropped_year = df_after_mismatch[invalid_year_mask].copy()
 df_dropped_year['mismatch_reason'] = 'Invalid YEAR'
 df_clean = df_after_mismatch[~invalid_year_mask].copy()
 
-# Fix year-entered-as-demolition-count (Colfax 2021, Ceres 2020, Hesperia 2022, Campbell 2024)
-df_clean['DEM_DES_UNITS'] = pd.to_numeric(df_clean['DEM_DES_UNITS'], errors='coerce').fillna(0)
-df_clean['YEAR'] = pd.to_numeric(df_clean['YEAR'], errors='coerce')
-dem_year_mask = (df_clean['DEM_DES_UNITS'] >= 2000) & (abs(df_clean['DEM_DES_UNITS'] - df_clean['YEAR']) <= 5)
-n_dem_fix = dem_year_mask.sum()
-if n_dem_fix > 0:
-    dem_errors_path = Path(__file__).parent / "dem_year_entry_errors.csv"
-    df_clean[dem_year_mask].to_csv(dem_errors_path, index=False)
-    df_clean.loc[dem_year_mask, 'DEM_DES_UNITS'] = 1
-    print(f"DEM year-entry fix: corrected {n_dem_fix} rows where YEAR was entered as DEM_DES_UNITS")
-    print(f"  Exported pre-fix rows: {dem_errors_path}")
-
 # Deduplicate: same project (jurisdiction, county, year, location, counts) can appear multiple times
 df_clean, n_dedup = _deduplicate_apr(df_clean)
 if n_dedup > 0:
@@ -189,6 +280,7 @@ print(f"{'='*70}")
 df_clean.to_csv(cleaned_path, index=False)
 print(f"\nOUTPUT FILES:")
 print(f"  Cleaned data: {cleaned_path}")
+print(f"  Recovery summary: {recovery_summary_path}")
 
 if len(df_dropped) > 0:
     df_dropped.to_csv(malformed_path, index=False)
