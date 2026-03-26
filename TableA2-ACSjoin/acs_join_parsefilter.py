@@ -7,11 +7,12 @@ Population: 5-year ACS only (one value per jurisdiction). No annual ACS 1-year o
 
 Outputs:
 - acs_join_output_basicfilter.csv: Final joined dataset (places + counties)
-- malformed_rows_basicfilter.csv: Rows dropped for date-year mismatch
 """
 
+import csv
 import os
 import sys
+from collections import defaultdict
 import pandas as pd
 import numpy as np
 import requests
@@ -928,10 +929,217 @@ def check_date_year_mismatch_row(row, year_col, date_col, count_col):
     return int(date_year_str) != row_year
 
 
-# Load APR data with pandas (handles quoted fields and multi-line)
+def _repair_quote_corruption(raw_text):
+    """Repair known structural quote corruption using text patterns only."""
+    quote = chr(34)
+    backslash = chr(92)
+    opener = "," + quote + backslash + backslash + quote + quote
+    closer_pattern = re.compile(r"^([A-Z][A-Z ]*?)" + quote * 3 + r"([,\n\r])")
+    lines = raw_text.splitlines(keepends=True)
+    repaired_lines = []
+    opener_lines = set()
+    closer_lines = set()
+    replaced_openers = 0
+    replaced_closers = 0
+
+    for line_no, line in enumerate(lines, start=1):
+        cursor = 0
+        out = []
+        replaced_any = False
+        while True:
+            pos = line.find(opener, cursor)
+            if pos == -1:
+                out.append(line[cursor:])
+                break
+            after = pos + len(opener)
+            if after < len(line) and line[after] == " ":
+                out.append(line[cursor:after])
+                cursor = after
+                continue
+            out.append(line[cursor:pos])
+            out.append("," + backslash + backslash)
+            cursor = after
+            replaced_openers += 1
+            replaced_any = True
+        repaired = "".join(out)
+        repaired, n_close = closer_pattern.subn(r"\1\2", repaired)
+        if replaced_any:
+            opener_lines.add(line_no)
+        if n_close:
+            replaced_closers += n_close
+            closer_lines.add(line_no)
+        repaired_lines.append(repaired)
+
+    return "".join(repaired_lines), replaced_openers, replaced_closers, (opener_lines | closer_lines)
+
+
+def _parse_csv_with_line_ranges(csv_text):
+    """Parse CSV while tracking source line ranges for each accepted row."""
+    rows = []
+    ranges = []
+    reader = csv.reader(io.StringIO(csv_text))
+    header = next(reader)
+    expected_len = len(header)
+    prev_line = reader.line_num
+    for row in reader:
+        start_line = prev_line + 1
+        end_line = reader.line_num
+        prev_line = end_line
+        if len(row) != expected_len:
+            continue
+        rows.append(row)
+        ranges.append((start_line, end_line))
+    return pd.DataFrame(rows, columns=header), ranges
+
+
+def _subset_rows_by_line_hits(df, ranges, line_hits):
+    """Keep rows whose source line interval intersects touched line set."""
+    if not line_hits:
+        return df.iloc[0:0].copy()
+    keep = [any(line in line_hits for line in range(start, end + 1)) for start, end in ranges]
+    return df.loc[keep].copy()
+
+
+def _repair_column_shift_rows(df):
+    """Fix rows where NOTES text is shifted into NO_FA_DR; returns repaired row count."""
+    shifted_cols = [
+        "NO_FA_DR",
+        "TERM_AFF_DR",
+        "DEM_DES_UNITS",
+        "DEM_OR_DES_UNITS",
+        "DEM_DES_UNITS_OWN_RENT",
+        "DENSITY_BONUS_TOTAL",
+        "DENSITY_BONUS_NUMBER_OTHER_INCENTIVES",
+        "DENSITY_BONUS_INCENTIVES",
+        "DENSITY_BONUS_RECEIVE_REDUCTION",
+        "NOTES",
+    ]
+    if any(c not in df.columns for c in shifted_cols):
+        return 0
+    text = df["NO_FA_DR"].astype(str)
+    non_numeric = pd.to_numeric(df["NO_FA_DR"], errors="coerce").isna()
+    has_keywords = text.str.contains(r"HCD|ABAG|affordability|Entitlement", case=False, na=False)
+    has_spill_marker = text.str.contains("\",\",", regex=False, na=False)
+    notes_empty = df["NOTES"].fillna("").astype(str).str.strip().eq("")
+    suspect = non_numeric & has_keywords & has_spill_marker & notes_empty
+    n_repaired = int(suspect.sum())
+    if n_repaired == 0:
+        return 0
+    shifted = df.loc[suspect, shifted_cols].copy()
+    df.loc[suspect, shifted_cols[:-1]] = shifted[shifted_cols[1:]].to_numpy()
+    df.loc[suspect, shifted_cols[-1]] = shifted[shifted_cols[0]].values
+    return n_repaired
+
+
+def _extract_truncated_closer_rows(csv_text, closer_lines):
+    """Extract closer-touched lines that still parse to fewer than expected columns."""
+    csv_lines = csv_text.splitlines()
+    if not csv_lines or not closer_lines:
+        return pd.DataFrame()
+    header = next(csv.reader(io.StringIO(csv_lines[0])))
+    expected_len = len(header)
+    rows = []
+    for line_no in sorted(closer_lines):
+        if line_no <= 1 or line_no > len(csv_lines):
+            continue
+        row = next(csv.reader(io.StringIO(csv_lines[line_no - 1])))
+        parsed_len = len(row)
+        if parsed_len == 0 or parsed_len >= expected_len:
+            continue
+        padded = row + [""] * (expected_len - parsed_len)
+        rec = dict(zip(header, padded))
+        rec["_source_line"] = line_no
+        rec["_parsed_len"] = parsed_len
+        rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def _classify_truncated_rows(df_clean, truncated_df):
+    """Match truncated rows to clean identities and return (matched_df, unmatched_df)."""
+    if truncated_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    key_cols = ["JURIS_NAME", "CNTY_NAME", "APN", "STREET_ADDRESS"]
+    if any(c not in df_clean.columns for c in key_cols):
+        return pd.DataFrame(), truncated_df.copy()
+
+    _clean = df_clean.copy()
+    juris = _clean["JURIS_NAME"].astype(str).str.strip().str.upper()
+    cnty = _clean["CNTY_NAME"].astype(str).str.strip().str.upper()
+    apn = _clean["APN"].astype(str).str.strip().str.upper()
+    addr = _clean["STREET_ADDRESS"].astype(str).str.strip().str.upper()
+    year_num = pd.to_numeric(_clean["YEAR"], errors="coerce")
+    activity = (
+        pd.to_numeric(_clean.get("NO_ENTITLEMENTS"), errors="coerce").fillna(0)
+        + pd.to_numeric(_clean.get("NO_BUILDING_PERMITS"), errors="coerce").fillna(0)
+        + pd.to_numeric(_clean.get("NO_OTHER_FORMS_OF_READINESS"), errors="coerce").fillna(0)
+    )
+
+    strict_map = defaultdict(list)
+    relaxed_map = defaultdict(list)
+    fallback_map = defaultdict(list)
+    for idx in _clean.index:
+        strict_map[(juris.loc[idx], cnty.loc[idx], apn.loc[idx], addr.loc[idx])].append(idx)
+        relaxed_map[(juris.loc[idx], cnty.loc[idx], apn.loc[idx])].append(idx)
+        fallback_map[(juris.loc[idx], apn.loc[idx])].append(idx)
+
+    matched_records = []
+    unmatched_records = []
+    for _, row in truncated_df.iterrows():
+        juris_k = str(row.get("JURIS_NAME", "")).strip().upper()
+        cnty_k = str(row.get("CNTY_NAME", "")).strip().upper()
+        apn_k = str(row.get("APN", "")).strip().upper()
+        addr_k = str(row.get("STREET_ADDRESS", "")).strip().upper()
+
+        idxs = strict_map.get((juris_k, cnty_k, apn_k, addr_k), [])
+        stage = "strict_juris_cnty_apn_addr"
+        if not idxs:
+            idxs = relaxed_map.get((juris_k, cnty_k, apn_k), [])
+            stage = "relaxed_juris_cnty_apn"
+        if not idxs:
+            idxs = fallback_map.get((juris_k, apn_k), [])
+            stage = "relaxed_juris_apn"
+
+        rec = row.to_dict()
+        if not idxs:
+            rec["verdict"] = "unmatched"
+            rec["match_stage"] = ""
+            rec["matched_years"] = ""
+            rec["max_pipeline_activity"] = 0
+            unmatched_records.append(rec)
+            continue
+
+        max_activity = float(activity.loc[idxs].max()) if idxs else 0.0
+        years = sorted(int(y) for y in year_num.loc[idxs].dropna().unique())
+        rec["verdict"] = "matched_active" if max_activity > 0 else "matched_zero"
+        rec["match_stage"] = stage
+        rec["matched_years"] = "|".join(str(y) for y in years)
+        rec["max_pipeline_activity"] = max_activity
+        matched_records.append(rec)
+
+    return pd.DataFrame(matched_records), pd.DataFrame(unmatched_records)
+
+
+# Load APR data with structural quote repair
 print(f"Loading APR data: {apr_path}")
-df_apr = pd.read_csv(apr_path, low_memory=False, on_bad_lines='warn')
+raw_text = apr_path.read_text(encoding="utf-8", errors="replace")
+fixed_text, n_op, n_cl, touched_lines = _repair_quote_corruption(raw_text)
+closer_pattern = re.compile(r"^([A-Z][A-Z ]*?)\"\"\"([,\n\r])")
+closer_lines = {line_no for line_no, line in enumerate(raw_text.splitlines(), start=1) if closer_pattern.match(line)}
+if n_op or n_cl:
+    print(f"  Quote repair: {n_op} openers, {n_cl} closers replaced")
+df_before, before_ranges = _parse_csv_with_line_ranges(raw_text)
+df_after, after_ranges = _parse_csv_with_line_ranges(fixed_text)
+df_apr = pd.read_csv(io.StringIO(fixed_text), low_memory=False, on_bad_lines="skip")
+column_shift_repaired = _repair_column_shift_rows(df_apr)
+truncated_rows = _extract_truncated_closer_rows(fixed_text, closer_lines)
+affected_before = _subset_rows_by_line_hits(df_before, before_ranges, touched_lines)
+affected_after = _subset_rows_by_line_hits(df_after, after_ranges, touched_lines)
+# affected_before.to_csv(Path(__file__).resolve().parent / "before_quote_fix.csv", index=False)
+# affected_after.to_csv(Path(__file__).resolve().parent / "after_quote_fix.csv", index=False)
+# pd.DataFrame([("rows_parsed_before_fix", len(df_before)), ("rows_parsed_after_fix", len(df_after)), ("affected_before", len(affected_before)), ("affected_after", len(affected_after)), ("opener_replacements", n_op), ("closer_replacements", n_cl)], columns=["metric", "value"]).to_csv(Path(__file__).resolve().parent / "recovery_summary.csv", index=False)
 print(f"APR: {len(df_apr):,} rows loaded, {len(df_apr.columns)} columns")
+if column_shift_repaired:
+    print(f"  Column-shift repair: {column_shift_repaired:,} rows fixed")
 
 # Date-year validation: one row pass, config-driven (omni-rule: no repetition, mutate once)
 _APR_DATE_CHECK_CONFIG = [
@@ -946,6 +1154,7 @@ def _row_date_mismatches_apr(row):
         check_date_year_mismatch_row(row, 'YEAR', date_col, count_col)
         for date_col, count_col, _ in _APR_DATE_CHECK_CONFIG
     )
+
 
 # Single pass: row-wise tuple; unpack once into columns (omni: no repeated apply)
 _mismatch_tuples = df_apr.apply(_row_date_mismatches_apr, axis=1)
@@ -990,26 +1199,23 @@ print(f"        ENT_DATE mismatch:        {ent_count:>10,}")
 print(f"        CO_DATE mismatch:         {co_count:>10,}")
 print(f"{'='*70}")
 
-# Export dropped rows
-if len(df_apr_dropped) > 0:
-    malformed_path = Path(__file__).resolve().parent / "malformed_rows_basicfilter.csv"
-    df_apr_dropped.to_csv(malformed_path, index=False)
-    print(f"Dropped rows exported: {malformed_path}")
-
-# Fix year-entered-as-demolition-count (Colfax 2021, Ceres 2020, Hesperia 2022, Campbell 2024)
-df_apr_clean['DEM_DES_UNITS'] = pd.to_numeric(df_apr_clean['DEM_DES_UNITS'], errors='coerce').fillna(0)
-df_apr_clean['YEAR'] = pd.to_numeric(df_apr_clean['YEAR'], errors='coerce')
-dem_year_mask = (df_apr_clean['DEM_DES_UNITS'] >= 2000) & (abs(df_apr_clean['DEM_DES_UNITS'] - df_apr_clean['YEAR']) <= 5)
-n_dem_fix = dem_year_mask.sum()
-if n_dem_fix > 0:
-    df_apr_clean.loc[dem_year_mask, 'DEM_DES_UNITS'] = 1
-    print(f"DEM year-entry fix: corrected {n_dem_fix} rows where YEAR was entered as DEM_DES_UNITS")
-
 # Deduplicate APR rows: same project (jurisdiction, county, year, location, permit/demo counts) can appear multiple times and inflate totals
 df_apr_clean, n_dup = _deduplicate_apr(df_apr_clean)
 if n_dup > 0:
     pct_dedup = 100 * n_dup / (len(df_apr_clean) + n_dup)
     print(f"APR deduplication: removed {n_dup:,} duplicate rows ({pct_dedup:.1f}% of pre-dedup total)")
+
+matched_truncated, unmatched_truncated = _classify_truncated_rows(df_apr_clean, truncated_rows)
+_join_dir = Path(__file__).resolve().parent
+matched_truncated.to_csv(_join_dir / "matched_truncated.csv", index=False)
+unmatched_truncated.to_csv(_join_dir / "unmatched_truncated.csv", index=False)
+print(
+    "  Truncated rows: "
+    f"total={len(truncated_rows):,}, "
+    f"matched_active={(matched_truncated.get('verdict', pd.Series(dtype=str)) == 'matched_active').sum():,}, "
+    f"matched_zero={(matched_truncated.get('verdict', pd.Series(dtype=str)) == 'matched_zero').sum():,}, "
+    f"unmatched={len(unmatched_truncated):,}"
+)
 
 # Select columns for df_hcd
 df_hcd = df_apr_clean[['JURIS_NAME', 'CNTY_NAME', 'YEAR', 'NO_BUILDING_PERMITS', 'DEM_DES_UNITS']].copy()
