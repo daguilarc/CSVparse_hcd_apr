@@ -1,6 +1,7 @@
 import csv
 import warnings
 from itertools import product
+from collections import defaultdict
 
 import pandas as pd
 import numpy as np
@@ -28,19 +29,19 @@ from firthmodels import FirthLogisticRegression
 
 # X-axis label for Zillow Home Value Index % change
 ZHVI_PCT_LABEL = "Zillow Home Value Index % change (Jan 2018 – Dec 2024, Real 2024 Dollars)"
-# X-axis label for affordability ratio (Dec 2024 ZHVI / regional income; regional = MSA when available, else county)
-AFFORD_X_LABEL = "Ratio: Dec. 2024 Zillow Home Value Index / Regional Household Median Income"
-# X-axis label for (ZHVI % change) × ratio; state ratio components instead of "affordability ratio"
-PCT_AFFORD_X_LABEL = "(ZHVI % change 2018-2024, Real 2024 $) × (Dec. 2024 ZHVI / Regional Household Median Income)"
-# ZIP-level: same ratio definition and label (no MSA/County distinction in labels)
-AFFORD_X_LABEL_ZIP = "Ratio: Dec. 2024 ZHVI / Regional Household Median Income"
-PCT_AFFORD_X_LABEL_ZIP = "(ZHVI % change 2018-2024, Real 2024 $) × (Dec. 2024 ZHVI / Regional Household Median Income)"
+# X-axis label for affordability ratio (Dec 2024 ZHVI / MSA median household income)
+AFFORD_X_LABEL = "Ratio: Dec. 2024 Zillow Home Value Index / MSA Median Household Income (2019-2023)"
+# ZIP-level: same ratio definition and label
+AFFORD_X_LABEL_ZIP = "Ratio: Dec. 2024 ZHVI / MSA Median Household Income (2019-2023)"
 ZORI_PCT_LABEL = "Zillow Observed Rent Index (ZORI) % change (Jan 2018 – Dec 2024, Real 2024 Dollars)"
 # ZORI affordability: ratio = (monthly_rent × 12) / annual_income; single constant, no magic number in formula
 ZORI_MONTHS_PER_YEAR = 12
-ZORI_AFFORD_X_LABEL = "(Dec. 2024 ZORI / Regional Household Median Income)%"
-ZORI_PCT_AFFORD_X_LABEL = "((ZORI % change 2018-2024, Real 2024 $) × (Dec. 2024 ZORI / Regional Income))%"
+ZORI_AFFORD_X_LABEL = "(Dec. 2024 ZORI / MSA Median Household Income (2019-2023))%"
 ZORI_AFFORD_X_LABEL_ZIP = ZORI_AFFORD_X_LABEL
+# Real index dollar change (same window as % change) shown as percent of MSA income
+PCT_AFFORD_X_LABEL = "(Zillow Home Value Index (ZHVI) Dollar Change / MSA Median Household Income (2019-2023))%\n(Jan 2018 – Dec 2024, Real 2024 Dollars)"
+PCT_AFFORD_X_LABEL_ZIP = PCT_AFFORD_X_LABEL
+ZORI_PCT_AFFORD_X_LABEL = "(Zillow Observed Rent Index (ZORI) Annualized Dollar Change / MSA Median Household Income (2019-2023))%\n(Jan 2018 – Dec 2024, Real 2024 Dollars)"
 ZORI_PCT_AFFORD_X_LABEL_ZIP = ZORI_PCT_AFFORD_X_LABEL
 # ZIP codes excluded in _xsf charts (San Francisco outliers); single source for rate-on-rate and outcome×predictor
 ZIP_XSF_EXCLUDE = {'94102', '94103', '94105'}
@@ -51,6 +52,21 @@ VOWELS = set('AEIOUY')
 # Geography strings for R² diagnostics (single source; used in table/CSV)
 GEOGRAPHY_CITY = "City"
 GEOGRAPHY_ZIP = "ZIP codes"
+# % change predictors: x may be negative; use finite check in totals + city geo_mask (not x > 0)
+X_COL_PCT_CHANGE_PREDICTORS = ('zhvi_pct_change', 'zori_pct_change')
+# Dollar-change / income predictors: same panel-time structure as long-window % change; allow negative x on linear scale
+X_COL_AFFORD_DELTA_PREDICTORS = ('pct_afford', 'zori_pct_afford')
+X_COL_TWO_PART_LINEAR_X = frozenset(X_COL_PCT_CHANGE_PREDICTORS) | frozenset(X_COL_AFFORD_DELTA_PREDICTORS)
+# Moderate-income completions sum DR + NDR moderate CO columns; single label for charts / rate-on-rate
+MODERATE_INCOME_COMPLETIONS_LABEL = "Moderate Income Completions (DR + NDR)"
+
+
+def _hierarchy_re_policy(x_col, x_varies_by_year):
+    """Return (use_year_intercept_re, use_year_slope_re, allow_county_year_cell) for hierarchical SMC.
+    Long-window % change and dollar-change/income x are constant within jurisdiction across panel years—omit year REs and county×year."""
+    if x_col is not None and x_col in X_COL_TWO_PART_LINEAR_X:
+        return (False, False, False)
+    return (True, bool(x_varies_by_year), True)
 
 
 def _geo_label(base, exclude_label):
@@ -70,13 +86,39 @@ CI_LABEL_FREQUENTIST = "95% Confidence Interval\n(±2 SE)"
 CI_COLOR_CYAN = "cyan"
 CI_COLOR_PINK = "#F472B6"
 CI_COLOR_OVERLAP = "#6B2D5C"
-# Shared R² threshold: skip CI/chart and hierarchical Bayes CI (SMC threshold)
+# R² chart policy: one numeric cutoff (R2_THRESHOLD) but two different R² definitions (name the gate at call sites).
+# - Timeline scatter (median phase days vs predictor): OLS R² from sm.OLS → R2_THRESHOLD_TIMELINE_OLS_CHART
+# - Two-part (units, rate-on-rate, ZIP outcomes, timeline comp×phase): McFadden pseudo-R² → R2_THRESHOLD_TWOPART_MCFADDEN_CHART
 R2_THRESHOLD = 0.03
-# R² below this: skip CI and chart generation
-R2_THRESHOLD_CI_CHART = R2_THRESHOLD
-def _rate_per_1000(raw, pop): return (np.asarray(raw,dtype=np.float64)/np.asarray(pop,dtype=np.float64))*1000.0
-# R² below this: skip hierarchical Bayes CI (use bootstrap fallback; same shared threshold)
+R2_THRESHOLD_TIMELINE_OLS_CHART = R2_THRESHOLD
+R2_THRESHOLD_TWOPART_MCFADDEN_CHART = R2_THRESHOLD
+# Below this McFadden R²: skip hierarchical Bayes CI (bootstrap fallback) in two-part path
 R2_THRESHOLD_HIERARCHICAL = R2_THRESHOLD
+R2_THRESHOLD_CI_CHART = R2_THRESHOLD  # legacy alias; equals both semantic thresholds numerically
+
+
+def _rate_per_1000(raw, pop): return (np.asarray(raw,dtype=np.float64)/np.asarray(pop,dtype=np.float64))*1000.0
+
+
+def _dollar_change_real_from_pct_and_level(pct_percent, end_level, ok_mask):
+    """Real dollar change implied by pct_percent on end_level: v1 * (p/100) / (1 + p/100); NaN where not ok_mask."""
+    p = np.asarray(pct_percent, dtype=np.float64) / 100.0
+    v1 = np.asarray(end_level, dtype=np.float64)
+    out = np.full_like(v1, np.nan, dtype=np.float64)
+    denom = 1.0 + p
+    valid = np.asarray(ok_mask, dtype=bool) & np.isfinite(p) & np.isfinite(v1) & (denom != 0)
+    np.divide(v1 * p, denom, out=out, where=valid)
+    return out
+
+
+def _numerator_over_ref_income(numerator, ref_income, ok_mask):
+    """numerator / ref_income where ok_mask and ref > 0; NaN elsewhere (vectorized)."""
+    num = np.asarray(numerator, dtype=np.float64)
+    ref = np.asarray(ref_income, dtype=np.float64)
+    out = np.full_like(num, np.nan, dtype=np.float64)
+    v = np.asarray(ok_mask, dtype=bool) & np.isfinite(num) & np.isfinite(ref) & (ref > 0)
+    np.divide(num, ref, out=out, where=v)
+    return out
 # Hierarchical Bayes RE prior scales (year vs county). County same tightness as year; county×year = product.
 SIGMA_INT_YEAR = 0.5
 SIGMA_SLOPE_YEAR = 0.25
@@ -164,10 +206,11 @@ def _deduplicate_apr(df):
 
 
 def _mf_5plus_mask(df, col="UNIT_CAT"):
-    """Return boolean mask for multifamily (5+ units) based on UNIT_CAT."""
+    """Return boolean mask for multifamily UNIT_CAT: exact normalized '5+' only."""
     if col not in df.columns:
         return pd.Series(False, index=df.index)
-    return df[col].astype(str).str.contains("5+", na=False, regex=False)
+    s = df[col].astype(str).str.strip()
+    return s == "5+"
 
 
 def _print_excluded_apr_entries(excluded_df, permit_years, prefix):
@@ -180,17 +223,224 @@ def _print_excluded_apr_entries(excluded_df, permit_years, prefix):
         print(f"  {row['JURIS_CLEAN']}: {total:.0f} {prefix}")
 
 
+def _repair_quote_corruption(raw_text):
+    """Repair known structural quote corruption using text patterns only."""
+    quote = chr(34)
+    backslash = chr(92)
+    opener = "," + quote + backslash + backslash + quote + quote
+    closer_pattern = re.compile(r"^([A-Z][A-Z ]*?)" + quote * 3 + r"([,\n\r])")
+    lines = raw_text.splitlines(keepends=True)
+    repaired_lines = []
+    opener_lines = set()
+    closer_lines = set()
+    replaced_openers = 0
+    replaced_closers = 0
+
+    for line_no, line in enumerate(lines, start=1):
+        cursor = 0
+        out = []
+        replaced_any = False
+        while True:
+            pos = line.find(opener, cursor)
+            if pos == -1:
+                out.append(line[cursor:])
+                break
+            after = pos + len(opener)
+            if after < len(line) and line[after] == " ":
+                out.append(line[cursor:after])
+                cursor = after
+                continue
+            out.append(line[cursor:pos])
+            out.append("," + backslash + backslash)
+            cursor = after
+            replaced_openers += 1
+            replaced_any = True
+        repaired = "".join(out)
+        repaired, n_close = closer_pattern.subn(r"\1\2", repaired)
+        if replaced_any:
+            opener_lines.add(line_no)
+        if n_close:
+            replaced_closers += n_close
+            closer_lines.add(line_no)
+        repaired_lines.append(repaired)
+
+    return "".join(repaired_lines), replaced_openers, replaced_closers, (opener_lines | closer_lines)
+
+
+def _parse_csv_with_line_ranges(csv_text):
+    """Parse CSV while tracking source line ranges for each accepted row."""
+    rows = []
+    ranges = []
+    reader = csv.reader(io.StringIO(csv_text))
+    header = next(reader)
+    expected_len = len(header)
+    prev_line = reader.line_num
+    for row in reader:
+        start_line = prev_line + 1
+        end_line = reader.line_num
+        prev_line = end_line
+        if len(row) != expected_len:
+            continue
+        rows.append(row)
+        ranges.append((start_line, end_line))
+    return pd.DataFrame(rows, columns=header), ranges
+
+
+def _subset_rows_by_line_hits(df, ranges, line_hits):
+    """Keep rows whose source line interval intersects touched line set."""
+    if not line_hits:
+        return df.iloc[0:0].copy()
+    keep = [any(line in line_hits for line in range(start, end + 1)) for start, end in ranges]
+    return df.loc[keep].copy()
+
+
+def _repair_column_shift_rows(df):
+    """Fix rows where NOTES text is shifted into NO_FA_DR; returns repaired row count."""
+    shifted_cols = [
+        "NO_FA_DR",
+        "TERM_AFF_DR",
+        "DEM_DES_UNITS",
+        "DEM_OR_DES_UNITS",
+        "DEM_DES_UNITS_OWN_RENT",
+        "DENSITY_BONUS_TOTAL",
+        "DENSITY_BONUS_NUMBER_OTHER_INCENTIVES",
+        "DENSITY_BONUS_INCENTIVES",
+        "DENSITY_BONUS_RECEIVE_REDUCTION",
+        "NOTES",
+    ]
+    if any(c not in df.columns for c in shifted_cols):
+        return 0
+    text = df["NO_FA_DR"].astype(str)
+    non_numeric = pd.to_numeric(df["NO_FA_DR"], errors="coerce").isna()
+    has_keywords = text.str.contains(r"HCD|ABAG|affordability|Entitlement", case=False, na=False)
+    has_spill_marker = text.str.contains("\",\",", regex=False, na=False)
+    notes_empty = df["NOTES"].fillna("").astype(str).str.strip().eq("")
+    suspect = non_numeric & has_keywords & has_spill_marker & notes_empty
+    n_repaired = int(suspect.sum())
+    if n_repaired == 0:
+        return 0
+    shifted = df.loc[suspect, shifted_cols].copy()
+    df.loc[suspect, shifted_cols[:-1]] = shifted[shifted_cols[1:]].to_numpy()
+    df.loc[suspect, shifted_cols[-1]] = shifted[shifted_cols[0]].values
+    return n_repaired
+
+
+def _extract_truncated_closer_rows(csv_text, closer_lines):
+    """Extract closer-touched lines that still parse to fewer than expected columns."""
+    csv_lines = csv_text.splitlines()
+    if not csv_lines or not closer_lines:
+        return pd.DataFrame()
+    header = next(csv.reader(io.StringIO(csv_lines[0])))
+    expected_len = len(header)
+    rows = []
+    for line_no in sorted(closer_lines):
+        if line_no <= 1 or line_no > len(csv_lines):
+            continue
+        row = next(csv.reader(io.StringIO(csv_lines[line_no - 1])))
+        parsed_len = len(row)
+        if parsed_len == 0 or parsed_len >= expected_len:
+            continue
+        padded = row + [""] * (expected_len - parsed_len)
+        rec = dict(zip(header, padded))
+        rec["_source_line"] = line_no
+        rec["_parsed_len"] = parsed_len
+        rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def _classify_truncated_rows(df_clean, truncated_df):
+    """Match truncated rows to clean identities and return (matched_df, unmatched_df)."""
+    if truncated_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    key_cols = ["JURIS_NAME", "CNTY_NAME", "APN", "STREET_ADDRESS"]
+    if any(c not in df_clean.columns for c in key_cols):
+        return pd.DataFrame(), truncated_df.copy()
+
+    _clean = df_clean.copy()
+    juris = _clean["JURIS_NAME"].astype(str).str.strip().str.upper()
+    cnty = _clean["CNTY_NAME"].astype(str).str.strip().str.upper()
+    apn = _clean["APN"].astype(str).str.strip().str.upper()
+    addr = _clean["STREET_ADDRESS"].astype(str).str.strip().str.upper()
+    year_num = pd.to_numeric(_clean["YEAR"], errors="coerce")
+    activity = (
+        pd.to_numeric(_clean.get("NO_ENTITLEMENTS"), errors="coerce").fillna(0)
+        + pd.to_numeric(_clean.get("NO_BUILDING_PERMITS"), errors="coerce").fillna(0)
+        + pd.to_numeric(_clean.get("NO_OTHER_FORMS_OF_READINESS"), errors="coerce").fillna(0)
+    )
+
+    strict_map = defaultdict(list)
+    relaxed_map = defaultdict(list)
+    fallback_map = defaultdict(list)
+    for idx in _clean.index:
+        strict_map[(juris.loc[idx], cnty.loc[idx], apn.loc[idx], addr.loc[idx])].append(idx)
+        relaxed_map[(juris.loc[idx], cnty.loc[idx], apn.loc[idx])].append(idx)
+        fallback_map[(juris.loc[idx], apn.loc[idx])].append(idx)
+
+    matched_records = []
+    unmatched_records = []
+    for _, row in truncated_df.iterrows():
+        juris_k = str(row.get("JURIS_NAME", "")).strip().upper()
+        cnty_k = str(row.get("CNTY_NAME", "")).strip().upper()
+        apn_k = str(row.get("APN", "")).strip().upper()
+        addr_k = str(row.get("STREET_ADDRESS", "")).strip().upper()
+
+        idxs = strict_map.get((juris_k, cnty_k, apn_k, addr_k), [])
+        stage = "strict_juris_cnty_apn_addr"
+        if not idxs:
+            idxs = relaxed_map.get((juris_k, cnty_k, apn_k), [])
+            stage = "relaxed_juris_cnty_apn"
+        if not idxs:
+            idxs = fallback_map.get((juris_k, apn_k), [])
+            stage = "relaxed_juris_apn"
+
+        rec = row.to_dict()
+        if not idxs:
+            rec["verdict"] = "unmatched"
+            rec["match_stage"] = ""
+            rec["matched_years"] = ""
+            rec["max_pipeline_activity"] = 0
+            unmatched_records.append(rec)
+            continue
+
+        max_activity = float(activity.loc[idxs].max()) if idxs else 0.0
+        years = sorted(int(y) for y in year_num.loc[idxs].dropna().unique())
+        rec["verdict"] = "matched_active" if max_activity > 0 else "matched_zero"
+        rec["match_stage"] = stage
+        rec["matched_years"] = "|".join(str(y) for y in years)
+        rec["max_pipeline_activity"] = max_activity
+        matched_records.append(rec)
+
+    return pd.DataFrame(matched_records), pd.DataFrame(unmatched_records)
+
+
 def load_a2_csv(filepath, usecols=None):
-    """Load Table A2 CSV with BASICFILTER method: pandas parsing + date-year validation only.
+    """Load Table A2 CSV with BASICFILTER method: structural quote repair + date-year validation.
     
     BASICFILTER approach:
-    - Uses pd.read_csv() for robust quote/multiline handling
+    - Applies structural quote repair before parsing
+    - Uses pd.read_csv() with on_bad_lines='skip' for robust handling
     - Applies date-year validation: drop rows where activity date year ≠ YEAR
-    - No anchor recovery (use GODZILLAFILTER for that)
     """
-    df = pd.read_csv(filepath, low_memory=False, on_bad_lines='warn')
+    raw_text = Path(filepath).read_text(encoding="utf-8", errors="replace")
+    fixed_text, n_op, n_cl, touched_lines = _repair_quote_corruption(raw_text)
+    closer_pattern = re.compile(r"^([A-Z][A-Z ]*?)\"\"\"([,\n\r])")
+    closer_lines = {line_no for line_no, line in enumerate(raw_text.splitlines(), start=1) if closer_pattern.match(line)}
+    if n_op or n_cl:
+        print(f"  Quote repair: {n_op} openers, {n_cl} closers replaced")
+    df_before, before_ranges = _parse_csv_with_line_ranges(raw_text)
+    df_after, after_ranges = _parse_csv_with_line_ranges(fixed_text)
+    df = pd.read_csv(io.StringIO(fixed_text), low_memory=False, on_bad_lines="skip")
+    column_shift_repaired = _repair_column_shift_rows(df)
+    truncated_rows = _extract_truncated_closer_rows(fixed_text, closer_lines)
+    affected_before = _subset_rows_by_line_hits(df_before, before_ranges, touched_lines)
+    affected_after = _subset_rows_by_line_hits(df_after, after_ranges, touched_lines)
+    # affected_before.to_csv(Path(filepath).parent / "before_quote_fix.csv", index=False)
+    # affected_after.to_csv(Path(filepath).parent / "after_quote_fix.csv", index=False)
+    # pd.DataFrame([("rows_parsed_before_fix", len(df_before)), ("rows_parsed_after_fix", len(df_after)), ("affected_before", len(affected_before)), ("affected_after", len(affected_after)), ("opener_replacements", n_op), ("closer_replacements", n_cl)], columns=["metric", "value"]).to_csv(Path(filepath).parent / "recovery_summary.csv", index=False)
     total_rows = len(df)
     print(f"  APR: {total_rows:,} rows loaded, {len(df.columns)} columns")
+    if column_shift_repaired:
+        print(f"  Column-shift repair: {column_shift_repaired:,} rows fixed")
     
     # Date-year validation: one apply (existing _row_date_mismatches_apr), unpack once (omni)
     _mismatch_tuples = df.apply(_row_date_mismatches_apr, axis=1)
@@ -216,6 +466,7 @@ def load_a2_csv(filepath, usecols=None):
     # Statistics: one sum then unpack; pct scale once (omni)
     total_kept = len(df_clean)
     total_dropped = len(df_dropped)
+    matched_truncated, unmatched_truncated = _classify_truncated_rows(df_clean, truncated_rows)
     _mismatch_counts = _mismatch_df.sum()
     iss_count = int(_mismatch_counts[0])
     ent_count = int(_mismatch_counts[1])
@@ -231,14 +482,12 @@ def load_a2_csv(filepath, usecols=None):
     print(f"        ISS_DATE mismatch:        {iss_count:>10,}")
     print(f"        ENT_DATE mismatch:        {ent_count:>10,}")
     print(f"        CO_DATE mismatch:         {co_count:>10,}")
+    print(f"  Truncated closer rows:          {len(truncated_rows):>10,}")
+    print(f"        matched_active:           {int((matched_truncated.get('verdict', pd.Series(dtype=str)) == 'matched_active').sum()):>10,}")
+    print(f"        matched_zero:             {int((matched_truncated.get('verdict', pd.Series(dtype=str)) == 'matched_zero').sum()):>10,}")
+    print(f"        unmatched:                {len(unmatched_truncated):>10,}")
     print(f"  {'='*60}")
 
-    # Export dropped rows
-    if len(df_dropped) > 0:
-        malformed_path = Path(filepath).parent / "malformed_rows_basicfilter.csv"
-        df_dropped.to_csv(malformed_path, index=False)
-        print(f"  Dropped rows exported: {malformed_path}")
-    
     # Filter to usecols if specified
     if usecols is not None:
         available = [c for c in usecols if c in df_clean.columns]
@@ -428,8 +677,8 @@ def _geocode_progress(done, n_batches, start_time, bar_width=40):
 
 def _apply_batch_results(batch, result_by_local_idx, zip_by_idx, cache, cache_failures=True):
     """Apply batch results once: build update dicts then update zip_by_idx and cache (omni: mutate once).
-    When result_by_local_idx is None (failed batch), cache_failures=False skips writing to cache
-    so the next run will retry those addresses."""
+    When result_by_local_idx is None (failed batch): if cache_failures, write null cache entries so the
+    next run skips those keys; if False, omit cache so the next run may retry (legacy; geocode path uses True)."""
     if result_by_local_idx is None:
         zip_updates = {idx: pd.NA for (idx, *_, cache_key) in batch}
         zip_by_idx.update(zip_updates)
@@ -450,9 +699,13 @@ def census_batch_geocode_addresses(df, street_col, city_col, cache_path, state_f
                                   max_retries=4, timeout=300, throttle=0.1):
     """Send addresses to Census Geocoder in batches; return Series of ZIP (5-digit) keyed by index.
     Uses JSON cache to avoid re-geocoding addresses already processed.
-    Failed batches are retried up to max_retries with backoff; failures are not cached so next run retries them.
+
+    Retries are disabled (per project choice): one POST per batch. HTTP/parse failures are written to
+    the cache as null so those addresses are not re-queued on the next run. ``max_retries`` is kept
+    for call compatibility but ignored.
+
     Smaller batch_size (default 500) reduces timeout risk; throttle (default 0.1s) between batches.
-    
+
     Census batch format (NO header): Unique ID,Street address,City,State,ZIP
     Max 10000 per batch but 500 used by default for reliability.
     """
@@ -505,21 +758,30 @@ def census_batch_geocode_addresses(df, street_col, city_col, cache_path, state_f
         files = {'addressFile': ('batch.csv', csv_bytes, 'text/csv')}
         data = {'benchmark': benchmark, 'returntype': 'locations'}
         resp = None
-        for attempt in range(max_retries):
-            try:
-                resp = requests.post(url, files=files, data=data, timeout=timeout)
-                resp.raise_for_status()
-                break
-            except (requests.RequestException, requests.HTTPError) as e:
-                if attempt < max_retries - 1:
-                    backoff = (2 ** attempt) * 30  # 30s, 60s, 120s (no retries after 120s)
-                    print(f"\n    Batch {batch_num+1}/{n_batches} failed (attempt {attempt+1}/{max_retries}): {e}; retry in {backoff}s")
-                    time.sleep(backoff)
-                else:
-                    print(f"\n    Batch {batch_num+1}/{n_batches} failed after {max_retries} attempts: {e}")
-                    _apply_batch_results(batch, None, zip_by_idx, cache, cache_failures=False)
-                    resp = None
-                    break
+        # Geocode retries disabled — not re-attempting Census for a while; cache failures so same
+        # addresses are skipped on next run. Previous retry loop (kept commented for reference):
+        # for attempt in range(max_retries):
+        #     try:
+        #         resp = requests.post(url, files=files, data=data, timeout=timeout)
+        #         resp.raise_for_status()
+        #         break
+        #     except (requests.RequestException, requests.HTTPError) as e:
+        #         if attempt < max_retries - 1:
+        #             backoff = (2 ** attempt) * 30
+        #             print(f"\n    Batch {batch_num+1}/{n_batches} failed (attempt {attempt+1}/{max_retries}): {e}; retry in {backoff}s")
+        #             time.sleep(backoff)
+        #         else:
+        #             print(f"\n    Batch {batch_num+1}/{n_batches} failed after {max_retries} attempts: {e}")
+        #             _apply_batch_results(batch, None, zip_by_idx, cache, cache_failures=False)
+        #             resp = None
+        #             break
+        try:
+            resp = requests.post(url, files=files, data=data, timeout=timeout)
+            resp.raise_for_status()
+        except (requests.RequestException, requests.HTTPError) as e:
+            print(f"\n    Batch {batch_num+1}/{n_batches} geocode failed (no retry): {e}")
+            _apply_batch_results(batch, None, zip_by_idx, cache, cache_failures=True)
+            resp = None
         if resp is None:
             _geocode_progress(batch_num + 1, n_batches, start_time, bar_width)
             continue
@@ -528,8 +790,8 @@ def census_batch_geocode_addresses(df, street_col, city_col, cache_path, state_f
             batch_results = _parse_census_batch_response(resp.text)
             _apply_batch_results(batch, batch_results, zip_by_idx, cache)
         except Exception as e:
-            print(f"\n    Batch {batch_num+1}/{n_batches} parse error: {e}")
-            _apply_batch_results(batch, None, zip_by_idx, cache, cache_failures=False)
+            print(f"\n    Batch {batch_num+1}/{n_batches} parse error (no retry): {e}")
+            _apply_batch_results(batch, None, zip_by_idx, cache, cache_failures=True)
 
         _geocode_progress(batch_num + 1, n_batches, start_time, bar_width)
 
@@ -744,6 +1006,28 @@ def deflate_zhvi_values(v0_nominal, v1_nominal, source_label="ZHVI"):
     with np.errstate(divide="ignore", invalid="ignore"):
         zhvi_pct_change = np.where(v0_nominal > 0, 100.0 * (v1_nominal - v0_nominal) / v0_nominal, np.nan)
     return zhvi_pct_change, v1_nominal
+
+
+def _acs_income_inflation_factor(acs_final_year=2023):
+    """CPI-U ratio: Dec 2024 / calendar-year average of monthly CPI for acs_final_year. None if CPI unavailable."""
+    cpi_data = load_cpi()
+    if cpi_data is None:
+        return None
+    cpi_dec_2024 = get_cpi_for_month(cpi_data, 2024, 12)
+    monthly_cpis = [get_cpi_for_month(cpi_data, acs_final_year, m) for m in range(1, 13)]
+    monthly_cpis = [v for v in monthly_cpis if v is not None]
+    if not monthly_cpis or cpi_dec_2024 is None:
+        return None
+    factor = cpi_dec_2024 / (sum(monthly_cpis) / len(monthly_cpis))
+    print(f"  ACS income: inflating from {acs_final_year} to Dec 2024 (factor={factor:.4f})")
+    return factor
+
+
+def _acs_income_to_real_2024(income_values, factor):
+    """Scale ACS median household income by factor from _acs_income_inflation_factor."""
+    if factor is None:
+        return income_values
+    return np.asarray(income_values, dtype=np.float64) * factor
 
 
 def _load_zillow_monthly_index(path, target_ids, id_col, id_transform_fn, source_label, pct_col, level_col):
@@ -1189,33 +1473,8 @@ def _set_log_dollar_ticks(ax, x_lo, x_hi):
     _apply_log_axis_dollar_ticks(ax, in_range, ticks, x_hi)
 
 
-def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
-                        x_label, y_label, data_label='Cities', apr_year_range='2018-2024',
-                        r2=0.0, ci_lo=None, ci_hi=None, ci_method=None,
-                        freq_ci_lo=None, freq_ci_hi=None, bayes_ci_lo=None, bayes_ci_hi=None,
-                        bayes_mean=None,
-                        labels=None, label_cleanup=None, use_log_x=False,
-                        x_tick_dollar=False, x_tick_percent=False, x_tick_days=False,
-                        also_annotate_second_max_x=False):
-    """Unified two-part regression chart. Scatter always filtered to y > 0.
-    x_scatter, y_scatter: raw data arrays (same length; y=0 rows excluded from scatter).
-    x_line, mle_y: MLE curve arrays in display space. ci_lo, ci_hi: CI band over x_line (or None).
-    When freq_ci_lo/hi and bayes_ci_lo/hi are all provided, two bands are drawn (cyan freq, pink bayes, purple overlap).
-    Otherwise single band uses ci_lo/ci_hi with pink and label by ci_method.
-    bayes_mean: if not None, plot posterior predictive mean line (Hierarchical Bayes).
-    x_tick_dollar/percent/days: mutually exclusive x-axis formatting flags."""
-    setup_chart_style()
-    fig, ax = _fig_ax_square_plot()
-    nz = y_scatter > 0
-    x_nz, y_nz = x_scatter[nz], y_scatter[nz]
-    labels_nz = labels[nz] if labels is not None else None
-    scatter_suffix = f'n={len(x_scatter)}' + (f'; {apr_year_range}' if apr_year_range else '')
-    line_handle, = ax.plot(x_line, mle_y, color='#4472C4', linewidth=2,
-                           label='Maximum Likelihood Estimation\n(Zero-Hurdle OLS)')
-    bayes_mean_handle = None
-    if bayes_mean is not None:
-        bayes_mean_handle, = ax.plot(x_line, bayes_mean, color='#C04060', linewidth=2, linestyle='-',
-                                     label='Posterior Predictive Mean\n(Hierarchical Bayes)')
+def _draw_ci_bands_on_ax(ax, x_line, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, ci_lo, ci_hi, ci_method):
+    """Draw CI bands on ax; returns patch for legend (one Patch, two-Patch list, or None)."""
     ci_patch = None
     if freq_ci_lo is not None and freq_ci_hi is not None and bayes_ci_lo is not None and bayes_ci_hi is not None:
         patch_freq = ax.fill_between(x_line, freq_ci_lo, freq_ci_hi, alpha=0.3, color=CI_COLOR_CYAN, label=CI_LABEL_FREQUENTIST)
@@ -1231,106 +1490,131 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
     elif ci_lo is not None and ci_hi is not None:
         ci_label = CI_LABEL_STATIONARY_MC if ci_method == 'bootstrap' else CI_LABEL_CREDIBLE_SMC
         ci_patch = ax.fill_between(x_line, ci_lo, ci_hi, alpha=0.3, color=CI_COLOR_PINK, label=ci_label)
+    return ci_patch
+
+
+def _ols_r2_positive_subset(x_data, y_rate, x_col):
+    """OLS R² on y>0 with finite x,y; x ×100 when x_col is zori_afford_ratio (matches two-part scatter display)."""
+    xd = np.asarray(x_data, dtype=np.float64)
+    yr = np.asarray(y_rate, dtype=np.float64)
+    if x_col == 'zori_afford_ratio':
+        xd = xd * 100.0
+    pos = (yr > 0) & np.isfinite(xd) & np.isfinite(yr)
+    if pos.sum() < 3:
+        return np.nan
+    x_p, y_p = xd[pos], yr[pos]
+    return float(sm.OLS(y_p, sm.add_constant(x_p)).fit().rsquared)
+
+
+def _ols_r2_positive_subset_match_export(x_col, x_data, y_rate, x_data_for_ols=None):
+    """OLS R² on y>0; same x/y scaling as chart legend and r2_diagnostics CSV (see _append_two_part_r2_diagnostics_row)."""
+    xd_ols = x_data if x_data_for_ols is None else x_data_for_ols
+    return _ols_r2_positive_subset(xd_ols, y_rate, x_col)
+
+
+def _fmt_ols_r2(val):
+    return f"{float(val):.4f}" if np.isfinite(val) else "n/a"
+
+
+def _append_two_part_r2_diagnostics_row(
+    r2_list, regression_label, geography, mle_result, x_col, x_data, y_rate, x_line, bayes_mean, ci_method,
+    x_data_for_ols=None,
+):
+    """Append one two-part diagnostics row (McFadden, OLS on positive subset, MLE slopes, PPM at median x if hierarchical Bayes). Returns OLS R².
+    x_data: model space (matches x_line for PPM interp). x_data_for_ols: if set, x used for OLS only (e.g. display-scale x when MLE uses log x)."""
+    ols_r2 = _ols_r2_positive_subset_match_export(x_col, x_data, y_rate, x_data_for_ols)
+    ppm = np.nan
+    if ci_method == 'bayesian' and bayes_mean is not None and len(x_line) > 0:
+        xm = float(np.nanmedian(np.asarray(x_data, dtype=np.float64)))
+        ppm = float(np.interp(xm, np.asarray(x_line, dtype=np.float64), np.asarray(bayes_mean, dtype=np.float64)))
+    r2_list.append((
+        regression_label,
+        geography,
+        float(mle_result['mcfadden_r2']),
+        ols_r2,
+        float(mle_result['slope_mle']),
+        float(mle_result['beta_mle']),
+        ppm,
+    ))
+    return ols_r2
+
+
+def _append_timeline_r2_diagnostics_row(r2_list, regression_label, geography, ols_r2):
+    """Append timeline OLS row. Not the two-part helper: median phase-day OLS only (no McFadden, hurdle slopes, or PPM)."""
+    r2_list.append((
+        regression_label,
+        geography,
+        np.nan,
+        float(ols_r2),
+        np.nan,
+        np.nan,
+        np.nan,
+    ))
+
+
+def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
+                        x_label, y_label, data_label='Cities', apr_year_range='2018-2024',
+                        r2=0.0, ols_r2=None, ci_lo=None, ci_hi=None, ci_method=None,
+                        freq_ci_lo=None, freq_ci_hi=None, bayes_ci_lo=None, bayes_ci_hi=None,
+                        bayes_mean=None,
+                        labels=None, label_cleanup=None, use_log_x=False,
+                        x_tick_dollar=False, x_tick_percent=False, x_tick_days=False,
+                        also_annotate_second_max_x=False):
+    """Unified two-part regression chart. Scatter always filtered to y > 0.
+    x_scatter, y_scatter: raw data arrays (same length; y=0 rows excluded from scatter).
+    x_line, mle_y: MLE curve arrays in display space. ci_lo, ci_hi: CI band over x_line (or None).
+    When freq_ci_lo/hi and bayes_ci_lo/hi are all provided, two bands are drawn (cyan freq, pink bayes, purple overlap).
+    Otherwise single band uses ci_lo/ci_hi with pink and label by ci_method.
+    bayes_mean: if not None, plot posterior predictive mean line (Hierarchical Bayes).
+    ols_r2: if finite, second legend line for OLS R² on y>0 subset (same x scaling as scatter).
+    x_tick_dollar/percent/days: mutually exclusive x-axis formatting flags."""
+    setup_chart_style()
+    fig, ax = _fig_ax_square_plot()
+    nz = y_scatter > 0
+    x_nz, y_nz = x_scatter[nz], y_scatter[nz]
+    labels_nz = labels[nz] if labels is not None else None
+    scatter_suffix = f'n={len(x_scatter)}' + (f'; {apr_year_range}' if apr_year_range else '')
+    line_handle, = ax.plot(x_line, mle_y, color='#4472C4', linewidth=2,
+                           label='Maximum Likelihood Estimation\n(Zero-Hurdle OLS)')
+    bayes_mean_handle = None
+    if bayes_mean is not None:
+        bayes_mean_handle, = ax.plot(x_line, bayes_mean, color='#C04060', linewidth=2, linestyle='-',
+                                     label='Posterior Predictive Mean\n(Hierarchical Bayes)')
+    ci_patch = _draw_ci_bands_on_ax(ax, x_line, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, ci_lo, ci_hi, ci_method)
     scatter_handle = ax.scatter(x_nz, y_nz, color='#ED7D31', alpha=0.6, s=40,
                                 edgecolors='none', label=f'{data_label}\n({scatter_suffix})')
     r2_str = f'{r2:.2e}' if abs(r2) < 0.001 else f'{r2:.3f}'
     r2_handle, = ax.plot([], [], ' ', label=f"McFadden's R² = {r2_str}")
+    r2_ols_handle = None
+    if ols_r2 is not None and np.isfinite(ols_r2):
+        ols_str = f'{ols_r2:.2e}' if abs(ols_r2) < 0.001 else f'{ols_r2:.3f}'
+        r2_ols_handle, = ax.plot([], [], ' ', label=f"OLS R² = {ols_str}")
     ax.set_xlim(x_line.min(), x_line.max())
     if use_log_x:
         ax.set_xscale('log')
     y_max = (np.max(y_nz) if len(y_nz) > 0 else 1) * 1.05
     ax.set_ylim(0, y_max)
+    ann_list = []
     if labels_nz is not None and len(labels_nz) > 0:
         cleanup = label_cleanup or (lambda s: str(s))
-        annotate_top_n_by_y(ax, x_nz, y_nz, labels_nz, n=3, label_cleanup=cleanup)
+        ann_list = annotate_top_n_by_y(ax, x_nz, y_nz, labels_nz, n=3, label_cleanup=cleanup)
         if also_annotate_second_max_x and len(x_nz) >= 2:
             top3_y_idx = set(np.argsort(y_nz)[::-1][:3])
             idx_2nd_x = np.argsort(x_nz)[-2]
             if idx_2nd_x not in top3_y_idx:
-                ax.annotate(cleanup(labels_nz[idx_2nd_x]), (x_nz[idx_2nd_x], y_nz[idx_2nd_x]),
-                            fontsize=7, alpha=0.8, xytext=_xytext_keep_inside(ax, x_nz[idx_2nd_x], y_nz[idx_2nd_x], label=cleanup(labels_nz[idx_2nd_x])),
-                            textcoords='offset points', annotation_clip=True)
+                ann2 = ax.annotate(cleanup(labels_nz[idx_2nd_x]), (x_nz[idx_2nd_x], y_nz[idx_2nd_x]),
+                                   fontsize=7, alpha=0.8, xytext=_xytext_keep_inside(ax, x_nz[idx_2nd_x], y_nz[idx_2nd_x], label=cleanup(labels_nz[idx_2nd_x])),
+                                   textcoords='offset points', annotation_clip=True)
+                ann_list.append(ann2)
+        if ann_list:
+            _resolve_scatter_label_overlaps(ax, fig, ann_list)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_title('')
-    handles = [line_handle] + ([bayes_mean_handle] if bayes_mean_handle is not None else []) + (ci_patch if isinstance(ci_patch, list) else ([ci_patch] if ci_patch is not None else [])) + [scatter_handle, r2_handle]
-    leg = ax.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False)
-    x_lo, x_hi = float(x_line.min()), float(x_line.max())
-    if use_log_x and x_tick_dollar:
-        _set_log_dollar_ticks(ax, x_lo, x_hi)
-    elif use_log_x and x_tick_days:
-        fmt = ScalarFormatter()
-        fmt.set_scientific(False)
-        ax.xaxis.set_major_formatter(fmt)
-    elif use_log_x:
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
-    elif x_tick_dollar:
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'${x:,.0f}'))
-    elif x_tick_percent:
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.0f}%'))
-        ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
-    else:
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
-        ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:,.0f}'))
-    if use_log_x:
-        fig.canvas.draw()
-        if x_tick_dollar:
-            _set_log_dollar_ticks(ax, max(x_lo, 1.0), x_hi)
-        elif x_tick_days:
-            fmt = ScalarFormatter()
-            fmt.set_scientific(False)
-            ax.xaxis.set_major_formatter(fmt)
-    fig.savefig(output_path, dpi=150, bbox_inches='tight', bbox_extra_artists=[leg], facecolor='white')
-    plt.close(fig)
-    print(f"    Saved: {output_path}")
-
-
-def plot_positive_only_chart(x_scatter, y_scatter, output_path,
-                             x_label, y_label, data_label='Cities', apr_year_range='2018-2024',
-                             labels=None, label_cleanup=None, use_log_x=False,
-                             x_tick_dollar=False, x_tick_percent=False, x_tick_days=False,
-                             also_annotate_second_max_x=False):
-    """Simple OLS scatter chart on positive-y data only (zeros excluded)."""
-    nz = y_scatter > 0
-    x_nz, y_nz = x_scatter[nz], y_scatter[nz]
-    if len(x_nz) < 3:
-        print(f"    Skipping positive-only chart (< 3 positive points): {output_path}")
-        return
-    exog = sm.add_constant(x_nz)
-    ols_fit = sm.OLS(y_nz, exog).fit()
-    intercept, slope = ols_fit.params[0], ols_fit.params[1]
-    r2 = ols_fit.rsquared
-    x_line = np.linspace(x_nz.min(), x_nz.max(), 100)
-    y_line = intercept + slope * x_line
-    setup_chart_style()
-    fig, ax = _fig_ax_square_plot()
-    scatter_suffix = f'Zeros Excluded; n={len(x_nz)}' + (f'; {apr_year_range}' if apr_year_range else '')
-    line_handle, = ax.plot(x_line, y_line, color='#4472C4', linewidth=2, label='OLS (Zeros Excluded)')
-    scatter_handle = ax.scatter(x_nz, y_nz, color='#ED7D31', alpha=0.6, s=40,
-                                edgecolors='none', label=f'{data_label}\n({scatter_suffix})')
-    r2_str = f'{r2:.2e}' if abs(r2) < 0.001 else f'{r2:.3f}'
-    r2_handle, = ax.plot([], [], ' ', label=f"R² = {r2_str}")
-    ax.set_xlim(x_line.min(), x_line.max())
-    if use_log_x:
-        ax.set_xscale('log')
-    y_max = np.max(y_nz) * 1.05
-    ax.set_ylim(0, y_max)
-    labels_nz = labels[nz] if labels is not None else None
-    if labels_nz is not None and len(labels_nz) > 0:
-        cleanup = label_cleanup or (lambda s: str(s))
-        annotate_top_n_by_y(ax, x_nz, y_nz, labels_nz, n=3, label_cleanup=cleanup)
-        if also_annotate_second_max_x and len(x_nz) >= 2:
-            top3_y_idx = set(np.argsort(y_nz)[::-1][:3])
-            idx_2nd_x = np.argsort(x_nz)[-2]
-            if idx_2nd_x not in top3_y_idx:
-                ax.annotate(cleanup(labels_nz[idx_2nd_x]), (x_nz[idx_2nd_x], y_nz[idx_2nd_x]),
-                            fontsize=7, alpha=0.8, xytext=_xytext_keep_inside(ax, x_nz[idx_2nd_x], y_nz[idx_2nd_x], label=cleanup(labels_nz[idx_2nd_x])),
-                            textcoords='offset points', annotation_clip=True)
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(y_label)
-    ax.set_title('')
-    handles = [line_handle, scatter_handle, r2_handle]
+    handles = ([line_handle] + ([bayes_mean_handle] if bayes_mean_handle is not None else [])
+               + (ci_patch if isinstance(ci_patch, list) else ([ci_patch] if ci_patch is not None else []))
+               + [scatter_handle, r2_handle]
+               + ([r2_ols_handle] if r2_ols_handle is not None else []))
     leg = ax.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False)
     x_lo, x_hi = float(x_line.min()), float(x_line.max())
     if use_log_x and x_tick_dollar:
@@ -1387,18 +1671,62 @@ def _xytext_keep_inside(ax, x_val, y_val=None, label=None):
 
 
 def annotate_top_n_by_y(ax, x, y, labels, n=3, label_cleanup=None):
-    """Annotate top n points by y (descending). Offset keeps full label text inside plot area."""
+    """Annotate top n points by y (descending). Offset keeps full label text inside plot area. Returns Annotation list."""
     if label_cleanup is None:
         label_cleanup = lambda s: str(s)
     labeled = set()
+    annotations = []
     for idx in np.argsort(y)[::-1]:
         lab = label_cleanup(labels[idx])
         if lab not in labeled:
-            ax.annotate(lab, (x[idx], y[idx]), fontsize=7, alpha=0.8,
-                        xytext=_xytext_keep_inside(ax, x[idx], y[idx], label=lab), textcoords='offset points', annotation_clip=True)
+            ann = ax.annotate(lab, (x[idx], y[idx]), fontsize=7, alpha=0.8,
+                              xytext=_xytext_keep_inside(ax, x[idx], y[idx], label=lab), textcoords='offset points', annotation_clip=True)
+            annotations.append(ann)
             labeled.add(lab)
         if len(labeled) >= n:
             break
+    return annotations
+
+
+def _pair_annotation_bbox_overlap(ann1, ann2, renderer):
+    return ann1.get_window_extent(renderer).overlaps(ann2.get_window_extent(renderer))
+
+
+def _first_overlapping_annotation_pair(annotations, renderer):
+    n_ann = len(annotations)
+    for i in range(n_ann):
+        for j in range(i + 1, n_ann):
+            if _pair_annotation_bbox_overlap(annotations[i], annotations[j], renderer):
+                return i, j
+    return None
+
+
+def _resolve_scatter_label_overlaps(ax, fig, annotations, max_iters=16):
+    """Nudge annotation xyann in point space until label bboxes no longer overlap (bounded)."""
+    if len(annotations) < 2:
+        return
+    base_xy = [np.array(ann.xyann, dtype=float).copy() for ann in annotations]
+    extra = [
+        (0.0, 0.0),
+        (-22.0, 0.0), (22.0, 0.0), (0.0, -16.0), (0.0, 16.0),
+        (-44.0, -10.0), (44.0, -10.0), (-44.0, 10.0), (44.0, 10.0),
+        (-66.0, 0.0), (66.0, 0.0), (0.0, -24.0), (0.0, 24.0),
+    ]
+    n_extra = len(extra)
+    phase = [0] * len(annotations)
+    for _ in range(max_iters):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        pair = _first_overlapping_annotation_pair(annotations, renderer)
+        if pair is None:
+            return
+        fix_idx = pair[1]
+        phase[fix_idx] += 1
+        if phase[fix_idx] >= n_extra:
+            phase[fix_idx] = 1
+        ex, ey = extra[phase[fix_idx]]
+        bx, by = base_xy[fix_idx]
+        annotations[fix_idx].xyann = (bx + ex, by + ey)
 
 
 def _legend_loc_avoid_outliers(ax, fig, x_data, y_data, top_n=3, initial_loc='upper right', legend_fontsize=9):
@@ -1695,11 +2023,21 @@ def hierarchical_ci_transformed(df, year_col, x_col, y_col, years, x_transform='
         print(f"  [hierarchical_ci_transformed] None: x mean/sd invalid (mean={x_mean}, sd={x_sd})")
         return None
     x_std = (x_arr - x_mean) / x_sd
-    cell_idx = (county_idx * n_years + year_idx) if county_idx is not None else None
-    n_cells = n_counties * n_years if county_idx is not None else 0
+    use_year_intercept_re, use_year_slope_re, allow_cy = _hierarchy_re_policy(x_col, True)
+    if allow_cy and county_idx is not None and n_counties >= 2:
+        cell_idx = county_idx * n_years + year_idx
+        n_cells = n_counties * n_years
+    else:
+        cell_idx = None
+        n_cells = 0
+    if not use_year_intercept_re:
+        print("  [hierarchical_ci_transformed] Omitting year and county×year REs (predictor absorbs time window)")
     try:
-        out = _hierarchical_year_county_smc(x_std, y_arr, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
-                                           cell_idx=cell_idx, n_cells=n_cells)
+        out = _hierarchical_year_county_smc(
+            x_std, y_arr, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
+            use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
+            cell_idx=cell_idx, n_cells=n_cells,
+        )
         if out is None:
             raise ValueError("SMC returned None")
         intercept_std, slope_std = out
@@ -1968,13 +2306,21 @@ def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_
         print(f"      [HIERARCHICAL] Constant x (sd=0); skipping SMC")
         return None
     n_years = len(years)
-    cell_idx = (county_idx * n_years + year_idx) if county_idx is not None else None
-    n_cells = n_counties * n_years if county_idx is not None else 0
+    use_year_intercept_re, use_year_slope_re, allow_cy = _hierarchy_re_policy(x_col, x_varies_by_year)
+    if allow_cy and county_idx is not None and n_counties >= 2:
+        cell_idx = county_idx * n_years + year_idx
+        n_cells = n_counties * n_years
+    else:
+        cell_idx = None
+        n_cells = 0
+    if not use_year_intercept_re:
+        print("      [HIERARCHICAL] Omitting year and county×year REs (predictor absorbs time window)")
     print(f"      [HIERARCHICAL] {len(x_arr)} obs across {n_years} years, {n_counties} counties (linear positive part)")
     # --- Fallback cascade ---
     # Step 1: Try hierarchical full two-part (pooled zero + hierarchical positive with year+county+county×year REs)
     result = _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
-                                            x_varies_by_year=x_varies_by_year, cell_idx=cell_idx, n_cells=n_cells)
+                                            use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
+                                            cell_idx=cell_idx, n_cells=n_cells)
     if result is not None:
         return result
     print(f"      [HIERARCHICAL] Full two-part hierarchical failed; trying pooled-zero + hierarchical-positive")
@@ -1990,9 +2336,9 @@ def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_
     if len(x_pos) >= 20:
         cell_idx_pos = cell_idx[positive_mask] if cell_idx is not None else None
         smc_pos = _hierarchical_ci_smc(x_pos, y_model_pos, year_idx_pos, n_years, x_mean, x_sd, n_draws,
-                                            x_varies_by_year=x_varies_by_year,
-                                        county_idx_pos=county_idx_pos, n_counties=n_counties,
-                                        cell_idx_pos=cell_idx_pos, n_cells=n_cells)
+                                       use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
+                                       county_idx_pos=county_idx_pos, n_counties=n_counties,
+                                       cell_idx_pos=cell_idx_pos, n_cells=n_cells)
         if smc_pos is not None:
             x_std_all = (x_arr - x_mean) / x_sd
             z_pos_arr = (y_rate_arr > 0).astype(np.float64)
@@ -2052,8 +2398,8 @@ def _add_county_year_re_to_model(n_cells, include_slope=True):
 
 
 def _hierarchical_year_county_smc(x_std, y_obs, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
-                                  x_varies_by_year=True, cell_idx=None, n_cells=0):
-    """Single PyMC model: population line + year random effects + optional county random effects + optional county×year.
+                                  use_year_intercept_re=True, use_year_slope_re=True, cell_idx=None, n_cells=0):
+    """Single PyMC model: population line + optional year REs + optional county REs + optional county×year.
     Returns (intercept_std, slope_std) in standardized x space, or None on failure.
     When n_counties >= 2, county_idx must be an int array of shape (n_obs,); else county_idx is ignored.
     When use_county and cell_idx/n_cells are provided, county×year REs are added (cell_idx = county_idx * n_years + year_idx).
@@ -2065,12 +2411,14 @@ def _hierarchical_year_county_smc(x_std, y_obs, year_idx, n_years, county_idx, n
     with pm.Model():
         intercept_pop = pm.Normal('intercept_pop', mu=0, sigma=2)
         slope_pop = pm.Normal('slope_pop', mu=0, sigma=1)
-        sigma_int_year = pm.HalfNormal('sigma_int_year', sigma=SIGMA_INT_YEAR)
-        int_year_raw = pm.Normal('int_year_raw', mu=0, sigma=1, shape=n_years)
-        intercept_year = pm.Deterministic('intercept_year', intercept_pop + sigma_int_year * int_year_raw)
+        if use_year_intercept_re:
+            sigma_int_year = pm.HalfNormal('sigma_int_year', sigma=SIGMA_INT_YEAR)
+            int_year_raw = pm.Normal('int_year_raw', mu=0, sigma=1, shape=n_years)
+            intercept_year = pm.Deterministic('intercept_year', intercept_pop + sigma_int_year * int_year_raw)
+        else:
+            intercept_year = None
 
-        # For non-time-varying x, omitting slope_year avoids confounding with slope_pop.
-        if x_varies_by_year:
+        if use_year_slope_re:
             sigma_slope_year = pm.HalfNormal('sigma_slope_year', sigma=SIGMA_SLOPE_YEAR)
             slope_year_raw = pm.Normal('slope_year_raw', mu=0, sigma=1, shape=n_years)
             slope_year = pm.Deterministic('slope_year', slope_pop + sigma_slope_year * slope_year_raw)
@@ -2078,6 +2426,7 @@ def _hierarchical_year_county_smc(x_std, y_obs, year_idx, n_years, county_idx, n
         else:
             slope_year_term = slope_pop
 
+        base_int = intercept_year[year_idx] if use_year_intercept_re else intercept_pop
         if use_county:
             sigma_int_county = pm.HalfNormal('sigma_int_county', sigma=SIGMA_INT_COUNTY)
             sigma_slope_county = pm.HalfNormal('sigma_slope_county', sigma=SIGMA_SLOPE_COUNTY)
@@ -2086,19 +2435,19 @@ def _hierarchical_year_county_smc(x_std, y_obs, year_idx, n_years, county_idx, n
             intercept_county = pm.Deterministic('intercept_county', sigma_int_county * int_county_raw)
             slope_county = pm.Deterministic('slope_county', sigma_slope_county * slope_county_raw)
             if use_cy:
-                intercept_cy, slope_cy = _add_county_year_re_to_model(n_cells, include_slope=x_varies_by_year)
+                intercept_cy, slope_cy = _add_county_year_re_to_model(n_cells, include_slope=use_year_slope_re)
                 slope_cy_term = slope_cy[cell_idx] if slope_cy is not None else 0
                 mu = (
-                    intercept_year[year_idx] + intercept_county[county_idx] + intercept_cy[cell_idx]
+                    base_int + intercept_county[county_idx] + intercept_cy[cell_idx]
                     + (slope_year_term + slope_county[county_idx] + slope_cy_term) * x_std
                 )
             else:
                 mu = (
-                    intercept_year[year_idx] + intercept_county[county_idx]
+                    base_int + intercept_county[county_idx]
                     + (slope_year_term + slope_county[county_idx]) * x_std
                 )
         else:
-            mu = intercept_year[year_idx] + slope_year_term * x_std
+            mu = base_int + slope_year_term * x_std
         sigma_obs = pm.HalfNormal('sigma_obs', sigma=1)
         pm.Normal('y', mu=mu, sigma=sigma_obs, observed=y_obs)
         try:
@@ -2111,8 +2460,8 @@ def _hierarchical_year_county_smc(x_std, y_obs, year_idx, n_years, county_idx, n
 
 
 def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
-                                   x_varies_by_year=True, cell_idx=None, n_cells=0):
-    """Hierarchical full two-part model: pooled zero part (Bernoulli) + hierarchical positive part (year + county + county×year REs).
+                                   use_year_intercept_re=True, use_year_slope_re=True, cell_idx=None, n_cells=0):
+    """Hierarchical full two-part model: pooled zero part (Bernoulli) + hierarchical positive part (optional year / CY REs).
     Fallback cascade: if this model fails, caller should try pooled zero + hierarchical positive-only, then bootstrap.
     Returns dict with alpha_samples, beta_samples, intercept_samples, slope_samples, method or None."""
     x_std = (x_arr - x_mean) / x_sd
@@ -2136,12 +2485,14 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
             pm.Bernoulli('z', p=p_pos, observed=z_pos)
             intercept_pop = pm.Normal('intercept_pop', mu=0, sigma=2)
             slope_pop = pm.Normal('slope_pop', mu=0, sigma=1)
-            sigma_int_year = pm.HalfNormal('sigma_int_year', sigma=SIGMA_INT_YEAR)
-            int_year_raw = pm.Normal('int_year_raw', mu=0, sigma=1, shape=n_years)
-            intercept_year = pm.Deterministic('intercept_year', intercept_pop + sigma_int_year * int_year_raw)
+            if use_year_intercept_re:
+                sigma_int_year = pm.HalfNormal('sigma_int_year', sigma=SIGMA_INT_YEAR)
+                int_year_raw = pm.Normal('int_year_raw', mu=0, sigma=1, shape=n_years)
+                intercept_year = pm.Deterministic('intercept_year', intercept_pop + sigma_int_year * int_year_raw)
+            else:
+                intercept_year = None
 
-            # For non-time-varying x, omitting slope_year avoids confounding with slope_pop.
-            if x_varies_by_year:
+            if use_year_slope_re:
                 sigma_slope_year = pm.HalfNormal('sigma_slope_year', sigma=SIGMA_SLOPE_YEAR)
                 slope_year_raw = pm.Normal('slope_year_raw', mu=0, sigma=1, shape=n_years)
                 slope_year = pm.Deterministic('slope_year', slope_pop + sigma_slope_year * slope_year_raw)
@@ -2149,7 +2500,8 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
             else:
                 slope_year_term = slope_pop
 
-            mu_pos = intercept_year[year_idx_pos] + slope_year_term * x_pos_std
+            int_base = intercept_year[year_idx_pos] if use_year_intercept_re else intercept_pop
+            mu_pos = int_base + slope_year_term * x_pos_std
             if use_county:
                 sigma_int_county = pm.HalfNormal('sigma_int_county', sigma=SIGMA_INT_COUNTY)
                 sigma_slope_county = pm.HalfNormal('sigma_slope_county', sigma=SIGMA_SLOPE_COUNTY)
@@ -2159,7 +2511,7 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
                 slope_county = pm.Deterministic('slope_county', sigma_slope_county * slope_county_raw)
                 mu_pos = mu_pos + intercept_county[county_idx_pos] + slope_county[county_idx_pos] * x_pos_std
             if use_cy:
-                intercept_cy, slope_cy = _add_county_year_re_to_model(n_cells, include_slope=x_varies_by_year)
+                intercept_cy, slope_cy = _add_county_year_re_to_model(n_cells, include_slope=use_year_slope_re)
                 slope_cy_term = slope_cy[cell_idx_pos] if slope_cy is not None else 0
                 mu_pos = mu_pos + intercept_cy[cell_idx_pos] + slope_cy_term * x_pos_std
             sigma_obs = pm.HalfNormal('sigma_obs', sigma=1)
@@ -2187,12 +2539,12 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
 
 
 def _hierarchical_ci_smc(x_pos, y_pos, year_idx_pos, n_years, x_mean, x_sd, n_draws, county_idx_pos=None, n_counties=0,
-                        x_varies_by_year=True, cell_idx_pos=None, n_cells=0):
+                        use_year_intercept_re=True, use_year_slope_re=True, cell_idx_pos=None, n_cells=0):
     """Run PyMC SMC for hierarchical CI (positive part only, no zero part). Returns None on failure."""
     x_std = (x_pos - x_mean) / x_sd
     out = _hierarchical_year_county_smc(
         x_std, y_pos, year_idx_pos, n_years, county_idx_pos, n_counties, x_mean, x_sd, n_draws,
-        x_varies_by_year=x_varies_by_year,
+        use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
         cell_idx=cell_idx_pos, n_cells=n_cells
     )
     if out is None:
@@ -2215,7 +2567,7 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
     """Fit MLE two-part regression on totals, use hierarchical model for CIs.
     county_col: column for hierarchical grouping (always 'county'). Used in hierarchical_ci.
     label_col: column for chart dot labels (e.g. 'JURISDICTION' for cities, 'zipcode' for ZIPs). Falls back to county_col.
-    For x_col in ('zhvi_pct_change', 'pct_afford', 'zori_pct_change', 'zori_pct_afford') we use raw x so negative values are allowed.
+    For x_col in X_COL_TWO_PART_LINEAR_X (% change and dollar-change/income) we use raw x so negative values are allowed.
     For zhvi_afford_ratio and zori_afford_ratio we use raw x (ratio on linear scale; do not log)."""
     if label_col is None:
         label_col = county_col
@@ -2268,7 +2620,7 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
             **({k: hi[k] for k in ('alpha_samples', 'beta_samples') if hi.get(k) is not None}),
         }
     pop_col = 'population'
-    allow_negative_x = (x_col in ('zhvi_pct_change', 'pct_afford', 'zori_pct_change', 'zori_pct_afford'))
+    allow_negative_x = x_col in X_COL_TWO_PART_LINEAR_X
     if x_col in ('zhvi_afford_ratio', 'zori_afford_ratio'):
         log_x = False
     if allow_negative_x:
@@ -2300,23 +2652,23 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
     mle_result = mle_two_part(all_x, all_rate)
     if mle_result is None:
         return None
+    ols_r2_pos = _ols_r2_positive_subset_match_export(x_col, x_raw, all_rate, None)
     print(f"    MLE: intercept = {mle_result['intercept_mle']:.4f}, β = {mle_result['slope_mle']:.4f}")
-    print(f"    McFadden's R² = {mle_result['mcfadden_r2']:.3f}")
-    if r2_diagnostics is not None:
-        r2_diagnostics.append((
-            float(mle_result['mcfadden_r2']),
-            "McFadden's R²",
-            r2_x_label if r2_x_label is not None else x_col,
-            r2_y_label if r2_y_label is not None else y_col,
-            chart_id if chart_id is not None else "",
-            r2_geography if r2_geography is not None else "",
-            float(mle_result['slope_mle']),
-            float(mle_result['beta_mle']),
-        ))
-    if mle_result['mcfadden_r2'] < R2_THRESHOLD_CI_CHART:
+    print(f"    McFadden's R² = {mle_result['mcfadden_r2']:.3f}; OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_pos)}")
+    reg_lbl = f"{r2_y_label if r2_y_label is not None else y_col} vs {r2_x_label if r2_x_label is not None else x_col}"
+    geo_lbl = r2_geography if r2_geography is not None else ""
+    x_line_diag = np.linspace(float(np.nanmin(x_raw)), float(np.nanmax(x_raw)), 100)
+    if mle_result['mcfadden_r2'] < R2_THRESHOLD_TWOPART_MCFADDEN_CHART:
+        if r2_diagnostics is not None:
+            _append_two_part_r2_diagnostics_row(
+                r2_diagnostics, reg_lbl, geo_lbl, mle_result, x_col, x_raw, all_rate, x_line_diag, None, None,
+            )
         if skipped_low_r2 is not None and chart_id is not None:
             skipped_low_r2.append((chart_id, mle_result['mcfadden_r2']))
-        print(f"    McFadden's R² < {R2_THRESHOLD_CI_CHART}, skipping CI and chart")
+        print(
+            f"    McFadden's R² < {R2_THRESHOLD_TWOPART_MCFADDEN_CHART}, skipping CI and chart; "
+            f"OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_pos)}"
+        )
         return None
     x_transform = None if allow_negative_x else ('log' if log_x else None)
     if y_is_rate:
@@ -2346,12 +2698,13 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
         ('MLE Slope (β)', mle_result['slope_mle'], '.4f'), ('P(non-zero) [ψ]', mle_result['psi_mle'], '.4f'),
         ('Log-lik (model)', mle_result['ll_model'], '.2f'), ('Log-lik (null)', mle_result['ll_null'], '.2f'),
         ("McFadden's R²", mle_result['mcfadden_r2'], '.4f'),
+        ('OLS R² (y>0 subset)', ols_r2_pos, '.4f'),
     ]
     print("\n    " + "-"*50 + "\n    MODEL DIAGNOSTICS\n    " + "-"*50)
     for label, val, fmt in diag_rows:
         print(f"    {label:<25} {val:>15{fmt}}")
     print("    " + "-"*50)
-    return {
+    out = {
         'intercept_mle': mle_result['intercept_mle'],
         'slope_mle': mle_result['slope_mle'],
         'alpha_mle': mle_result['alpha_mle'],
@@ -2370,6 +2723,15 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
         'mle_result': mle_result,
         'x_transform': x_transform,
     }
+    _, _, _, _, _, _, _, _, bayes_mean_csv = _build_mle_ci(out, x_line_diag)
+    ci_m_csv = out.get('ci_method')
+    if r2_diagnostics is not None:
+        ols_sq = _append_two_part_r2_diagnostics_row(
+            r2_diagnostics, reg_lbl, geo_lbl, mle_result, x_col, x_raw, all_rate,
+            x_line_diag, bayes_mean_csv, ci_m_csv,
+        )
+        out['ols_rsquared'] = ols_sq
+    return out
 
 
 def _log_spaced_dollar_ticks(x_lo, x_hi, max_ticks=5):
@@ -2463,8 +2825,10 @@ def _plot_income_chart(result, output_path, title_suffix, acs_year_range, apr_ye
     x_range = np.linspace(np.nanmin(x_data), np.nanmax(x_data), 100)
     if is_log_x:
         x_range = np.maximum(x_range, 1e-300)
-    # ZORI afford ratio: display x as % (scale by 100); pass unscaled x_range to _build_mle_ci
-    scale_x_for_plot = (income_label == ZORI_AFFORD_X_LABEL)
+    # Affordability-style ratios: display x as % (scale by 100); pass unscaled x_range to _build_mle_ci
+    scale_x_for_plot = income_label in (
+        ZORI_AFFORD_X_LABEL, PCT_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL,
+    )
     if scale_x_for_plot:
         x_scatter_plot = x_data * 100
         x_line_plot = x_range * 100
@@ -2479,6 +2843,7 @@ def _plot_income_chart(result, output_path, title_suffix, acs_year_range, apr_ye
         x_label=x_label, y_label=y_label,
         data_label=data_label, apr_year_range=apr_year_range,
         r2=result['mcfadden_r2'],
+        ols_r2=result.get('ols_rsquared'),
         ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_method,
         freq_ci_lo=freq_ci_lo, freq_ci_hi=freq_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
         bayes_mean=bayes_mean,
@@ -2486,20 +2851,9 @@ def _plot_income_chart(result, output_path, title_suffix, acs_year_range, apr_ye
         label_cleanup=lambda s: str(s).replace(' COUNTY', ''),
         use_log_x=is_log_x,
         x_tick_dollar=is_log_x and not x_is_days,
-        x_tick_percent=(not is_log_x and income_label in (AFFORD_X_LABEL, PCT_AFFORD_X_LABEL, ZORI_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL)),
-        x_tick_days=is_log_x and x_is_days,
-    )
-    pos_path = output_path.parent / f'pos_{output_path.name}'
-    plot_positive_only_chart(
-        x_scatter=x_scatter_plot, y_scatter=result['y_data'],
-        output_path=pos_path,
-        x_label=x_label, y_label=y_label,
-        data_label=data_label, apr_year_range=apr_year_range,
-        labels=result.get('jurisdictions'),
-        label_cleanup=lambda s: str(s).replace(' COUNTY', ''),
-        use_log_x=is_log_x,
-        x_tick_dollar=is_log_x and not x_is_days,
-        x_tick_percent=(not is_log_x and income_label in (AFFORD_X_LABEL, PCT_AFFORD_X_LABEL, ZORI_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL)),
+        x_tick_percent=(not is_log_x and income_label in (
+            AFFORD_X_LABEL, ZORI_AFFORD_X_LABEL, PCT_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL,
+        )),
         x_tick_days=is_log_x and x_is_days,
     )
 
@@ -2946,6 +3300,15 @@ if __name__ == "__main__":
     if "msa_income" in df_msa.columns and df_msa["msa_income"].dtype == object:
         df_msa["msa_income"] = pd.to_numeric(df_msa["msa_income"], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
 
+    _acs_ifac = _acs_income_inflation_factor(2023)
+    for col, df_src in (
+        ("place_income", df_place),
+        ("county_income", df_county),
+        ("msa_income", df_msa),
+    ):
+        if col in df_src.columns:
+            df_src[col] = _acs_income_to_real_2024(df_src[col].values, _acs_ifac)
+
     # Step 5: merge place → county (for county_income) and place → MSA (for msa_income)
     # Select only needed columns from place data before merging
     # Ensure merge keys are strings and match
@@ -3161,15 +3524,24 @@ if __name__ == "__main__":
             df_final['zhvi_dec2024'].values / np.asarray(df_final['ref_income'], dtype=np.float64),
             np.nan
         )
-        # pct_afford = ZHVI % change × affordability ratio (for _pct_afford regressions)
-        ok_pct_afford = (
+        # pct_afford = real ZHVI dollar change over window / ref_income (same ref as zhvi_afford_ratio)
+        ok_delta_zhvi = (
             df_final['zhvi_pct_change'].notna() & np.isfinite(df_final['zhvi_pct_change'].values)
-            & df_final['zhvi_afford_ratio'].notna() & (df_final['zhvi_afford_ratio'] > 0)
+            & df_final['zhvi_dec2024'].notna() & (df_final['zhvi_dec2024'] > 0)
         )
-        df_final['pct_afford'] = np.where(
-            ok_pct_afford,
-            df_final['zhvi_pct_change'].values * df_final['zhvi_afford_ratio'].values,
-            np.nan
+        delta_zhvi = _dollar_change_real_from_pct_and_level(
+            df_final['zhvi_pct_change'].values,
+            df_final['zhvi_dec2024'].values,
+            ok_delta_zhvi,
+        )
+        ok_pct_afford = (
+            np.isfinite(delta_zhvi)
+            & df_final['ref_income'].notna() & (df_final['ref_income'] > 0)
+        )
+        df_final['pct_afford'] = _numerator_over_ref_income(
+            delta_zhvi,
+            df_final['ref_income'].values,
+            np.asarray(ok_pct_afford, dtype=bool),
         )
     else:
         print(f"\nWARNING: ZHVI file not found: {zhvi_path}")
@@ -3187,7 +3559,7 @@ if __name__ == "__main__":
         df_final = df_final.drop(columns=['city_clean'], errors='ignore')
         zori_matched = df_final['zori_pct_change'].notna().sum()
         print(f"  ZORI: Matched {zori_matched} jurisdictions with zori_pct_change")
-        # ZORI affordability: ratio = (monthly ZORI × 12) / annual ref_income; interaction = zori_pct_change × ratio
+        # ZORI affordability: ratio = (monthly ZORI × 12) / annual ref_income
         ref_income = df_final['ref_income']
         zori_valid = (
             df_final['zori_dec2024'].notna() & (df_final['zori_dec2024'] > 0)
@@ -3199,14 +3571,24 @@ if __name__ == "__main__":
             np.nan
         )
         zori_pct = df_final['zori_pct_change']
-        ok_pct = (
+        ok_delta_zori = (
             zori_pct.notna() & np.isfinite(zori_pct.values)
-            & df_final['zori_afford_ratio'].notna() & (df_final['zori_afford_ratio'] > 0)
+            & df_final['zori_dec2024'].notna() & (df_final['zori_dec2024'] > 0)
         )
-        df_final['zori_pct_afford'] = np.where(
-            ok_pct,
-            zori_pct.values * df_final['zori_afford_ratio'].values,
-            np.nan
+        delta_zori_m = _dollar_change_real_from_pct_and_level(
+            zori_pct.values,
+            df_final['zori_dec2024'].values,
+            ok_delta_zori,
+        )
+        delta_zori_annual = ZORI_MONTHS_PER_YEAR * delta_zori_m
+        ok_zpa = (
+            np.isfinite(delta_zori_annual)
+            & ref_income.notna() & (ref_income > 0)
+        )
+        df_final['zori_pct_afford'] = _numerator_over_ref_income(
+            delta_zori_annual,
+            ref_income.values,
+            np.asarray(ok_zpa, dtype=bool),
         )
     else:
         print(f"\nWARNING: ZORI file not found: {zori_path}")
@@ -3224,18 +3606,6 @@ if __name__ == "__main__":
     # Load full APR with all columns needed for: date-year validation, DB/INC filters, zipcode extraction
     print("\nLoading APR data (single load with zipcode)...")
     df_apr_master = load_a2_csv(apr_path, usecols=None)  # Load all columns
-
-    # Fix year-entered-as-demolition-count (Colfax 2021, Ceres 2020, Hesperia 2022, Campbell 2024)
-    df_apr_master['DEM_DES_UNITS'] = pd.to_numeric(df_apr_master['DEM_DES_UNITS'], errors='coerce').fillna(0)
-    apr_year = pd.to_numeric(df_apr_master['YEAR'], errors='coerce')
-    dem_year_mask = (df_apr_master['DEM_DES_UNITS'] >= 2000) & (abs(df_apr_master['DEM_DES_UNITS'] - apr_year) <= 5)
-    n_dem_fix = dem_year_mask.sum()
-    if n_dem_fix > 0:
-        dem_errors_path = Path(__file__).resolve().parent / "dem_year_entry_errors.csv"
-        df_apr_master[dem_year_mask].to_csv(dem_errors_path, index=False)
-        df_apr_master.loc[dem_year_mask, 'DEM_DES_UNITS'] = 1
-        print(f"  DEM year-entry fix: corrected {n_dem_fix} rows where YEAR was entered as DEM_DES_UNITS")
-        print(f"  Exported pre-fix rows: {dem_errors_path}")
 
     df_apr_master, n_dup = _deduplicate_apr(df_apr_master)
     if n_dup > 0:
@@ -3383,10 +3753,10 @@ if __name__ == "__main__":
     df_apr_db_inc = df_apr_master[[c for c in apr_db_inc_cols if c in df_apr_master.columns]].copy()
     print(f"  Extracted {len(df_apr_db_inc)} rows from APR master")
 
-    # Filter 1: UNIT_CAT contains "5+" (multifamily 5+ units)
+    # Filter 1: UNIT_CAT in MFH bucket (5+ only)
     if "UNIT_CAT" in df_apr_db_inc.columns:
-        df_apr_db_inc = df_apr_db_inc[df_apr_db_inc["UNIT_CAT"].astype(str).str.contains("5+", na=False, regex=False)]
-        print(f"  After UNIT_CAT '5+' filter: {len(df_apr_db_inc)} rows")
+        df_apr_db_inc = df_apr_db_inc[_mf_5plus_mask(df_apr_db_inc)].copy()
+        print(f"  After UNIT_CAT MFH filter (5+ only): {len(df_apr_db_inc)} rows")
 
     # Filter 2: DR_TYPE contains "DB" or "INC" (density bonus or inclusionary)
     if "DR_TYPE" in df_apr_db_inc.columns:
@@ -3878,7 +4248,10 @@ if __name__ == "__main__":
         df_yearly_timeline = None
         if not df_jy.empty and "JURIS_CLEAN" in df_jy.columns and "YEAR" in df_jy.columns:
             if all(c in df_jy.columns for c in TIMELINE_PHASE_DAYS_REQUIRED_YEARLY):
-                cols_cities = ["JURISDICTION", "county", "place_income", "zhvi_pct_change", "zhvi_afford_ratio", "pct_afford", "zori_pct_change", "zori_afford_ratio", "zori_pct_afford", "population"]
+                cols_cities = [
+                    "JURISDICTION", "county", "place_income", "zhvi_pct_change", "zhvi_afford_ratio", "pct_afford",
+                    "zori_pct_change", "zori_afford_ratio", "zori_pct_afford", "population",
+                ]
                 cols_cities = [c for c in cols_cities if c in df_cities_timeline.columns]
                 if cols_cities and not df_jy.empty:
                     df_yearly_timeline = df_jy.merge(
@@ -3925,19 +4298,15 @@ if __name__ == "__main__":
                 b0 = float(ols_fit.params[0])
                 b1 = float(ols_fit.params[1])
                 r2 = float(ols_fit.rsquared)
-                all_r2_results.append((
-                    r2,
-                    "OLS R²",
-                    pred_label,
-                    f"Median {phase_label_map[phase_col]} Days",
-                    f"timeline_{phase_tag}_vs_{pred_col}",
+                _append_timeline_r2_diagnostics_row(
+                    all_r2_results,
+                    f"Median {phase_label_map[phase_col]} Days vs {pred_label}",
                     GEOGRAPHY_CITY,
-                    None,
-                    None,
-                ))
-                if r2 < R2_THRESHOLD_CI_CHART:
+                    r2,
+                )
+                if r2 < R2_THRESHOLD_TIMELINE_OLS_CHART:
                     charts_skipped_low_r2.append((f"timeline_{phase_tag}_vs_{pred_col}", r2))
-                    print(f"  Skipping chart: R² = {r2:.3f} < {R2_THRESHOLD_CI_CHART} for {phase_tag} vs {pred_col}")
+                    print(f"  Skipping chart: OLS R² = {r2:.3f} < {R2_THRESHOLD_TIMELINE_OLS_CHART} for {phase_tag} vs {pred_col}")
                     continue
                 use_hierarchical = use_log_y and (
                     df_yearly_timeline_use is not None and yearly_y_col is not None
@@ -4002,8 +4371,10 @@ if __name__ == "__main__":
                            label=f"Cities with ≥10 projects total\n(n={len(x_orig)})")
                 if "JURISDICTION" in df_timeline_use.columns:
                     juris_names = df_timeline_use.loc[valid, "JURISDICTION"].values
-                    annotate_top_n_by_y(ax, x_orig_plot, y_orig, juris_names, n=3,
-                                       label_cleanup=lambda s: str(s).replace(" COUNTY", ""))
+                    tl_anns = annotate_top_n_by_y(ax, x_orig_plot, y_orig, juris_names, n=3,
+                                                  label_cleanup=lambda s: str(s).replace(" COUNTY", ""))
+                    if tl_anns:
+                        _resolve_scatter_label_overlaps(ax, fig, tl_anns)
                 ols_label = "OLS\n(log-normal)" if use_log_y else "OLS"
                 ax.plot(x_grid_plot, y_line, color=line_color, linewidth=2, linestyle="-", label=ols_label)
                 if intercept_samples is not None:
@@ -4020,10 +4391,10 @@ if __name__ == "__main__":
                 xlabel_base = pred_label if pred_scale == "identity" else f"{pred_label}, log scale"
                 if pred_scale == "identity":
                     ax.set_xlabel(xlabel_base)
-                    if pred_label in (AFFORD_X_LABEL, ZORI_AFFORD_X_LABEL):
-                        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.0f}"))
-                    elif pred_label in (PCT_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL):
-                        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.0f}"))
+                    if pred_label in (
+                        AFFORD_X_LABEL, ZORI_AFFORD_X_LABEL, PCT_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL,
+                    ):
+                        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.0f}%"))
                     elif x_min < 0:
                         ax.xaxis.set_major_locator(MultipleLocator(10))
                         ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.0f}%"))
@@ -4040,8 +4411,8 @@ if __name__ == "__main__":
                     "income" if pred_col == "place_income"
                     else ("zhvi" if pred_col == "zhvi_pct_change"
                     else ("zori" if pred_col == "zori_pct_change"
-                    else ("pct_afford" if pred_col == "pct_afford"
                     else ("zori_afford" if pred_col == "zori_afford_ratio"
+                    else ("pct_afford" if pred_col == "pct_afford"
                     else ("zori_pct_afford" if pred_col == "zori_pct_afford" else "afford"))))))
                 out_path = timeline_dir / f"timeline_{phase_tag}_vs_{pred_tag}.png"
                 if pred_scale == "log" and pred_col == "place_income":
@@ -4101,14 +4472,13 @@ if __name__ == "__main__":
         ('DB', 'Deed Restricted Density Bonus'),
         ('PROJ_DB', 'Density Bonus'),
         ('INC', 'Deed Restricted Non-Bonus Inclusionary'),
-        ('PROJ_INC', 'Non-Bonus Inclusionary'),
         ('total_owner', 'For-Sale'),
         ('TOTAL', 'Net Housing'),
         ('TOTAL_MF', 'Net Multifamily Housing'),
     ]
     # Cities only (counties removed per user request); city predictor loop uses city_predictor_specs below
     cat_specs = [('CO', 'Completions'), ('BP', 'Building Permits')]
-    # Labels for x-axis: income, ZHVI % change, affordability ratio, pct_afford, ZORI % change, ZORI afford ratio/interaction
+    # Labels for x-axis: income, ZHVI/ZORI % change, afford ratios, real dollar change / income
     x_var_labels = {
         'place_income': 'City Median Household Income',
         'zhvi_pct_change': ZHVI_PCT_LABEL,
@@ -4125,10 +4495,10 @@ if __name__ == "__main__":
         ('place_income', 'income', 'log(place_income)', None, False),
         ('zhvi_pct_change', 'zhvi', 'ZHVI % change', None, False),
         ('zhvi_afford_ratio', 'afford', 'affordability ratio', 'Metro Regions only', True),
-        ('pct_afford', 'pct_afford', '(ZHVI % change) × (affordability ratio)', 'Metro Regions only', True),
+        ('pct_afford', 'pct_afford', 'ZHVI real $ change / income', 'Metro Regions only', True),
         ('zori_pct_change', 'zori', 'ZORI % change', None, False),
         ('zori_afford_ratio', 'zori_afford', 'ZORI rent/income ratio', 'Metro Regions only', True),
-        ('zori_pct_afford', 'zori_pct_afford', '(ZORI % change) × (ZORI rent/income ratio)', 'Metro Regions only', True),
+        ('zori_pct_afford', 'zori_pct_afford', 'ZORI annualized real $ change / income', 'Metro Regions only', True),
     ]
     # Dynamic sets for city MFH sub-variants (Task 4)
     la_even_zips = {z for z in df_apr_all.loc[df_apr_all['JURIS_CLEAN'].str.upper() == 'LOS ANGELES', 'zipcode'].dropna().astype(str).unique() if z[-1] in '02468'} if 'zipcode' in df_apr_all.columns else set()
@@ -4138,7 +4508,7 @@ if __name__ == "__main__":
         if x_col not in df_final.columns:
             continue
         base = (df_final['geography_type'] == 'City')
-        if x_col in ('zhvi_pct_change', 'pct_afford', 'zori_pct_change', 'zori_pct_afford'):
+        if x_col in X_COL_TWO_PART_LINEAR_X:
             valid_x = df_final[x_col].notna() & np.isfinite(np.asarray(df_final[x_col].values, dtype=np.float64))
         else:
             valid_x = df_final[x_col].notna() & (df_final[x_col] > 0)
@@ -4189,7 +4559,7 @@ if __name__ == "__main__":
         ('TOTAL_MF_CO', 'PROJ_DB_CO', 'Net Multifamily Completions', 'Density Bonus Completions', 'net_mf_co_to_db_co'),
         ('TOTAL_MF_CO', 'total_owner_CO', 'Net Multifamily Completions', 'Owner Completions', 'net_mf_co_to_owner_co'),
         ('TOTAL_MF_CO', 'VLOW_LOW_CO', 'Net Multifamily Completions', '(Very low + Low) Income Completions', 'net_mf_co_to_vlow_low_co'),
-        ('TOTAL_MF_CO', 'MOD_CO', 'Net Multifamily Completions', 'Moderate Income Completions', 'net_mf_co_to_mod_co'),
+        ('TOTAL_MF_CO', 'MOD_CO', 'Net Multifamily Completions', MODERATE_INCOME_COMPLETIONS_LABEL, 'net_mf_co_to_mod_co'),
         ('TOTAL_MF_BP', 'DB_BP', 'Net Multifamily Building Permits', 'Deed Restricted Density Bonus Permits', 'net_mf_bp_to_dr_db_bp'),
         ('TOTAL_MF_BP', 'PROJ_DB_BP', 'Net Multifamily Building Permits', 'Density Bonus Permits', 'net_mf_bp_to_db_bp'),
         ('TOTAL_MF_BP', 'total_owner_BP', 'Net Multifamily Building Permits', 'Owner Permits', 'net_mf_bp_to_owner_bp'),
@@ -4221,26 +4591,33 @@ if __name__ == "__main__":
                 continue
             ror_file_tag = file_tag + ror_suffix
             geography_ror = _geo_label(GEOGRAPHY_CITY, ror_label)
-            all_r2_results.append((
-                float(mle_result['mcfadden_r2']),
-                "McFadden's R²",
-                f"{x_label} (per 1000 pop)",
-                f"{y_label} (per 1000 pop)",
-                ror_file_tag,
-                geography_ror,
-                float(mle_result['slope_mle']),
-                float(mle_result['beta_mle']),
-            ))
-            if mle_result['mcfadden_r2'] < R2_THRESHOLD_CI_CHART:
-                charts_skipped_low_r2.append((ror_file_tag, mle_result['mcfadden_r2']))
-                print(f"    McFadden's R² = {mle_result['mcfadden_r2']:.3f} < {R2_THRESHOLD_CI_CHART}, skipping CI and chart for {ror_file_tag}")
-                continue
-            print(f"    Two-step MLE: slope(positive part)={mle_result['slope_mle']:.4f}, R²={mle_result['mcfadden_r2']:.4f}")
-            print(f"    N total={mle_result['n_total']}, N positive={mle_result['n_pos']}, N zero={mle_result['n_zero']}")
+            reg_ror = f"{y_label} (per 1000 pop) vs {x_label} (per 1000 pop)"
             x_range_ror = np.linspace(x_pred.min(), x_pred.max(), 100)
+            if mle_result['mcfadden_r2'] < R2_THRESHOLD_TWOPART_MCFADDEN_CHART:
+                ols_r2_line = _ols_r2_positive_subset_match_export(None, mle_result['x'], mle_result['y_rate'], None)
+                _append_two_part_r2_diagnostics_row(
+                    all_r2_results, reg_ror, geography_ror, mle_result, None,
+                    mle_result['x'], mle_result['y_rate'], x_range_ror, None, None,
+                )
+                charts_skipped_low_r2.append((ror_file_tag, mle_result['mcfadden_r2']))
+                print(
+                    f"    McFadden's R² = {mle_result['mcfadden_r2']:.3f} < {R2_THRESHOLD_TWOPART_MCFADDEN_CHART}, "
+                    f"skipping CI and chart for {ror_file_tag}; OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_line)}"
+                )
+                continue
+            ols_r2_line = _ols_r2_positive_subset_match_export(None, mle_result['x'], mle_result['y_rate'], None)
+            print(
+                f"    Two-step MLE: slope(positive part)={mle_result['slope_mle']:.4f}, "
+                f"McFadden R²={mle_result['mcfadden_r2']:.4f}, OLS R² (y>0)={_fmt_ols_r2(ols_r2_line)}"
+            )
+            print(f"    N total={mle_result['n_total']}, N positive={mle_result['n_pos']}, N zero={mle_result['n_zero']}")
             ci_result = ci_two_part(x_pred, y_rate_v, x_range=x_range_ror)
             mle_y_ror = mle_result['predict'](x_range_ror)
             ci_lo, ci_hi, ci_m, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(ci_result, x_range_ror, mle_y=mle_y_ror, mle_result=mle_result)
+            ols_r2_ror = _append_two_part_r2_diagnostics_row(
+                all_r2_results, reg_ror, geography_ror, mle_result, None,
+                mle_result['x'], mle_result['y_rate'], x_range_ror, bayes_mean, ci_m,
+            )
             output_path = Path(__file__).resolve().parent / f'{ror_file_tag}.png'
             city_labels_ror = (df_ror.loc[valid, 'JURISDICTION'].values
                                if 'JURISDICTION' in df_ror.columns else None)
@@ -4251,7 +4628,8 @@ if __name__ == "__main__":
                 output_path=output_path,
                 x_label=x_label_chart, y_label=f'{y_label} (per 1000 pop)',
                 data_label='Cities', apr_year_range='',
-                r2=mle_result['mcfadden_r2'], ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_m,
+                r2=mle_result['mcfadden_r2'], ols_r2=ols_r2_ror,
+                ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_m,
                 freq_ci_lo=freq_ci_lo, freq_ci_hi=freq_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
                 bayes_mean=bayes_mean,
                 labels=city_labels_ror)
@@ -4349,7 +4727,7 @@ if __name__ == "__main__":
             df_zip["net_BP"] = df_zip["net_BP"].fillna(0).astype(int)
         else:
             df_zip["net_BP"] = 0
-        # Net multifamily (5+ units) completions and BP by ZIP from df_apr_all
+        # Net multifamily (5+ UNIT_CAT only) completions and BP by ZIP from df_apr_all
         if "zipcode" in df_apr_all.columns and "units_CO" in df_apr_all.columns and "units_BP" in df_apr_all.columns:
             mf_mask = mf_mask_all
             z_norm_mf = df_apr_all["zipcode"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(5)
@@ -4405,6 +4783,7 @@ if __name__ == "__main__":
             # Join ACS income to ZIP aggregates (ZIP ≈ ZCTA for most cases)
             df_zip = df_zip.merge(df_acs_zcta, left_on='zipcode', right_on='zcta', how='left')
             df_zip = df_zip.drop(columns=['zcta'], errors='ignore')
+            df_zip["median_income"] = _acs_income_to_real_2024(df_zip["median_income"].values, _acs_ifac)
             n_income = df_zip['median_income'].notna().sum()
             print(f"  ZIPs with ACS income: {n_income}")
             if n_income < 20:
@@ -4437,6 +4816,7 @@ if __name__ == "__main__":
             df_zip['ref_income'] = df_zip['msa_income'].fillna(df_zip['county_income'])
             print(f"  ZIPs with regional income (MSA or county): {df_zip['ref_income'].notna().sum()}")
         else:
+            df_zip['msa_income'] = np.nan
             df_zip['ref_income'] = df_zip['county_income']
         # Load ZHVI by ZIP
         zhvi_zip_path = Path(__file__).resolve().parent / "Zip_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv"
@@ -4452,14 +4832,23 @@ if __name__ == "__main__":
                 df_zip['zhvi_dec2024'].values / np.asarray(df_zip['ref_income'], dtype=np.float64),
                 np.nan
             )
-            ok_pct_afford_zip = (
+            ok_delta_zhvi_z = (
                 df_zip['zhvi_pct_change'].notna() & np.isfinite(df_zip['zhvi_pct_change'].values)
-                & df_zip['zhvi_afford_ratio'].notna() & (df_zip['zhvi_afford_ratio'] > 0)
+                & df_zip['zhvi_dec2024'].notna() & (df_zip['zhvi_dec2024'] > 0)
             )
-            df_zip['pct_afford'] = np.where(
-                ok_pct_afford_zip,
-                df_zip['zhvi_pct_change'].values * df_zip['zhvi_afford_ratio'].values,
-                np.nan
+            delta_zhvi_z = _dollar_change_real_from_pct_and_level(
+                df_zip['zhvi_pct_change'].values,
+                df_zip['zhvi_dec2024'].values,
+                ok_delta_zhvi_z,
+            )
+            ok_pct_afford_zip = (
+                np.isfinite(delta_zhvi_z)
+                & df_zip['ref_income'].notna() & (df_zip['ref_income'] > 0)
+            )
+            df_zip['pct_afford'] = _numerator_over_ref_income(
+                delta_zhvi_z,
+                df_zip['ref_income'].values,
+                np.asarray(ok_pct_afford_zip, dtype=bool),
             )
         else:
             print(f"  WARNING: ZHVI ZIP file not found: {zhvi_zip_path}")
@@ -4476,7 +4865,7 @@ if __name__ == "__main__":
             df_zori_zip = load_zori_zip(zori_zip_path, target_zips)
             df_zip = df_zip.merge(df_zori_zip, on='zipcode', how='left')
             print(f"  ZIPs with zori_pct_change: {df_zip['zori_pct_change'].notna().sum() if 'zori_pct_change' in df_zip.columns else 0}")
-            # ZORI affordability at ZIP: same formula (monthly × 12 / ref_income); then interaction
+            # ZORI affordability at ZIP: same formula (monthly × 12 / ref_income)
             ref_income_zip = df_zip['ref_income']
             zori_valid_zip = (
                 df_zip['zori_dec2024'].notna() & (df_zip['zori_dec2024'] > 0)
@@ -4488,14 +4877,24 @@ if __name__ == "__main__":
                 np.nan
             )
             zori_pct_zip = df_zip['zori_pct_change']
-            ok_pct_zip = (
+            ok_delta_zori_z = (
                 zori_pct_zip.notna() & np.isfinite(zori_pct_zip.values)
-                & df_zip['zori_afford_ratio'].notna() & (df_zip['zori_afford_ratio'] > 0)
+                & df_zip['zori_dec2024'].notna() & (df_zip['zori_dec2024'] > 0)
             )
-            df_zip['zori_pct_afford'] = np.where(
-                ok_pct_zip,
-                zori_pct_zip.values * df_zip['zori_afford_ratio'].values,
-                np.nan
+            delta_zori_m_z = _dollar_change_real_from_pct_and_level(
+                zori_pct_zip.values,
+                df_zip['zori_dec2024'].values,
+                ok_delta_zori_z,
+            )
+            delta_zori_annual_z = ZORI_MONTHS_PER_YEAR * delta_zori_m_z
+            ok_zpa_zip = (
+                np.isfinite(delta_zori_annual_z)
+                & ref_income_zip.notna() & (ref_income_zip > 0)
+            )
+            df_zip['zori_pct_afford'] = _numerator_over_ref_income(
+                delta_zori_annual_z,
+                ref_income_zip.values,
+                np.asarray(ok_zpa_zip, dtype=bool),
             )
         else:
             df_zip['zori_pct_change'] = np.nan
@@ -4582,7 +4981,10 @@ if __name__ == "__main__":
             zip_cnty_norm = zip_cnty[["zipcode", "county"]].copy()
             zip_cnty_norm["zipcode"] = zip_cnty_norm["zipcode"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(5)
             zip_yearly = zip_yearly.merge(zip_cnty_norm, on="zipcode", how="left")
-            pred_cols = [c for c in ["population", "median_income", "zhvi_pct_change", "zhvi_afford_ratio", "pct_afford", "zori_pct_change", "zori_dec2024", "zori_afford_ratio", "zori_pct_afford"] if c in df_zip.columns]
+            pred_cols = [c for c in [
+                "population", "median_income", "zhvi_pct_change", "zhvi_afford_ratio", "pct_afford",
+                "zori_pct_change", "zori_dec2024", "zori_afford_ratio", "zori_pct_afford",
+            ] if c in df_zip.columns]
             zip_yearly = zip_yearly.merge(df_zip[["zipcode"] + pred_cols].drop_duplicates(subset=["zipcode"]), on="zipcode", how="left")
             pop_ok = zip_yearly["population"].notna() & (zip_yearly["population"] > 0)
             zip_yearly["net_rate"] = np.where(pop_ok, (zip_yearly["net_CO"].astype(float) / zip_yearly["population"].astype(float)) * 1000, np.nan)
@@ -4603,20 +5005,27 @@ if __name__ == "__main__":
             ('total_db_CO', 'Density Bonus Completions'),
             ('total_owner_CO', 'Owner Completions'),
             ('vlow_low_CO', '(Very low + Low) Income Completions'),
-            ('mod_CO', 'Moderate Income Completions'),
+            ('mod_CO', MODERATE_INCOME_COMPLETIONS_LABEL),
         ]
-        # (x_col, x_tag, x_axis_label, use_log_x, x_tick_dollar) — one loop, no branch by predictor type
-        # ZIP afford ratios use county income; axis labels state "County" accordingly
+        # (x_col, x_tag, x_axis_label, use_log_x, x_tick_dollar, require_msa) — one loop, no branch by predictor type
+        # For ZIP ref-income predictors, enforce Metro Regions only (msa_income required), matching city policy.
         zip_predictor_specs = [
-            ('median_income', 'income', "ZIP Median household income (ACS 2019-2023), log scale", True, True),
-            ('zhvi_pct_change', 'zhvi', ZHVI_PCT_LABEL, False, False),
-            ('zhvi_afford_ratio', 'afford', AFFORD_X_LABEL_ZIP, False, False),
-            ('pct_afford', 'pct_afford', PCT_AFFORD_X_LABEL_ZIP, False, False),
-            ('zori_pct_change', 'zori', ZORI_PCT_LABEL, False, False),
-            ('zori_afford_ratio', 'zori_afford', ZORI_AFFORD_X_LABEL_ZIP, False, False),
-            ('zori_pct_afford', 'zori_pct_afford', ZORI_PCT_AFFORD_X_LABEL_ZIP, False, False),
+            ('median_income', 'income', "ZIP Median household income (ACS 2019-2023), log scale", True, True, False),
+            ('zhvi_pct_change', 'zhvi', ZHVI_PCT_LABEL, False, False, False),
+            ('zhvi_afford_ratio', 'afford', AFFORD_X_LABEL_ZIP, False, False, True),
+            ('pct_afford', 'pct_afford', PCT_AFFORD_X_LABEL_ZIP, False, False, True),
+            ('zori_pct_change', 'zori', ZORI_PCT_LABEL, False, False, False),
+            ('zori_afford_ratio', 'zori_afford', ZORI_AFFORD_X_LABEL_ZIP, False, False, True),
+            ('zori_pct_afford', 'zori_pct_afford', ZORI_PCT_AFFORD_X_LABEL_ZIP, False, False, True),
         ]
-        zip_x_var_labels = {**x_var_labels, 'zhvi_afford_ratio': AFFORD_X_LABEL_ZIP, 'pct_afford': PCT_AFFORD_X_LABEL_ZIP, 'zori_pct_change': ZORI_PCT_LABEL, 'zori_afford_ratio': ZORI_AFFORD_X_LABEL_ZIP, 'zori_pct_afford': ZORI_PCT_AFFORD_X_LABEL_ZIP}
+        zip_x_var_labels = {
+            **x_var_labels,
+            'zhvi_afford_ratio': AFFORD_X_LABEL_ZIP,
+            'pct_afford': PCT_AFFORD_X_LABEL_ZIP,
+            'zori_pct_change': ZORI_PCT_LABEL,
+            'zori_afford_ratio': ZORI_AFFORD_X_LABEL_ZIP,
+            'zori_pct_afford': ZORI_PCT_AFFORD_X_LABEL_ZIP,
+        }
         
         # ZIP regressions: two-part rate (per 1000 pop), same as city. Population from ACS ZCTA.
         if 'population' not in df_zip.columns or (df_zip['population'].notna() & (df_zip['population'] > 0)).sum() < 20:
@@ -4636,7 +5045,7 @@ if __name__ == "__main__":
                 ('net_MF_CO', 'total_db_CO', 'Net Multifamily Completions', 'Density Bonus Completions', 'net_mf_co_to_db_co'),
                 ('net_MF_CO', 'total_owner_CO', 'Net Multifamily Completions', 'Owner Completions', 'net_mf_co_to_owner_co'),
                 ('net_MF_CO', 'vlow_low_CO', 'Net Multifamily Completions', '(Very low + Low) Income Completions', 'net_mf_co_to_vlow_low_co'),
-                ('net_MF_CO', 'mod_CO', 'Net Multifamily Completions', 'Moderate Income Completions', 'net_mf_co_to_mod_co'),
+                ('net_MF_CO', 'mod_CO', 'Net Multifamily Completions', MODERATE_INCOME_COMPLETIONS_LABEL, 'net_mf_co_to_mod_co'),
                 ('net_MF_BP', 'dr_db_BP', 'Net Multifamily Building Permits', 'Deed Restricted Density Bonus Permits', 'net_mf_bp_to_dr_db_bp'),
                 ('net_MF_BP', 'total_db_BP', 'Net Multifamily Building Permits', 'Density Bonus Permits', 'net_mf_bp_to_db_bp'),
                 ('net_MF_BP', 'total_owner_BP', 'Net Multifamily Building Permits', 'Owner Permits', 'net_mf_bp_to_owner_bp'),
@@ -4663,22 +5072,25 @@ if __name__ == "__main__":
                     if mle_result is None:
                         continue
                     geography_zip = _geo_label(GEOGRAPHY_ZIP, exclude_label)
-                    all_r2_results.append((
-                        float(mle_result['mcfadden_r2']),
-                        "McFadden's R²",
-                        f"{x_label} (per 1000 pop)",
-                        f"{y_label} (per 1000 pop)",
-                        f"zip_{file_tag}{suffix}",
-                        geography_zip,
-                        float(mle_result['slope_mle']),
-                        float(mle_result['beta_mle']),
-                    ))
-                    if mle_result['mcfadden_r2'] < R2_THRESHOLD_CI_CHART:
-                        charts_skipped_low_r2.append((f"zip_{file_tag}{suffix}", mle_result['mcfadden_r2']))
-                        print(f"      McFadden's R² = {mle_result['mcfadden_r2']:.3f} < {R2_THRESHOLD_CI_CHART}, skipping CI and chart")
-                        continue
-                    print(f"      Two-step MLE: slope={mle_result['slope_mle']:.4f}, R²={mle_result['mcfadden_r2']:.4f}, n={mle_result['n_total']}")
+                    reg_zip_ror = f"{y_label} (per 1000 pop) vs {x_label} (per 1000 pop)"
                     x_range_ror = np.linspace(x_pred.min(), x_pred.max(), 100)
+                    if mle_result['mcfadden_r2'] < R2_THRESHOLD_TWOPART_MCFADDEN_CHART:
+                        ols_r2_line = _ols_r2_positive_subset_match_export(None, mle_result['x'], mle_result['y_rate'], None)
+                        _append_two_part_r2_diagnostics_row(
+                            all_r2_results, reg_zip_ror, geography_zip, mle_result, None,
+                            mle_result['x'], mle_result['y_rate'], x_range_ror, None, None,
+                        )
+                        charts_skipped_low_r2.append((f"zip_{file_tag}{suffix}", mle_result['mcfadden_r2']))
+                        print(
+                            f"      McFadden's R² = {mle_result['mcfadden_r2']:.3f} < {R2_THRESHOLD_TWOPART_MCFADDEN_CHART}, "
+                            f"skipping CI and chart; OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_line)}"
+                        )
+                        continue
+                    ols_r2_line = _ols_r2_positive_subset_match_export(None, mle_result['x'], mle_result['y_rate'], None)
+                    print(
+                        f"      Two-step MLE: slope={mle_result['slope_mle']:.4f}, "
+                        f"McFadden R²={mle_result['mcfadden_r2']:.4f}, OLS R² (y>0)={_fmt_ols_r2(ols_r2_line)}, n={mle_result['n_total']}"
+                    )
                     ci_result = fit_two_part_with_ci(
                         None, None, x_col, y_col, None,
                         log_x=False, y_is_rate=True,
@@ -4691,6 +5103,10 @@ if __name__ == "__main__":
                         ci_result = ci_two_part(x_pred, y_rate_v, x_range=x_range_ror)
                     mle_y_ror = mle_result['predict'](x_range_ror)
                     ci_lo, ci_hi, ci_m, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(ci_result, x_range_ror, mle_y=mle_y_ror, mle_result=mle_result)
+                    ols_r2_zip_ror = _append_two_part_r2_diagnostics_row(
+                        all_r2_results, reg_zip_ror, geography_zip, mle_result, None,
+                        mle_result['x'], mle_result['y_rate'], x_range_ror, bayes_mean, ci_m,
+                    )
                     output_path = Path(__file__).resolve().parent / f'zip_{file_tag}{suffix}.png'
                     ror_valid = np.isfinite(x_pred) & np.isfinite(y_rate_v) & (y_rate_v >= 0)
                     zip_labels_ror = (df_use.loc[valid, 'zipcode'].values[ror_valid] if 'zipcode' in df_use.columns
@@ -4702,15 +5118,10 @@ if __name__ == "__main__":
                         output_path=output_path,
                         x_label=x_label_full, y_label=f'{y_label} (per 1000 pop)',
                         data_label='ZIP Codes', apr_year_range='',
-                        r2=mle_result['mcfadden_r2'], ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_m,
+                        r2=mle_result['mcfadden_r2'], ols_r2=ols_r2_zip_ror,
+                        ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_m,
                         freq_ci_lo=freq_ci_lo, freq_ci_hi=freq_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
                         bayes_mean=bayes_mean,
-                        labels=zip_labels_ror, also_annotate_second_max_x=True)
-                    plot_positive_only_chart(
-                        x_scatter=mle_result['x'], y_scatter=mle_result['y_rate'],
-                        output_path=output_path.parent / f'pos_{output_path.name}',
-                        x_label=x_label_full, y_label=f'{y_label} (per 1000 pop)',
-                        data_label='ZIP Codes', apr_year_range='',
                         labels=zip_labels_ror, also_annotate_second_max_x=True)
             # Outcome×predictor at ZIP: MFH outcomes get all 4 variants; non-MFH get baseline only
             for y_col, y_label in zip_outcomes:
@@ -4719,17 +5130,19 @@ if __name__ == "__main__":
                     df_use = df_zip if exclude_zips is None else df_zip[~df_zip['zipcode'].astype(str).isin({str(z) for z in exclude_zips})].copy()
                     if len(df_use) < 20:
                         continue
-                    use_zips = set(df_use['zipcode'].astype(str).str.zfill(5))
-                    for x_col, x_tag, x_axis_label, use_log_x, x_tick_dollar in zip_predictor_specs:
+                    for x_col, x_tag, x_axis_label, use_log_x, x_tick_dollar, require_msa in zip_predictor_specs:
                         if x_col not in df_use.columns or df_use[x_col].notna().sum() < 20:
                             print(f"\n  Skipping {y_label} vs {x_col}{suffix or ''}: insufficient predictor data")
                             continue
                         pred_ok = (df_use[x_col].notna() & np.isfinite(df_use[x_col].values)) if not use_log_x else (df_use[x_col].notna() & (df_use[x_col] > 0))
+                        if require_msa:
+                            pred_ok = pred_ok & df_use['msa_income'].notna()
                         valid = pred_ok & df_use[y_col].notna() & df_use['population'].notna() & (df_use['population'] > 0)
                         df_v = df_use[valid]
                         if len(df_v) < 20:
                             print(f"\n  Skipping {y_label} vs {x_col}{suffix or ''}: insufficient ZIPs with population")
                             continue
+                        use_zips = set(df_v['zipcode'].astype(str).str.zfill(5))
                         x_pred = df_v[x_col].values.astype(float) if not use_log_x else np.log(df_v[x_col].values)
                         y_rate = (df_v[y_col].values.astype(float) / df_v['population'].values) * 1000.0
                         print(f"\n  --- {y_label} vs {'raw ' + x_col if not use_log_x else 'log(' + x_col + ')'}{suffix or ''} ---")
@@ -4738,22 +5151,32 @@ if __name__ == "__main__":
                             print(f"      Insufficient data for two-step MLE")
                             continue
                         geography_zip = _geo_label(GEOGRAPHY_ZIP, exclude_label)
-                        all_r2_results.append((
-                            float(mle_result['mcfadden_r2']),
-                            "McFadden's R²",
-                            x_axis_label,
-                            f"{y_label} (per 1000 pop)",
-                            f"zip_{y_col.replace('total_', '')}_{x_tag}{suffix or ''}",
-                            geography_zip,
-                            float(mle_result['slope_mle']),
-                            float(mle_result['beta_mle']),
-                        ))
-                        if mle_result['mcfadden_r2'] < R2_THRESHOLD_CI_CHART:
-                            charts_skipped_low_r2.append((f"zip_{y_col.replace('total_', '')}_{x_tag}{suffix or ''}", mle_result['mcfadden_r2']))
-                            print(f"      McFadden's R² = {mle_result['mcfadden_r2']:.3f} < {R2_THRESHOLD_CI_CHART}, skipping CI and chart")
-                            continue
-                        print(f"      Two-step MLE: slope={mle_result['slope_mle']:.4f}, R²={mle_result['mcfadden_r2']:.4f}, n={mle_result['n_total']}")
+                        reg_zip_out = f"{y_label} (per 1000 pop) vs {x_axis_label}"
                         x_range_ror = np.linspace(x_pred.min(), x_pred.max(), 100)
+                        x_disp_ols = np.exp(mle_result['x']) if use_log_x else mle_result['x']
+                        x_for_ols = x_disp_ols if use_log_x else None
+                        if mle_result['mcfadden_r2'] < R2_THRESHOLD_TWOPART_MCFADDEN_CHART:
+                            ols_r2_line = _ols_r2_positive_subset_match_export(
+                                x_col, mle_result['x'], mle_result['y_rate'], x_for_ols,
+                            )
+                            _append_two_part_r2_diagnostics_row(
+                                all_r2_results, reg_zip_out, geography_zip, mle_result, x_col,
+                                mle_result['x'], mle_result['y_rate'], x_range_ror, None, None,
+                                x_data_for_ols=x_disp_ols,
+                            )
+                            charts_skipped_low_r2.append((f"zip_{y_col.replace('total_', '')}_{x_tag}{suffix or ''}", mle_result['mcfadden_r2']))
+                            print(
+                                f"      McFadden's R² = {mle_result['mcfadden_r2']:.3f} < {R2_THRESHOLD_TWOPART_MCFADDEN_CHART}, "
+                                f"skipping CI and chart; OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_line)}"
+                            )
+                            continue
+                        ols_r2_line = _ols_r2_positive_subset_match_export(
+                            x_col, mle_result['x'], mle_result['y_rate'], x_for_ols,
+                        )
+                        print(
+                            f"      Two-step MLE: slope={mle_result['slope_mle']:.4f}, "
+                            f"McFadden R²={mle_result['mcfadden_r2']:.4f}, OLS R² (y>0)={_fmt_ols_r2(ols_r2_line)}, n={mle_result['n_total']}"
+                        )
                         pred_filter = (lambda zy_df: (zy_df[x_col].notna() & np.isfinite(zy_df[x_col].values))
                                        if not use_log_x else (zy_df[x_col].notna() & (zy_df[x_col] > 0)))
                         ci_result = (
@@ -4774,30 +5197,37 @@ if __name__ == "__main__":
                             ci_result = ci_two_part(x_pred, y_rate, x_range=x_range_ror)
                         mle_y_ror = mle_result['predict'](x_range_ror)
                         ci_lo, ci_hi, ci_m, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(ci_result, x_range_ror, mle_y=mle_y_ror, mle_result=mle_result)
+                        ols_r2_zip_out = _append_two_part_r2_diagnostics_row(
+                            all_r2_results, reg_zip_out, geography_zip, mle_result, x_col,
+                            mle_result['x'], mle_result['y_rate'], x_range_ror, bayes_mean, ci_m,
+                            x_data_for_ols=x_disp_ols,
+                        )
                         file_tag = f'{y_col.replace("total_", "")}_{x_tag}{suffix}'
                         output_path = Path(__file__).resolve().parent / f'zip_{file_tag}.png'
                         out_valid = np.isfinite(x_pred) & np.isfinite(y_rate) & (y_rate >= 0)
                         zip_labels = (df_v['zipcode'].values[out_valid] if 'zipcode' in df_v.columns
                                       else np.array([f'ZIP_{i}' for i in np.where(out_valid)[0]]))
-                        x_scatter_display = np.exp(mle_result['x']) if use_log_x else mle_result['x']
+                        x_scatter_display = x_disp_ols
                         x_line_display = np.exp(x_range_ror) if use_log_x else x_range_ror
-                        x_label_full = f'{x_axis_label}\n{exclude_label}' if exclude_label else x_axis_label
+                        filter_note = "Metro Regions only" if require_msa else None
+                        if exclude_label and filter_note:
+                            x_label_full = f'{x_axis_label}\n{filter_note}; {exclude_label}'
+                        elif exclude_label:
+                            x_label_full = f'{x_axis_label}\n{exclude_label}'
+                        elif filter_note:
+                            x_label_full = f'{x_axis_label}\n{filter_note}'
+                        else:
+                            x_label_full = x_axis_label
                         plot_two_part_chart(
                             x_scatter=x_scatter_display, y_scatter=mle_result['y_rate'],
                             x_line=x_line_display, mle_y=mle_result['predict'](x_range_ror),
                             output_path=output_path,
                             x_label=x_label_full, y_label=f'{y_label} (per 1000 pop)',
                             data_label='ZIP Codes', apr_year_range='',
-                            r2=mle_result['mcfadden_r2'], ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_m,
+                            r2=mle_result['mcfadden_r2'], ols_r2=ols_r2_zip_out,
+                            ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_m,
                             freq_ci_lo=freq_ci_lo, freq_ci_hi=freq_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
                             bayes_mean=bayes_mean,
-                            labels=zip_labels, use_log_x=use_log_x, x_tick_dollar=x_tick_dollar,
-                            also_annotate_second_max_x=True)
-                        plot_positive_only_chart(
-                            x_scatter=x_scatter_display, y_scatter=mle_result['y_rate'],
-                            output_path=output_path.parent / f'pos_{output_path.name}',
-                            x_label=x_label_full, y_label=f'{y_label} (per 1000 pop)',
-                            data_label='ZIP Codes', apr_year_range='',
                             labels=zip_labels, use_log_x=use_log_x, x_tick_dollar=x_tick_dollar,
                             also_annotate_second_max_x=True)
     else:
@@ -4806,12 +5236,14 @@ if __name__ == "__main__":
     # R² diagnostics: table (descending) and CSV with Regression = "Y vs X", Geography separate
     if all_r2_results:
         df_r2 = pd.DataFrame(
-            [
-                (r2, r2_type, f"{y_label} vs {x_label}", geo, slope_coeff, hurdle_coeff)
-                for (r2, r2_type, x_label, y_label, _chart_id, geo, slope_coeff, hurdle_coeff) in all_r2_results
+            all_r2_results,
+            columns=[
+                "Regression", "Geography", "McFadden_R2", "OLS_R2_positive_subset",
+                "Positive_part_slope_MLE", "Zero_hurdle_slope_MLE", "PPM_at_median_x",
             ],
-            columns=["R_squared", "R_squared_type", "Regression", "Geography", "Positive_part_coefficient", "Zero_hurdle_coefficient"],
-        ).sort_values("R_squared", ascending=False).reset_index(drop=True)
+        )
+        df_r2["sort_key"] = df_r2[["McFadden_R2", "OLS_R2_positive_subset"]].max(axis=1, skipna=True)
+        df_r2 = df_r2.sort_values("sort_key", ascending=False, na_position="last").drop(columns=["sort_key"]).reset_index(drop=True)
         sep = "=" * 70
         print("\n" + sep)
         print("R² diagnostics (all regressions, descending)")
@@ -4823,7 +5255,7 @@ if __name__ == "__main__":
         print(f"  Wrote: {r2_csv_path.name}")
     if charts_skipped_low_r2:
         print("\n" + "="*70)
-        print(f"Charts not produced (R² < {R2_THRESHOLD_CI_CHART})")
+        print(f"Charts not produced (threshold {R2_THRESHOLD}: timeline scatter uses OLS R², two-part uses McFadden's R²)")
         print("="*70)
         for chart_id, r2 in charts_skipped_low_r2:
             print(f"  {chart_id}: R² = {r2:.4f}")
