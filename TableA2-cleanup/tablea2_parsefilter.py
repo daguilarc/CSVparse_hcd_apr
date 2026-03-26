@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Clean APR TableA2 CSV with PARSEFILTER: structural parse repair + basic filters.
+"""Clean APR TableA2 CSV with PARSEFILTER: structural parse repair + quality filters.
 
 Uses a two-pass raw-text structural repair before pandas parsing:
 1. Fix malformed opener pattern that starts ambiguous quoted fields
 2. Fix orphaned closer pattern at start of subsequent lines
 
-Then applies date-year validation and year-range filters.
+Then applies date-year validation, deduplication, and targeted repair diagnostics.
 
 Outputs:
-- tablea2_cleaned_basicfilter.csv: All rows that pass date-year validation
-- malformed_rows_basicfilter.csv: Rows dropped for date-year mismatch
-- before_quote_fix.csv: Only rows affected by quote-fix logic (before repair)
-- after_quote_fix.csv: Only rows affected by quote-fix logic (after repair)
+- tablea2_cleaned_parsefilter.csv: Rows kept after parse repair + validation
+- malformed_rows_parsefilter.csv: Rows dropped for date-year mismatch
+- before_quote_fix.csv: Rows affected by quote-fix logic (before repair)
+- after_quote_fix.csv: Rows affected by quote-fix logic (after repair)
+- recovery_summary.csv: Parse/repair and drop-count summary metrics
+- matched_truncated.csv: Truncated closer rows matched to cleaned projects
+- unmatched_truncated.csv: Truncated closer rows without a cleaned-project match
 """
 
 import io
@@ -48,16 +51,6 @@ after_fix_path = _out_dir / "after_quote_fix.csv"
 recovery_summary_path = _out_dir / "recovery_summary.csv"
 matched_truncated_path = _out_dir / "matched_truncated.csv"
 unmatched_truncated_path = _out_dir / "unmatched_truncated.csv"
-
-# Column names (from CSV header - verified with head -1)
-YEAR_COL = 'YEAR'
-ENT_DATE_COL = 'ENT_APPROVE_DT1'  # NOT "APPROVED"
-ENTITLEMENTS_COL = 'NO_ENTITLEMENTS'
-ISS_DATE_COL = 'BP_ISSUE_DT1'
-PERMITS_COL = 'NO_BUILDING_PERMITS'
-CO_DATE_COL = 'CO_ISSUE_DT1'
-CO_COUNT_COL = 'NO_OTHER_FORMS_OF_READINESS'  # NOT "NO_COs"
-
 
 def extract_year_from_date(val):
     """Extract year from date string. Returns year as int or None if invalid/empty."""
@@ -313,15 +306,15 @@ if column_shift_repaired:
 # Step 2: Date-year validation
 # One row pass: check all three permit types (ISS_DATE, ENT_DATE, CO_DATE)
 _DATE_CHECK_CONFIG = [
-    (ISS_DATE_COL, PERMITS_COL, "ISS_DATE mismatch"),
-    (ENT_DATE_COL, ENTITLEMENTS_COL, "ENT_DATE mismatch"),
-    (CO_DATE_COL, CO_COUNT_COL, "CO_DATE mismatch"),
+    ('BP_ISSUE_DT1', 'NO_BUILDING_PERMITS', "ISS_DATE mismatch"),
+    ('ENT_APPROVE_DT1', 'NO_ENTITLEMENTS', "ENT_DATE mismatch"),
+    ('CO_ISSUE_DT1', 'NO_OTHER_FORMS_OF_READINESS', "CO_DATE mismatch"),
 ]
 
 def _row_date_mismatches(row):
     """Return (iss_mismatch, ent_mismatch, co_mismatch) for one row."""
     return tuple(
-        check_date_year_mismatch(row, YEAR_COL, date_col, count_col)
+        check_date_year_mismatch(row, 'YEAR', date_col, count_col)
         for date_col, count_col, _ in _DATE_CHECK_CONFIG
     )
 
@@ -348,7 +341,7 @@ df_dropped_mismatch = df_dropped_mismatch.assign(mismatch_reason=_reasons)
 
 # Step 3: Filter to valid years (2018-2024 = APR data range) (omni: one numeric series, no add/drop column)
 VALID_YEARS = [2018, 2019, 2020, 2021, 2022, 2023, 2024]
-year_numeric = pd.to_numeric(df_after_mismatch[YEAR_COL], errors='coerce')
+year_numeric = pd.to_numeric(df_after_mismatch['YEAR'], errors='coerce')
 invalid_year_mask = ~year_numeric.isin(VALID_YEARS)
 df_dropped_year = df_after_mismatch[invalid_year_mask].copy()
 df_dropped_year['mismatch_reason'] = 'Invalid YEAR'

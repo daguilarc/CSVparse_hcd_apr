@@ -172,7 +172,7 @@ def check_date_year_mismatch(row, year_col, date_col, count_col):
     return int(date_year_str) != row_year
 
 
-# BASICFILTER: config and single row function (omni: one apply returning tuple)
+# PARSEFILTER: config and single row function (omni: one apply returning tuple)
 _APR_DATE_CHECK_CONFIG = [
     ('BP_ISSUE_DT1', 'NO_BUILDING_PERMITS', 'ISS_DATE mismatch'),
     ('ENT_APPROVE_DT1', 'NO_ENTITLEMENTS', 'ENT_DATE mismatch'),
@@ -414,9 +414,9 @@ def _classify_truncated_rows(df_clean, truncated_df):
 
 
 def load_a2_csv(filepath, usecols=None):
-    """Load Table A2 CSV with BASICFILTER method: structural quote repair + date-year validation.
+    """Load Table A2 CSV with PARSEFILTER method: structural quote repair + date-year validation.
     
-    BASICFILTER approach:
+    PARSEFILTER approach:
     - Applies structural quote repair before parsing
     - Uses pd.read_csv() with on_bad_lines='skip' for robust handling
     - Applies date-year validation: drop rows where activity date year ≠ YEAR
@@ -474,7 +474,7 @@ def load_a2_csv(filepath, usecols=None):
     _pct = 100.0 / total_rows if total_rows else 0.0
 
     print(f"\n  {'='*60}")
-    print(f"  BASICFILTER STATISTICS")
+    print(f"  PARSEFILTER STATISTICS")
     print(f"  {'='*60}")
     print(f"  Total rows loaded:              {total_rows:>10,}")
     print(f"  Rows kept:                      {total_kept:>10,} ({total_kept*_pct:>5.1f}%)")

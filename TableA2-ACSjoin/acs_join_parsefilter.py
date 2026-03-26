@@ -1,12 +1,13 @@
-"""Join APR building permit data with ACS Census data using BASICFILTER method.
+"""Join APR building permit data with ACS Census data using PARSEFILTER method.
 
-BASICFILTER: Uses pandas.read_csv() for parsing, applies date-year validation only.
+PARSEFILTER: Uses pandas.read_csv() for parsing, applies date-year validation only.
 This matches HCD's stated methodology: exclude records where activity date ≠ APR year.
 
 Population: 5-year ACS only (one value per jurisdiction). No annual ACS 1-year or DOF comparison.
 
 Outputs:
-- acs_join_output_basicfilter.csv: Final joined dataset (places + counties)
+- bp_designation.csv: Final joined dataset for BP pipeline (places + counties)
+- co_designation.csv: Final joined dataset for CO pipeline (places + counties)
 """
 
 import csv
@@ -117,20 +118,29 @@ def _population_for_year(df, y):
     return df["population_5year"] if "population_5year" in df.columns else pd.Series(np.nan, index=df.index)
 
 
-def net_permit_rate(df, permit_years, net_permit_cols, rate_cols):
+def net_permit_rate(
+    df,
+    permit_years,
+    net_permit_cols,
+    rate_cols,
+    net_pfx="net_permits",
+    net_rate_pfx="net_rate",
+    total_col="total_net_permits",
+    avg_col="avg_annual_net_rate",
+):
     """Calculate net permit rates and totals using per-year population when available.
 
-    For each year: net_permits_y / population_y * 1000. Aggregates: total_net_permits, avg_annual_net_rate.
+    For each year: {net_pfx}_y / population_y * 1000. Aggregates: total_col, avg_col.
     Mutates once: build all new columns then assign (omni-rule).
     """
     updates = {}
     for y in permit_years:
-        updates[f"net_permits_{y}"] = df[f"net_permits_{y}"].fillna(0)
+        updates[f"{net_pfx}_{y}"] = df[f"{net_pfx}_{y}"].fillna(0)
         pop = _population_for_year(df, y)
-        updates[f"net_rate_{y}"] = np.where(pop > 0, updates[f"net_permits_{y}"] / pop * 1000, np.nan)
+        updates[f"{net_rate_pfx}_{y}"] = np.where(pop > 0, updates[f"{net_pfx}_{y}"] / pop * 1000, np.nan)
     df = df.assign(**updates)
-    df["total_net_permits"] = df[net_permit_cols].sum(axis=1)
-    df["avg_annual_net_rate"] = df[rate_cols].mean(axis=1)
+    df[total_col] = df[net_permit_cols].sum(axis=1)
+    df[avg_col] = df[rate_cols].mean(axis=1)
     return df
 
 
@@ -1187,7 +1197,7 @@ co_count = int(_mismatch_counts[2])
 _pct = 100.0 / total_rows if total_rows else 0.0
 
 print(f"\n{'='*70}")
-print(f"BASICFILTER STATISTICS")
+print(f"PARSEFILTER STATISTICS")
 print(f"{'='*70}")
 print(f"Total rows loaded:                {total_rows:>10,}")
 print(f"")
@@ -1217,259 +1227,285 @@ print(
     f"unmatched={len(unmatched_truncated):,}"
 )
 
-# Select columns for df_hcd
-df_hcd = df_apr_clean[['JURIS_NAME', 'CNTY_NAME', 'YEAR', 'NO_BUILDING_PERMITS', 'DEM_DES_UNITS']].copy()
-df_hcd.columns = ["JURIS_NAME", "CNTY_NAME", "YEAR", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]
-print(f"APR data loaded: {len(df_hcd)} rows (dropped {total_dropped} date-mismatch rows)")
-df_hcd["YEAR"] = pd.to_numeric(df_hcd["YEAR"], errors="coerce")
-df_hcd = df_hcd[df_hcd["YEAR"].isin(permit_years)]
+df_final_base = df_final.copy()
+for source_col, output_name, unit_pfx, rate_pfx, net_pfx, net_rate_pfx in [
+    ("NO_BUILDING_PERMITS", "bp_designation.csv", "permit_units", "permit_rate", "net_permits", "net_rate"),
+    ("NO_OTHER_FORMS_OF_READINESS", "co_designation.csv", "comp_units", "comp_rate", "net_comps", "net_comp_rate"),
+]:
+    pipeline_label = "BP" if source_col == "NO_BUILDING_PERMITS" else "CO"
+    df_final = df_final_base.copy()
 
-# Calculate permit counts:
-# gross_permits: raw building permit count (no subtraction)
-# demolitions: units demolished/destroyed
-# net_permits: building permits minus demolitions
-df_hcd["NO_BUILDING_PERMITS"] = pd.to_numeric(df_hcd["NO_BUILDING_PERMITS"], errors="coerce").fillna(0)
-df_hcd["DEM_DES_UNITS"] = pd.to_numeric(df_hcd["DEM_DES_UNITS"], errors="coerce").fillna(0)
-df_hcd["gross_permits"] = df_hcd["NO_BUILDING_PERMITS"]
-df_hcd["demolitions"] = np.where(df_hcd["NO_BUILDING_PERMITS"] > 0, df_hcd["DEM_DES_UNITS"], 0)
-df_hcd["net_permits"] = df_hcd["gross_permits"] - df_hcd["demolitions"]
+    # Select columns for df_hcd
+    df_hcd = df_apr_clean[['JURIS_NAME', 'CNTY_NAME', 'YEAR', source_col, 'DEM_DES_UNITS']].copy()
+    df_hcd.columns = ["JURIS_NAME", "CNTY_NAME", "YEAR", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]
+    print(f"APR data loaded ({pipeline_label}): {len(df_hcd)} rows (dropped {total_dropped} date-mismatch rows)")
+    df_hcd["YEAR"] = pd.to_numeric(df_hcd["YEAR"], errors="coerce")
+    df_hcd = df_hcd[df_hcd["YEAR"].isin(permit_years)]
 
-df_hcd["JURIS_CLEAN"] = df_hcd["JURIS_NAME"].apply(juris_caps)
-# Normalize county name for matching (uppercase, no trailing spaces)
-df_hcd["CNTY_CLEAN"] = df_hcd["CNTY_NAME"].apply(lambda x: juris_caps(x) if pd.notna(x) else "")
-df_hcd["CNTY_MATCH"] = df_hcd["CNTY_CLEAN"] + " COUNTY"
-df_hcd["is_county"] = df_hcd["JURIS_CLEAN"].str.contains("COUNTY", case=False, na=False)
+    # Calculate permit counts:
+    # gross_permits: raw building permit count (no subtraction)
+    # demolitions: units demolished/destroyed
+    # net_permits: building permits minus demolitions
+    df_hcd["NO_BUILDING_PERMITS"] = pd.to_numeric(df_hcd["NO_BUILDING_PERMITS"], errors="coerce").fillna(0)
+    df_hcd["DEM_DES_UNITS"] = pd.to_numeric(df_hcd["DEM_DES_UNITS"], errors="coerce").fillna(0)
+    df_hcd["gross_permits"] = df_hcd["NO_BUILDING_PERMITS"]
+    df_hcd["demolitions"] = np.where(df_hcd["NO_BUILDING_PERMITS"] > 0, df_hcd["DEM_DES_UNITS"], 0)
+    df_hcd["net_permits"] = df_hcd["gross_permits"] - df_hcd["demolitions"]
 
-# Keywords to identify unincorporated CDPs in APR data
-cdp_keywords = ["CDP", "UNINCORPORATED", "UNINC", "UNINCORP"]
+    df_hcd["JURIS_CLEAN"] = df_hcd["JURIS_NAME"].apply(juris_caps)
+    # Normalize county name for matching (uppercase, no trailing spaces)
+    df_hcd["CNTY_CLEAN"] = df_hcd["CNTY_NAME"].apply(lambda x: juris_caps(x) if pd.notna(x) else "")
+    df_hcd["CNTY_MATCH"] = df_hcd["CNTY_CLEAN"] + " COUNTY"
+    df_hcd["is_county"] = df_hcd["JURIS_CLEAN"].str.contains("COUNTY", case=False, na=False)
 
-# Step 9: merge permit counts for places
-# Filter APR to non-county entries without CDP keywords (cdp_keywords defined at line 720)
-cdp_pattern = "|".join(cdp_keywords)
-df_hcd_city_only = df_hcd[(~df_hcd["is_county"]) & 
-                          (~df_hcd["JURIS_NAME"].astype(str).str.contains(cdp_pattern, case=False, na=False))].copy()
+    # Keywords to identify unincorporated CDPs in APR data
+    cdp_keywords = ["CDP", "UNINCORPORATED", "UNINC", "UNINCORP"]
 
-# Aggregate permits: single filter expression reused for all three permit types
-incorporated_jurisdictions = set(df_final["JURISDICTION"].dropna().unique())
-city_only_mask = pd.Series(True, index=df_hcd_city_only.index)
+    # Step 9: merge permit counts for places
+    # Filter APR to non-county entries without CDP keywords (cdp_keywords defined at line 720)
+    cdp_pattern = "|".join(cdp_keywords)
+    df_hcd_city_only = df_hcd[(~df_hcd["is_county"]) &
+                              (~df_hcd["JURIS_NAME"].astype(str).str.contains(cdp_pattern, case=False, na=False))].copy()
 
-def agg_and_filter(value_col, prefix):
-    """Aggregate and filter to incorporated jurisdictions."""
-    agg = agg_permits(df_hcd_city_only, city_only_mask, permit_years, value_col, prefix)
-    return agg[agg["JURIS_CLEAN"].isin(incorporated_jurisdictions)].copy()
+    # Aggregate permits: single filter expression reused for all three permit types
+    incorporated_jurisdictions = set(df_final["JURISDICTION"].dropna().unique())
+    city_only_mask = pd.Series(True, index=df_hcd_city_only.index)
 
-# Aggregate all three permit types (reusing helper)
-city_permits_agg = agg_and_filter("gross_permits", "permit_units")
-demo_permits_agg = agg_and_filter("demolitions", "demolitions")
-net_permits_agg = agg_and_filter("net_permits", "net_permits")
+    def agg_and_filter(value_col, prefix):
+        """Aggregate and filter to incorporated jurisdictions."""
+        agg = agg_permits(df_hcd_city_only, city_only_mask, permit_years, value_col, prefix)
+        return agg[agg["JURIS_CLEAN"].isin(incorporated_jurisdictions)].copy()
 
-# Merge all permit types into df_final
-df_final = df_final.merge(city_permits_agg, left_on="JURISDICTION", right_on="JURIS_CLEAN", how="left")
-df_final = df_final.merge(demo_permits_agg, left_on="JURISDICTION", right_on="JURIS_CLEAN", how="left", suffixes=("", "_dem"))
-df_final = df_final.merge(net_permits_agg, left_on="JURISDICTION", right_on="JURIS_CLEAN", how="left", suffixes=("", "_net"))
-# Drop duplicate JURIS_CLEAN columns from merges
-df_final = df_final.drop(columns=[c for c in ["JURIS_CLEAN_dem", "JURIS_CLEAN_net"] if c in df_final.columns])
+    # Aggregate all three permit types (reusing helper)
+    city_permits_agg = agg_and_filter("gross_permits", unit_pfx)
+    demo_permits_agg = agg_and_filter("demolitions", "demolitions")
+    net_permits_agg = agg_and_filter("net_permits", net_pfx)
 
-# Define column lists
-gross_permit_cols = [f"permit_units_{y}" for y in permit_years]
-gross_rate_cols = [f"permit_rate_{y}" for y in permit_years]
-demo_cols = [f"demolitions_{y}" for y in permit_years]
-demo_rate_cols = [f"demo_rate_{y}" for y in permit_years]
-net_permit_cols = [f"net_permits_{y}" for y in permit_years]
-net_rate_cols = [f"net_rate_{y}" for y in permit_years]
+    # Merge all permit types into df_final
+    df_final = df_final.merge(city_permits_agg, left_on="JURISDICTION", right_on="JURIS_CLEAN", how="left")
+    df_final = df_final.merge(demo_permits_agg, left_on="JURISDICTION", right_on="JURIS_CLEAN", how="left", suffixes=("", "_dem"))
+    df_final = df_final.merge(net_permits_agg, left_on="JURISDICTION", right_on="JURIS_CLEAN", how="left", suffixes=("", "_net"))
+    # Drop duplicate JURIS_CLEAN columns from merges
+    df_final = df_final.drop(columns=[c for c in ["JURIS_CLEAN_dem", "JURIS_CLEAN_net"] if c in df_final.columns])
 
-# Fill missing and calculate rates/totals (per-year population); mutate once per block (omni-rule)
-perm_updates = {f"permit_units_{y}": df_final[f"permit_units_{y}"].fillna(0) for y in permit_years}
-for y in permit_years:
-    pop_y = _population_for_year(df_final, y)
-    perm_updates[f"permit_rate_{y}"] = np.where(pop_y > 0, perm_updates[f"permit_units_{y}"] / pop_y * 1000, np.nan)
-df_final = df_final.assign(**perm_updates)
-df_final["total_permit_units"] = df_final[gross_permit_cols].sum(axis=1)
-df_final["avg_annual_permit_rate"] = df_final[gross_rate_cols].mean(axis=1)
+    # Define column lists
+    gross_permit_cols = [f"{unit_pfx}_{y}" for y in permit_years]
+    gross_rate_cols = [f"{rate_pfx}_{y}" for y in permit_years]
+    demo_cols = [f"demolitions_{y}" for y in permit_years]
+    demo_rate_cols = [f"demo_rate_{y}" for y in permit_years]
+    net_permit_cols = [f"{net_pfx}_{y}" for y in permit_years]
+    net_rate_cols = [f"{net_rate_pfx}_{y}" for y in permit_years]
 
-demo_updates = {f"demolitions_{y}": df_final[f"demolitions_{y}"].fillna(0) for y in permit_years}
-for y in permit_years:
-    pop_y = _population_for_year(df_final, y)
-    demo_updates[f"demo_rate_{y}"] = np.where(pop_y > 0, demo_updates[f"demolitions_{y}"] / pop_y * 1000, np.nan)
-df_final = df_final.assign(**demo_updates)
-df_final["total_demolitions"] = df_final[demo_cols].sum(axis=1)
-df_final["avg_annual_demo_rate"] = df_final[demo_rate_cols].mean(axis=1)
-
-# Calculate net permit rates (reuse function defined globally)
-df_final = net_permit_rate(df_final, permit_years, net_permit_cols, net_rate_cols)
-
-# Step 10: Create county-level rows from ACS county data
-print(f"\nCreating county-level rows...")
-# county_home_cols and county_pop_cols already created at lines 315-316 - reuse them
-
-if county_pop_cols and "county" in df_county.columns:
-    county_row_cols = ["county", county_pop_cols[0], "county_income"]
-    if "county_mfi" in df_county.columns:
-        county_row_cols.append("county_mfi")
-    if county_home_cols:
-        county_row_cols.insert(1, county_home_cols[0])  # Insert after county, before pop
-    if "NAME_E" in df_county.columns:
-        county_row_cols.append("NAME_E")
-    df_county_rows = df_county[county_row_cols].copy()
-    rename_dict_county = {county_pop_cols[0]: "population_5year"}
-    if county_home_cols:
-        rename_dict_county[county_home_cols[0]] = "median_home_value"
-    df_county_rows = df_county_rows.rename(columns=rename_dict_county)
-    if not county_home_cols:
-        df_county_rows["median_home_value"] = np.nan
-    # Population: 5-year ACS only (rates use _population_for_year which returns population_5year)
-    # Complete transformation pipeline: convert to numeric → replace suppression codes → convert population to int
-    numeric_cols = ["median_home_value", "population_5year", "county_income"]
-    if "county_mfi" in df_county_rows.columns:
-        numeric_cols.append("county_mfi")
-    for col in numeric_cols:
-        df_county_rows[col] = (
-            pd.to_numeric(df_county_rows[col], errors="coerce")
-            .replace(SUPPRESSION_CODES, np.nan)
-        )
-    # Convert population_5year to int (not float)
-    if "population_5year" in df_county_rows.columns:
-        mask = df_county_rows["population_5year"].notna()
-        df_county_rows.loc[mask, "population_5year"] = df_county_rows.loc[mask, "population_5year"].astype(int)
-    
-    # Create JURISDICTION for counties using county name from NAME_E (e.g., "STANISLAUS COUNTY")
-    # Apply juris_caps to match APR data format
-    if "NAME_E" in df_county_rows.columns:
-        df_county_rows["JURISDICTION"] = df_county_rows["NAME_E"].apply(juris_caps)
-    else:
-        # Fallback: use county code (won't match APR data well)
-        df_county_rows["JURISDICTION"] = df_county_rows["county"].apply(
-            lambda c: juris_caps(f"{c} COUNTY") if pd.notna(c) else ""
-        )
-    
-    df_county_rows["geography_type"] = "County"
-    df_county_rows["home_ref"] = "County"  # County rows come from county data
-    
-    # Counties: no MSA; ref_mfi will be county_mfi (computed after concat)
-    df_county_rows[["msa_id", "msa_income", "msa_mfi"]] = np.nan
-    if "county_mfi" not in df_county_rows.columns:
-        df_county_rows["county_mfi"] = np.nan
-    df_county_rows["ref_mfi"] = df_county_rows["county_mfi"]
-    
-    # Calculate ref_income and affordability_ratio for counties (use county income only)
-    # county_income already has suppression codes replaced - no redundant replacement
-    df_county_rows["ref_income"] = df_county_rows["county_income"]
-    df_county_rows["ref_income_source"] = "County"
-    # Calculate affordability ratio: check ref_income not null and > 0, median_home_value not null
-    # Efficient condition: check null first to avoid unnecessary > 0 comparison on null values
-    df_county_rows["affordability_ratio"] = afford_ratio(df_county_rows, "ref_income")
-    
-    # Merge county-level APR permit data: sum ALL projects in each county by CNTY_NAME
-    # Gross permits first
-    county_gross = agg_permits(df_hcd, None, permit_years, "gross_permits", "permit_units", group_col="CNTY_MATCH")
-    county_join_set = set(df_county_rows["JURISDICTION"].dropna().astype(str))
-    permit_join_set = set(county_gross["CNTY_MATCH"].dropna().astype(str))
-    overlap = county_join_set & permit_join_set
-    print(f"  County permit merge (all projects in county) - County JURISDICTIONs: {len(county_join_set)}, "
-          f"Permit CNTY_MATCHs: {len(permit_join_set)}, Overlap: {len(overlap)}")
-    if len(overlap) == 0 and len(county_join_set) > 0:
-        print(f"  WARNING: No county name overlap! Sample county names: {list(county_join_set)[:5]}, "
-              f"Sample permit names: {list(permit_join_set)[:5]}")
-    df_county_rows = df_county_rows.merge(county_gross, left_on="JURISDICTION", right_on="CNTY_MATCH", how="left")
-    
-    # Demolitions - sum all projects in county
-    county_demo = agg_permits(df_hcd, None, permit_years, "demolitions", "demolitions", group_col="CNTY_MATCH")
-    df_county_rows = df_county_rows.merge(county_demo, left_on="JURISDICTION", right_on="CNTY_MATCH", how="left", suffixes=("", "_dem"))
-    if "CNTY_MATCH_dem" in df_county_rows.columns:
-        df_county_rows = df_county_rows.drop(columns=["CNTY_MATCH_dem"])
-    
-    # Net permits - sum all projects in county
-    county_net = agg_permits(df_hcd, None, permit_years, "net_permits", "net_permits", group_col="CNTY_MATCH")
-    df_county_rows = df_county_rows.merge(county_net, left_on="JURISDICTION", right_on="CNTY_MATCH", how="left", suffixes=("", "_net"))
-    if "CNTY_MATCH_net" in df_county_rows.columns:
-        df_county_rows = df_county_rows.drop(columns=["CNTY_MATCH_net"])
-    
-    # Ensure permit columns exist (assign missing once), then rates/totals; mutate once (omni-rule)
-    if (missing_perm := {f"permit_units_{y}": 0 for y in permit_years if f"permit_units_{y}" not in df_county_rows.columns}):
-        df_county_rows = df_county_rows.assign(**missing_perm)
-    cty_perm = {f"permit_units_{y}": df_county_rows[f"permit_units_{y}"].fillna(0) for y in permit_years}
+    # Fill missing and calculate rates/totals (per-year population); mutate once per block (omni-rule)
+    perm_updates = {f"{unit_pfx}_{y}": df_final[f"{unit_pfx}_{y}"].fillna(0) for y in permit_years}
     for y in permit_years:
-        pop_y = _population_for_year(df_county_rows, y)
-        cty_perm[f"permit_rate_{y}"] = np.where(pop_y > 0, cty_perm[f"permit_units_{y}"] / pop_y * 1000, np.nan)
-    df_county_rows = df_county_rows.assign(**cty_perm)
-    df_county_rows["total_permit_units"] = df_county_rows[gross_permit_cols].sum(axis=1)
-    df_county_rows["avg_annual_permit_rate"] = df_county_rows[gross_rate_cols].mean(axis=1)
+        pop_y = _population_for_year(df_final, y)
+        perm_updates[f"{rate_pfx}_{y}"] = np.where(pop_y > 0, perm_updates[f"{unit_pfx}_{y}"] / pop_y * 1000, np.nan)
+    df_final = df_final.assign(**perm_updates)
+    df_final[f"total_{unit_pfx}"] = df_final[gross_permit_cols].sum(axis=1)
+    df_final[f"avg_annual_{rate_pfx}"] = df_final[gross_rate_cols].mean(axis=1)
 
-    if (missing_demo := {f"demolitions_{y}": 0 for y in permit_years if f"demolitions_{y}" not in df_county_rows.columns}):
-        df_county_rows = df_county_rows.assign(**missing_demo)
-    cty_demo = {f"demolitions_{y}": df_county_rows[f"demolitions_{y}"].fillna(0) for y in permit_years}
+    demo_updates = {f"demolitions_{y}": df_final[f"demolitions_{y}"].fillna(0) for y in permit_years}
     for y in permit_years:
-        pop_y = _population_for_year(df_county_rows, y)
-        cty_demo[f"demo_rate_{y}"] = np.where(pop_y > 0, cty_demo[f"demolitions_{y}"] / pop_y * 1000, np.nan)
-    df_county_rows = df_county_rows.assign(**cty_demo)
-    df_county_rows["total_demolitions"] = df_county_rows[demo_cols].sum(axis=1)
-    df_county_rows["avg_annual_demo_rate"] = df_county_rows[demo_rate_cols].mean(axis=1)
-    
-    # Calculate net permit rates for counties
-    df_county_rows = net_permit_rate(df_county_rows, permit_years, net_permit_cols, net_rate_cols)
-    
-    # Exclude consolidated city-counties so they appear only as City (e.g. San Francisco)
-    before_exclude = len(df_county_rows)
-    df_county_rows = df_county_rows[~df_county_rows["JURISDICTION"].astype(str).str.upper().isin(COUNTY_ROW_EXCLUDE_JURISDICTIONS)].copy()
-    if len(df_county_rows) < before_exclude:
-        print(f"  Excluded {before_exclude - len(df_county_rows)} county row(s): {COUNTY_ROW_EXCLUDE_JURISDICTIONS}")
-    print(f"  Created {len(df_county_rows)} county-level rows")
-    print(f"  Counties with net permits: {(df_county_rows['total_net_permits'] > 0).sum()}")
-    
-    # Combine place and county results
-    df_final = pd.concat([df_final, df_county_rows], ignore_index=True)
-    print(f"  Combined total: {len(df_final)} rows (places + counties)")
-else:
-    print(f"  WARNING: Cannot create county rows - missing required columns")
+        pop_y = _population_for_year(df_final, y)
+        demo_updates[f"demo_rate_{y}"] = np.where(pop_y > 0, demo_updates[f"demolitions_{y}"] / pop_y * 1000, np.nan)
+    df_final = df_final.assign(**demo_updates)
+    df_final["total_demolitions"] = df_final[demo_cols].sum(axis=1)
+    df_final["avg_annual_demo_rate"] = df_final[demo_rate_cols].mean(axis=1)
 
-# Designation + builder flag + 5% binning: tier from affordability ratio, builder from permit rate threshold
-df_final["mfi_affordability_ratio"] = afford_ratio(df_final, "ref_mfi")
-for prefix, ratio_col in [("acs", "affordability_ratio"), ("mfi", "mfi_affordability_ratio")]:
-    df_final[f"{prefix}_designation"] = acs_designation_series(df_final[ratio_col])
-    df_final[f"{prefix}_builder"] = builder_flag_series(df_final[f"{prefix}_designation"], df_final["avg_annual_net_rate"])
-    df_final[f"{prefix}_build_5pct"] = build_5pct_within_groups(df_final[f"{prefix}_designation"], df_final["avg_annual_net_rate"])
-df_final["mfi_vs_acs"] = (
-    df_final["acs_designation"].fillna("") != df_final["mfi_designation"].fillna("")
-).astype(np.int64)
+    # Calculate net permit rates (reuse function defined globally)
+    df_final = net_permit_rate(
+        df_final,
+        permit_years,
+        net_permit_cols,
+        net_rate_cols,
+        net_pfx=net_pfx,
+        net_rate_pfx=net_rate_pfx,
+        total_col=f"total_{net_pfx}",
+        avg_col=f"avg_annual_{net_rate_pfx}",
+    )
 
-# Income data diagnostics (after counties added)
-print(f"\nIncome data diagnostics (final dataset):")
-income_diagnostics = []
-for col_name in ["county_income", "msa_income", "ref_mfi", "ref_income_source"]:
-    if col_name in df_final.columns and col_name != "ref_income_source":
-        col_data = df_final[col_name]
-        col_notna = col_data.notna()
-        if col_notna.any():
-            income_diagnostics.append(f"  {col_name}: {col_notna.sum()} non-null values, "
-                                      f"range: [{col_data.min():.0f}, {col_data.max():.0f}]")
+    # Step 10: Create county-level rows from ACS county data
+    print(f"\nCreating county-level rows ({pipeline_label})...")
+    # county_home_cols and county_pop_cols already created at lines 315-316 - reuse them
+
+    if county_pop_cols and "county" in df_county.columns:
+        county_row_cols = ["county", county_pop_cols[0], "county_income"]
+        if "county_mfi" in df_county.columns:
+            county_row_cols.append("county_mfi")
+        if county_home_cols:
+            county_row_cols.insert(1, county_home_cols[0])  # Insert after county, before pop
+        if "NAME_E" in df_county.columns:
+            county_row_cols.append("NAME_E")
+        df_county_rows = df_county[county_row_cols].copy()
+        rename_dict_county = {county_pop_cols[0]: "population_5year"}
+        if county_home_cols:
+            rename_dict_county[county_home_cols[0]] = "median_home_value"
+        df_county_rows = df_county_rows.rename(columns=rename_dict_county)
+        if not county_home_cols:
+            df_county_rows["median_home_value"] = np.nan
+        # Population: 5-year ACS only (rates use _population_for_year which returns population_5year)
+        # Complete transformation pipeline: convert to numeric -> replace suppression codes -> convert population to int
+        numeric_cols = ["median_home_value", "population_5year", "county_income"]
+        if "county_mfi" in df_county_rows.columns:
+            numeric_cols.append("county_mfi")
+        for col in numeric_cols:
+            df_county_rows[col] = (
+                pd.to_numeric(df_county_rows[col], errors="coerce")
+                .replace(SUPPRESSION_CODES, np.nan)
+            )
+        # Convert population_5year to int (not float)
+        if "population_5year" in df_county_rows.columns:
+            mask = df_county_rows["population_5year"].notna()
+            df_county_rows.loc[mask, "population_5year"] = df_county_rows.loc[mask, "population_5year"].astype(int)
+
+        # Create JURISDICTION for counties using county name from NAME_E (e.g., "STANISLAUS COUNTY")
+        # Apply juris_caps to match APR data format
+        if "NAME_E" in df_county_rows.columns:
+            df_county_rows["JURISDICTION"] = df_county_rows["NAME_E"].apply(juris_caps)
         else:
-            income_diagnostics.append(f"  {col_name}: ALL NULL")
-    elif col_name == "ref_income_source" and col_name in df_final.columns:
-        vc = df_final["ref_income_source"].value_counts()
-        income_diagnostics.append(f"  ref_income_source: {vc.to_dict()}")
+            # Fallback: use county code (won't match APR data well)
+            df_county_rows["JURISDICTION"] = df_county_rows["county"].apply(
+                lambda c: juris_caps(f"{c} COUNTY") if pd.notna(c) else ""
+            )
+
+        df_county_rows["geography_type"] = "County"
+        df_county_rows["home_ref"] = "County"  # County rows come from county data
+
+        # Counties: no MSA; ref_mfi will be county_mfi (computed after concat)
+        df_county_rows[["msa_id", "msa_income", "msa_mfi"]] = np.nan
+        if "county_mfi" not in df_county_rows.columns:
+            df_county_rows["county_mfi"] = np.nan
+        df_county_rows["ref_mfi"] = df_county_rows["county_mfi"]
+
+        # Calculate ref_income and affordability_ratio for counties (use county income only)
+        # county_income already has suppression codes replaced - no redundant replacement
+        df_county_rows["ref_income"] = df_county_rows["county_income"]
+        df_county_rows["ref_income_source"] = "County"
+        # Calculate affordability ratio: check ref_income not null and > 0, median_home_value not null
+        # Efficient condition: check null first to avoid unnecessary > 0 comparison on null values
+        df_county_rows["affordability_ratio"] = afford_ratio(df_county_rows, "ref_income")
+
+        # Merge county-level APR permit data: sum ALL projects in each county by CNTY_NAME
+        # Gross permits first
+        county_gross = agg_permits(df_hcd, None, permit_years, "gross_permits", unit_pfx, group_col="CNTY_MATCH")
+        county_join_set = set(df_county_rows["JURISDICTION"].dropna().astype(str))
+        permit_join_set = set(county_gross["CNTY_MATCH"].dropna().astype(str))
+        overlap = county_join_set & permit_join_set
+        print(f"  County permit merge (all projects in county) - County JURISDICTIONs: {len(county_join_set)}, "
+              f"Permit CNTY_MATCHs: {len(permit_join_set)}, Overlap: {len(overlap)}")
+        if len(overlap) == 0 and len(county_join_set) > 0:
+            print(f"  WARNING: No county name overlap! Sample county names: {list(county_join_set)[:5]}, "
+                  f"Sample permit names: {list(permit_join_set)[:5]}")
+        df_county_rows = df_county_rows.merge(county_gross, left_on="JURISDICTION", right_on="CNTY_MATCH", how="left")
+
+        # Demolitions - sum all projects in county
+        county_demo = agg_permits(df_hcd, None, permit_years, "demolitions", "demolitions", group_col="CNTY_MATCH")
+        df_county_rows = df_county_rows.merge(county_demo, left_on="JURISDICTION", right_on="CNTY_MATCH", how="left", suffixes=("", "_dem"))
+        if "CNTY_MATCH_dem" in df_county_rows.columns:
+            df_county_rows = df_county_rows.drop(columns=["CNTY_MATCH_dem"])
+
+        # Net permits - sum all projects in county
+        county_net = agg_permits(df_hcd, None, permit_years, "net_permits", net_pfx, group_col="CNTY_MATCH")
+        df_county_rows = df_county_rows.merge(county_net, left_on="JURISDICTION", right_on="CNTY_MATCH", how="left", suffixes=("", "_net"))
+        if "CNTY_MATCH_net" in df_county_rows.columns:
+            df_county_rows = df_county_rows.drop(columns=["CNTY_MATCH_net"])
+
+        # Ensure permit columns exist (assign missing once), then rates/totals; mutate once (omni-rule)
+        if (missing_perm := {f"{unit_pfx}_{y}": 0 for y in permit_years if f"{unit_pfx}_{y}" not in df_county_rows.columns}):
+            df_county_rows = df_county_rows.assign(**missing_perm)
+        cty_perm = {f"{unit_pfx}_{y}": df_county_rows[f"{unit_pfx}_{y}"].fillna(0) for y in permit_years}
+        for y in permit_years:
+            pop_y = _population_for_year(df_county_rows, y)
+            cty_perm[f"{rate_pfx}_{y}"] = np.where(pop_y > 0, cty_perm[f"{unit_pfx}_{y}"] / pop_y * 1000, np.nan)
+        df_county_rows = df_county_rows.assign(**cty_perm)
+        df_county_rows[f"total_{unit_pfx}"] = df_county_rows[gross_permit_cols].sum(axis=1)
+        df_county_rows[f"avg_annual_{rate_pfx}"] = df_county_rows[gross_rate_cols].mean(axis=1)
+
+        if (missing_demo := {f"demolitions_{y}": 0 for y in permit_years if f"demolitions_{y}" not in df_county_rows.columns}):
+            df_county_rows = df_county_rows.assign(**missing_demo)
+        cty_demo = {f"demolitions_{y}": df_county_rows[f"demolitions_{y}"].fillna(0) for y in permit_years}
+        for y in permit_years:
+            pop_y = _population_for_year(df_county_rows, y)
+            cty_demo[f"demo_rate_{y}"] = np.where(pop_y > 0, cty_demo[f"demolitions_{y}"] / pop_y * 1000, np.nan)
+        df_county_rows = df_county_rows.assign(**cty_demo)
+        df_county_rows["total_demolitions"] = df_county_rows[demo_cols].sum(axis=1)
+        df_county_rows["avg_annual_demo_rate"] = df_county_rows[demo_rate_cols].mean(axis=1)
+
+        # Calculate net permit rates for counties
+        df_county_rows = net_permit_rate(
+            df_county_rows,
+            permit_years,
+            net_permit_cols,
+            net_rate_cols,
+            net_pfx=net_pfx,
+            net_rate_pfx=net_rate_pfx,
+            total_col=f"total_{net_pfx}",
+            avg_col=f"avg_annual_{net_rate_pfx}",
+        )
+
+        # Exclude consolidated city-counties so they appear only as City (e.g. San Francisco)
+        before_exclude = len(df_county_rows)
+        df_county_rows = df_county_rows[~df_county_rows["JURISDICTION"].astype(str).str.upper().isin(COUNTY_ROW_EXCLUDE_JURISDICTIONS)].copy()
+        if len(df_county_rows) < before_exclude:
+            print(f"  Excluded {before_exclude - len(df_county_rows)} county row(s): {COUNTY_ROW_EXCLUDE_JURISDICTIONS}")
+        print(f"  Created {len(df_county_rows)} county-level rows")
+        print(f"  Counties with net permits: {(df_county_rows[f'total_{net_pfx}'] > 0).sum()}")
+
+        # Combine place and county results
+        df_final = pd.concat([df_final, df_county_rows], ignore_index=True)
+        print(f"  Combined total: {len(df_final)} rows (places + counties)")
     else:
-        if col_name != "ref_income_source":
-            income_diagnostics.append(f"  {col_name}: ALL NULL")
-print("\n".join(income_diagnostics))
+        print(f"  WARNING: Cannot create county rows - missing required columns")
 
-# Suppression codes already replaced during initial cleaning (lines 276-283) - no redundant cleanup needed
+    # Designation + builder flag + 5% binning: tier from affordability ratio, builder from permit rate threshold
+    df_final["mfi_affordability_ratio"] = afford_ratio(df_final, "ref_mfi")
+    for prefix, ratio_col in [("acs", "affordability_ratio"), ("mfi", "mfi_affordability_ratio")]:
+        df_final[f"{prefix}_designation"] = acs_designation_series(df_final[ratio_col])
+        df_final[f"{prefix}_builder"] = builder_flag_series(df_final[f"{prefix}_designation"], df_final[f"avg_annual_{net_rate_pfx}"])
+        df_final[f"{prefix}_build_5pct"] = build_5pct_within_groups(df_final[f"{prefix}_designation"], df_final[f"avg_annual_{net_rate_pfx}"])
+    df_final["mfi_vs_acs"] = (
+        df_final["acs_designation"].fillna("") != df_final["mfi_designation"].fillna("")
+    ).astype(np.int64)
 
-# Step 11: select only relevant columns for output (remove raw NHGIS columns and duplicates)
-# Sort by geography_type (City first, County second), then alphabetically by JURISDICTION
-df_final = df_final[
-    ["JURISDICTION", "geography_type", "median_home_value", "home_ref", "population_5year",
-     "county_income", "msa_income", "ref_mfi", "ref_income", "ref_income_source", "affordability_ratio", "mfi_affordability_ratio"]
-    + gross_permit_cols + ["total_permit_units"] + gross_rate_cols + ["avg_annual_permit_rate"]  # gross permits
-    + demo_cols + ["total_demolitions"] + demo_rate_cols + ["avg_annual_demo_rate"]  # demolitions
-    + net_permit_cols + ["total_net_permits"] + net_rate_cols + ["avg_annual_net_rate", "acs_designation", "acs_builder", "acs_build_5pct", "mfi_designation", "mfi_builder", "mfi_build_5pct", "mfi_vs_acs"]  # net permits + designation + builder
-].sort_values(["geography_type", "JURISDICTION"]).reset_index(drop=True)
+    # Income data diagnostics (after counties added)
+    print(f"\nIncome data diagnostics ({pipeline_label}):")
+    income_diagnostics = []
+    for col_name in ["county_income", "msa_income", "ref_mfi", "ref_income_source"]:
+        if col_name in df_final.columns and col_name != "ref_income_source":
+            col_data = df_final[col_name]
+            col_notna = col_data.notna()
+            if col_notna.any():
+                income_diagnostics.append(f"  {col_name}: {col_notna.sum()} non-null values, "
+                                          f"range: [{col_data.min():.0f}, {col_data.max():.0f}]")
+            else:
+                income_diagnostics.append(f"  {col_name}: ALL NULL")
+        elif col_name == "ref_income_source" and col_name in df_final.columns:
+            vc = df_final["ref_income_source"].value_counts()
+            income_diagnostics.append(f"  ref_income_source: {vc.to_dict()}")
+        else:
+            if col_name != "ref_income_source":
+                income_diagnostics.append(f"  {col_name}: ALL NULL")
+    print("\n".join(income_diagnostics))
 
-print("\nSample output:")
-print(df_final[["JURISDICTION", "avg_annual_net_rate", "acs_designation"]].head(10))
+    # Suppression codes already replaced during initial cleaning (lines 276-283) - no redundant cleanup needed
 
-output_path = Path(__file__).resolve().parent / "acs_join_output_basicfilter.csv"
-df_final.to_csv(output_path, index=False)
-print(f"\nSaved to: {output_path}")
+    # Step 11: select only relevant columns for output (remove raw NHGIS columns and duplicates)
+    # Sort by geography_type (City first, County second), then alphabetically by JURISDICTION
+    df_final = df_final[
+        ["JURISDICTION", "geography_type", "median_home_value", "home_ref", "population_5year",
+         "county_income", "msa_income", "ref_mfi", "ref_income", "ref_income_source", "affordability_ratio", "mfi_affordability_ratio"]
+        + gross_permit_cols + [f"total_{unit_pfx}"] + gross_rate_cols + [f"avg_annual_{rate_pfx}"]  # gross permits/completions
+        + demo_cols + ["total_demolitions"] + demo_rate_cols + ["avg_annual_demo_rate"]  # demolitions
+        + net_permit_cols + [f"total_{net_pfx}"] + net_rate_cols + [f"avg_annual_{net_rate_pfx}", "acs_designation", "acs_builder", "acs_build_5pct", "mfi_designation", "mfi_builder", "mfi_build_5pct", "mfi_vs_acs"]  # net permits/completions + designation + builder
+    ].sort_values(["geography_type", "JURISDICTION"]).reset_index(drop=True)
+
+    print(f"\nSample output ({pipeline_label}):")
+    print(df_final[["JURISDICTION", f"avg_annual_{net_rate_pfx}", "acs_designation"]].head(10))
+
+    output_path = Path(__file__).resolve().parent / output_name
+    df_final.to_csv(output_path, index=False)
+    print(f"\nSaved {pipeline_label} designation to: {output_path}")
 
 """MIT License""
 
