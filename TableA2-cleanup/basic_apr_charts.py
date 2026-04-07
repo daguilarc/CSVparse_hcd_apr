@@ -10,6 +10,7 @@ Style: Excel-like, simple and clean
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FixedLocator, MaxNLocator
 from pathlib import Path
 
 # APR dedup: project identity + pipeline counts; preserves different pipeline stages (ENT, BP, CO)
@@ -30,7 +31,7 @@ def _deduplicate_apr(df):
 
 
 # Paths
-DATA_PATH = Path(__file__).parent / "tablea2_cleaned_basicfilter.csv"
+DATA_PATH = Path(__file__).parent / "tablea2_cleaned_parsefilter.csv"
 OUTPUT_DIR = Path(__file__).parent
 
 # Color scheme (colorblind-friendly)
@@ -68,6 +69,8 @@ plt.rcParams.update({
 def save_chart(fig, filename):
     """Save chart with consistent settings."""
     output_path = OUTPUT_DIR / filename
+    for ax in fig.axes:
+        _prune_origin_ticks(ax)
     fig.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
     plt.close(fig)
     print(f"  Saved: {output_path}")
@@ -84,16 +87,28 @@ def set_y_padding(ax, top_pct=0.08):
     ax.set_ylim(0, ymax * (1 + top_pct))
 
 
+def _prune_origin_ticks(ax, eps=1e-9):
+    """Prune lower-end tick labels when axis lower bound is at 0."""
+    x_lo, _ = ax.get_xlim()
+    y_lo, _ = ax.get_ylim()
+    # Keep explicit fixed ticks (e.g., yearly x ticks) intact.
+    if abs(x_lo) < eps and not isinstance(ax.xaxis.get_major_locator(), FixedLocator):
+        ax.xaxis.set_major_locator(MaxNLocator(prune='lower'))
+    if abs(y_lo) < eps:
+        ax.yaxis.set_major_locator(MaxNLocator(prune='lower'))
+
+
 def get_income_cols(prefix, tier_suffix):
     """Return column name(s) for income tier aggregation.
     
     EXTR_LOW_INCOME_UNITS is a single column with no BP/CO prefix or DR/NDR suffix.
-    Other tiers have {prefix}_{tier}_DR and {prefix}_{tier}_NDR columns.
+    Other tiers have {prefix}{tier}_DR and {prefix}{tier}_NDR columns (prefix may be empty for entitlement).
     Returns: (col_or_list, is_single) - either single column name or (dr_col, ndr_col) tuple.
     """
     if tier_suffix == 'EXTR_LOW':
         return 'EXTR_LOW_INCOME_UNITS', True
-    return (f'{prefix}_{tier_suffix}_DR', f'{prefix}_{tier_suffix}_NDR'), False
+    sep = '_' if prefix else ''
+    return (f'{prefix}{sep}{tier_suffix}_DR', f'{prefix}{sep}{tier_suffix}_NDR'), False
 
 
 # Load data
@@ -134,7 +149,7 @@ df['bp_net'] = bp - df['dem_bp']
 df['co_net'] = co - df['dem_co']
 df['ent_net'] = ent - df['dem_ent']
 
-# Get years (source data already filtered to valid years by basicfilter)
+# Get years (source data already filtered to valid years by parsefilter)
 years = sorted(df['YEAR'].unique())
 print(f"  Years: {years}")
 
@@ -216,8 +231,8 @@ for net_col, title_type, filename in tenure_specs:
     save_chart(fig, filename)
 
 # =============================================================================
-# db_vs_inc_cos.png and db_vs_inc_bp.png
-# Completions/Permits by deed restriction type
+# db_vs_inc_cos.png, db_vs_inc_bp.png, and db_vs_inc_ent.png
+# Completions/Permits/Entitlements by deed restriction type
 # =============================================================================
 
 # Categorize DR_TYPE (shared)
@@ -226,8 +241,15 @@ df['has_db'] = df['DR_TYPE_STR'].str.contains('DB', na=False)
 df['has_inc_only'] = df['DR_TYPE_STR'].str.contains('INC', na=False) & ~df['has_db']
 
 db_inc_specs = [
-    ('co_net', 'NO_OTHER_FORMS_OF_READINESS', 'Completions', 'db_vs_inc_cos.png'),
-    ('bp_net', 'NO_BUILDING_PERMITS', 'Building Permits', 'db_vs_inc_bp.png'),
+    ('co_net', 'Completions', 'db_vs_inc_cos.png'),
+    ('bp_net', 'Building Permits', 'db_vs_inc_bp.png'),
+    ('ent_net', 'Entitlements', 'db_vs_inc_ent.png'),
+]
+
+series_specs = [
+    (None, None, 'o', 'blue'),
+    ('has_db', 'Density Bonus', 's', 'orange'),
+    ('has_inc_only', 'Non-Bonus Inclusionary', '^', 'purple'),
 ]
 
 # Multifamily = only projects with 5+ units (UNIT_CAT column)
@@ -239,27 +261,28 @@ db_inc_variants = [
     (mfh_mask, 'Multifamily ', '_mfh'),
 ]
 
-# Note: "Net of Demolitions" (blue) uses net_col (co_net/bp_net), i.e. completions/permits minus
-# demolitions. "Density Bonus" and "Non-Bonus Inclusionary" (orange, purple) use raw_col
-# (NO_OTHER_FORMS_OF_READINESS / NO_BUILDING_PERMITS), i.e. gross counts with no demolition
-# subtraction. DB/INC lines therefore count all project units; the total line is net.
-
-for net_col, raw_col, title_type, filename in db_inc_specs:
+for net_col, title_type, filename in db_inc_specs:
     for variant_mask, title_prefix, file_suffix in db_inc_variants:
         out_filename = filename.replace('.png', f'{file_suffix}.png')
         next_chart(out_filename)
         sub = df if variant_mask is None else df[variant_mask]
-        agg_total = sub.groupby('YEAR')[net_col].sum().reindex(years).fillna(0)
-        agg_db = sub[sub['has_db']].groupby('YEAR')[raw_col].sum().reindex(years).fillna(0)
-        agg_inc = sub[sub['has_inc_only']].groupby('YEAR')[raw_col].sum().reindex(years).fillna(0)
+        aggs = {}
+        for mask_col, _, _, _ in series_specs:
+            filtered = sub if mask_col is None else sub[sub[mask_col]]
+            aggs[mask_col] = filtered.groupby('YEAR')[net_col].sum().reindex(years).fillna(0)
         fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(years, agg_total, marker='o', color=COLORS['blue'],
-                linewidth=2, markersize=6, label='Net of Demolitions')
-        ax.plot(years, agg_db, marker='s', color=COLORS['orange'],
-                linewidth=2, markersize=6, label='Density Bonus')
-        ax.plot(years, agg_inc, marker='^', color=COLORS['purple'],
-                linewidth=2, markersize=6, label='Non-Bonus Inclusionary')
-        ax.set_title(f'{title_prefix}Housing {title_type}')
+        for mask_col, label, marker, color_key in series_specs:
+            series_label = f'Net {title_type}' if label is None else label
+            ax.plot(
+                years,
+                aggs[mask_col],
+                marker=marker,
+                color=COLORS[color_key],
+                linewidth=2,
+                markersize=6,
+                label=series_label,
+            )
+        ax.set_title(f'{title_prefix}Housing {title_type}, Net of Demolitions')
         ax.set_xlabel('Year')
         ax.set_ylabel('Units')
         ax.set_xticks(years)
@@ -392,14 +415,16 @@ for mask, title_prefix, stage_specs in dr_tier_groups:
 
 # =============================================================================
 # DB and INC income breakdown
-# db_permits_income, inc_permits_income, db_cos_income, inc_cos_income
+# db_permits_income, inc_permits_income, db_cos_income, inc_cos_income, db_ent_income, inc_ent_income
 # =============================================================================
 
 dr_income_chart_specs = [
     ('has_db', 'Density Bonus', 'BP', 'Building Permits', 'db_permits_income.png'),
     ('has_db', 'Density Bonus', 'CO', 'Completions', 'db_cos_income.png'),
+    ('has_db', 'Density Bonus', '', 'Entitlements', 'db_ent_income.png'),
     ('has_inc_only', 'Non-Bonus Inclusionary', 'BP', 'Building Permits', 'inc_permits_income.png'),
     ('has_inc_only', 'Non-Bonus Inclusionary', 'CO', 'Completions', 'inc_cos_income.png'),
+    ('has_inc_only', 'Non-Bonus Inclusionary', '', 'Entitlements', 'inc_ent_income.png'),
 ]
 
 # Income tier structure for these charts (highest to lowest, combined DR+NDR)
@@ -442,53 +467,80 @@ for dr_filter, dr_label, prefix, title_type, filename in dr_income_chart_specs:
     save_chart(fig, filename)
 
 # =============================================================================
-# Chart: income_by_unitcat.png - Income proportions by UNIT_CAT (entitlement stage)
-# 100% stacked horizontal bar: Very Low, Low, Moderate, Above Moderate by unit type
+# Charts: income_by_unitcat_ent.png, income_by_unitcat_bp.png, income_by_unitcat_co.png
+# Income proportions by UNIT_CAT per development stage (100% stacked horizontal bar)
 # =============================================================================
-next_chart('income_by_unitcat.png')
 
-ent_income_cols = [
-    'VLOW_INCOME_DR', 'VLOW_INCOME_NDR', 'LOW_INCOME_DR', 'LOW_INCOME_NDR',
-    'MOD_INCOME_DR', 'MOD_INCOME_NDR', 'ABOVE_MOD_INCOME',
+# User order (top to bottom): SFD, SFA, MH, ADU, 2-4, 5+ — barh index 0 is bottom, so reverse for y-axis.
+UNIT_CAT_CODES_TOP_TO_BOTTOM = ['SFD', 'SFA', 'MH', 'ADU', '2 to 4', '5+']
+UNIT_CAT_ORDER = list(reversed(UNIT_CAT_CODES_TOP_TO_BOTTOM))
+UNIT_CAT_LABELS = {
+    'SFD': 'Single Family Detached',
+    'SFA': 'Single Family Attached',
+    'MH': 'Mobile Home',
+    'ADU': 'ADU',
+    '2 to 4': '2-4 Units',
+    '5+': '5+ Units',
+}
+unitcat_stage_specs = [
+    ('', 'ABOVE_MOD_INCOME', 'entitlement', 'income_by_unitcat_ent.png'),
+    ('BP_', 'BP_ABOVE_MOD_INCOME', 'building permit', 'income_by_unitcat_bp.png'),
+    ('CO_', 'CO_ABOVE_MOD_INCOME', 'completion', 'income_by_unitcat_co.png'),
 ]
-for col in ent_income_cols:
+
+unitcat_numeric_cols = set()
+for prefix, above_mod_col, _, _ in unitcat_stage_specs:
+    for tier in ['VLOW_INCOME', 'LOW_INCOME', 'MOD_INCOME']:
+        unitcat_numeric_cols.add(f'{prefix}{tier}_DR')
+        unitcat_numeric_cols.add(f'{prefix}{tier}_NDR')
+    unitcat_numeric_cols.add(above_mod_col)
+for col in unitcat_numeric_cols:
     df[col] = to_numeric_safe(df[col])
 
-UNIT_CAT_ORDER = ['SFD', 'ADU', '5+', 'SFA', '2 to 4', 'MH']
-agg_cat = df.loc[df['UNIT_CAT'].isin(UNIT_CAT_ORDER)].groupby('UNIT_CAT')[ent_income_cols].sum().reindex(UNIT_CAT_ORDER).fillna(0)
 stack_keys = ['VLOW', 'LOW', 'MOD', 'ABOVE_MOD']
-dr_ndr_pairs = [
-    ('VLOW', 'VLOW_INCOME_DR', 'VLOW_INCOME_NDR'),
-    ('LOW', 'LOW_INCOME_DR', 'LOW_INCOME_NDR'),
-    ('MOD', 'MOD_INCOME_DR', 'MOD_INCOME_NDR'),
-]
-for key, dr_col, ndr_col in dr_ndr_pairs:
-    agg_cat[key] = agg_cat[dr_col] + agg_cat[ndr_col]
-agg_cat['ABOVE_MOD'] = agg_cat['ABOVE_MOD_INCOME']
-pct = agg_cat[stack_keys].div(agg_cat[stack_keys].sum(axis=1), axis=0) * 100
+for prefix, above_mod_col, stage_name, filename in unitcat_stage_specs:
+    next_chart(filename)
+    ent_income_cols = [
+        f'{prefix}VLOW_INCOME_DR', f'{prefix}VLOW_INCOME_NDR',
+        f'{prefix}LOW_INCOME_DR', f'{prefix}LOW_INCOME_NDR',
+        f'{prefix}MOD_INCOME_DR', f'{prefix}MOD_INCOME_NDR',
+        above_mod_col,
+    ]
+    agg_cat = df.loc[df['UNIT_CAT'].isin(UNIT_CAT_ORDER)].groupby('UNIT_CAT')[ent_income_cols].sum().reindex(UNIT_CAT_ORDER).fillna(0)
+    dr_ndr_pairs = [
+        ('VLOW', f'{prefix}VLOW_INCOME_DR', f'{prefix}VLOW_INCOME_NDR'),
+        ('LOW', f'{prefix}LOW_INCOME_DR', f'{prefix}LOW_INCOME_NDR'),
+        ('MOD', f'{prefix}MOD_INCOME_DR', f'{prefix}MOD_INCOME_NDR'),
+    ]
+    for key, dr_col, ndr_col in dr_ndr_pairs:
+        agg_cat[key] = agg_cat[dr_col] + agg_cat[ndr_col]
+    agg_cat['ABOVE_MOD'] = agg_cat[above_mod_col]
+    row_sums = agg_cat[stack_keys].sum(axis=1)
+    pct = agg_cat[stack_keys].div(row_sums.replace(0, np.nan), axis=0).fillna(0) * 100
 
-fig, ax = plt.subplots(figsize=(8, 5))
-y_pos = np.arange(len(UNIT_CAT_ORDER))
-left = np.zeros(len(UNIT_CAT_ORDER))
-for key, label, color_key in [
-    ('VLOW', 'Very Low Income', 'blue'),
-    ('LOW', 'Low Income', 'orange'),
-    ('MOD', 'Moderate Income', 'purple'),
-    ('ABOVE_MOD', 'Above Moderate Income', 'gray'),
-]:
-    vals = pct[key].values
-    ax.barh(y_pos, vals, 0.65, left=left, label=label, color=COLORS[color_key])
-    left += vals
+    fig, ax = plt.subplots(figsize=(8, 5))
+    n_cats = len(UNIT_CAT_ORDER)
+    y_pos = np.arange(n_cats)
+    left = np.zeros(n_cats)
+    for key, label, color_key in [
+        ('VLOW', 'Very Low Income', 'blue'),
+        ('LOW', 'Low Income', 'orange'),
+        ('MOD', 'Moderate Income', 'purple'),
+        ('ABOVE_MOD', 'Above Moderate Income', 'gray'),
+    ]:
+        vals = pct[key].values
+        ax.barh(y_pos, vals, 0.65, left=left, label=label, color=COLORS[color_key])
+        left += vals
 
-ax.set_yticks(y_pos)
-ax.set_yticklabels(UNIT_CAT_ORDER)
-ax.set_xlabel('Percentage of entitlement units')
-ax.set_title('Income Category Proportions by Unit Type\n(entitlement stage)')
-ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=2, handlelength=4)
-ax.set_xlim(0, 100)
-fig.tight_layout()
-fig.subplots_adjust(bottom=0.22)
-save_chart(fig, 'income_by_unitcat.png')
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels([UNIT_CAT_LABELS[c] for c in UNIT_CAT_ORDER])
+    ax.set_xlabel(f'Percentage of {stage_name} units')
+    ax.set_title(f'Income Category Proportions by Unit Type\n({stage_name} stage)')
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=2, handlelength=4)
+    ax.set_xlim(0, 100)
+    fig.tight_layout()
+    fig.subplots_adjust(bottom=0.22)
+    save_chart(fig, filename)
 
 # =============================================================================
 # Charts: dr_vs_ndr_ent.png, dr_vs_ndr_bp.png, dr_vs_ndr_cos.png
@@ -505,6 +557,11 @@ dr_ndr_specs = [
     ('BP_', 'building permits', 'Building permit units', 'dr_vs_ndr_bp.png'),
     ('CO_', 'completions', 'Completion units', 'dr_vs_ndr_cos.png'),
 ]
+dr_ndr_stage_y_labels = {
+    'entitlement': 'entitled',
+    'building permits': 'permitted',
+    'completions': 'occupied',
+}
 for prefix, stage_name, ylabel, filename in dr_ndr_specs:
     next_chart(filename)
     dr_vals = [df[f'{prefix}{t}_DR'].sum() for t, _, _ in tiers]
@@ -515,7 +572,7 @@ for prefix, stage_name, ylabel, filename in dr_ndr_specs:
     ax.bar(x + 0.175, ndr_vals, 0.35, label='Non-deed-restricted (NDR)', color=COLORS['orange'])
     ax.set_xticks(x)
     ax.set_xticklabels(tier_labels)
-    ax.set_ylabel(ylabel)
+    ax.set_ylabel(f'{dr_ndr_stage_y_labels[stage_name].capitalize()} units')
     ax.set_title(f'Deed-Restricted vs Non-Deed-Restricted by Income Tier\n({stage_name})')
     ax.legend(loc='upper right')
     ax.set_ylim(bottom=0)
@@ -579,6 +636,71 @@ for dr_filter, dr_label, tenure_filter, tenure_label, base_filename in tenure_in
         set_y_padding(ax)
         
         save_chart(fig, filename)
+
+# =============================================================================
+# DR share by income tier in 100%-restricted projects (ENT/BP/CO)
+# =============================================================================
+dr_share_100r_specs = [
+    ('', 'NO_ENTITLEMENTS', 'ABOVE_MOD_INCOME', 'Entitlements', 'dr_share_100_restricted_ent.png'),
+    ('BP_', 'NO_BUILDING_PERMITS', 'BP_ABOVE_MOD_INCOME', 'Building Permits', 'dr_share_100_restricted_bp.png'),
+    ('CO_', 'NO_OTHER_FORMS_OF_READINESS', 'CO_ABOVE_MOD_INCOME', 'Completions', 'dr_share_100_restricted_co.png'),
+]
+stage_y_labels = {
+    'Entitlements': 'entitled',
+    'Building Permits': 'permitted',
+    'Completions': 'occupied',
+}
+restricted_tiers = [tier for tier, _, _ in income_line_tiers if tier != 'EXTR_LOW']
+
+for prefix, total_col, above_mod_col, title_type, filename in dr_share_100r_specs:
+    next_chart(filename)
+
+    dr_cols = [f'{prefix}{tier}_DR' for tier in restricted_tiers]
+    ndr_cols = [f'{prefix}{tier}_NDR' for tier in restricted_tiers]
+    stage_total = df[total_col]
+    stage_dr_sum = df[dr_cols].sum(axis=1) + df['EXTR_LOW_INCOME_UNITS']
+    stage_ndr_sum = df[ndr_cols].sum(axis=1)
+    qualified_mask = (
+        (stage_dr_sum == stage_total)
+        & (stage_ndr_sum == 0)
+        & (df[above_mod_col] == 0)
+        & (stage_total > 0)
+    )
+    qualified = df[qualified_mask]
+    print(f"  {title_type}: qualified 100%-restricted rows = {int(qualified_mask.sum())}")
+
+    denom = qualified.groupby('YEAR')[total_col].sum().reindex(years).fillna(0)
+    shares = {}
+    for tier_suffix, tier_label, tier_color in income_line_tiers:
+        tier_col = 'EXTR_LOW_INCOME_UNITS' if tier_suffix == 'EXTR_LOW' else f'{prefix}{tier_suffix}_DR'
+        tier_sum = qualified.groupby('YEAR')[tier_col].sum().reindex(years).fillna(0)
+        tier_share = tier_sum.div(denom.replace(0, np.nan)).mul(100).fillna(0)
+        shares[tier_label] = (tier_share, tier_color)
+        if ((tier_share < 0) | (tier_share > 100)).any():
+            print(f"  WARNING: {title_type} {tier_label} share has values outside [0, 100].")
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for i, (tier_label, (tier_share, tier_color)) in enumerate(shares.items()):
+        ax.plot(
+            years,
+            tier_share,
+            marker=MARKERS[i],
+            linestyle='-',
+            color=tier_color,
+            linewidth=2,
+            markersize=6,
+            label=tier_label,
+        )
+
+    ax.set_title(f'Share of Deed Restricted Units in 100% Restricted Projects, {title_type} by Income Tier')
+    ax.set_xlabel('Year')
+    ax.set_ylabel(f'Share of {stage_y_labels[title_type]} units (%)')
+    ax.set_xticks(years)
+    ax.legend(loc='best')
+    ax.set_xlim(min(years), max(years))
+    ax.set_ylim(0, 100)
+
+    save_chart(fig, filename)
 
 print(f"\nAll {chart_counter[0]} charts generated successfully.")
 

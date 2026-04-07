@@ -1,13 +1,16 @@
-"""Join APR building permit data with ACS Census data using PARSEFILTER method.
+"""Join APR building permit data with ACS Census data using PARSEFILTER method (legacy ACS vintage).
+
+Same logic as acs_join_parsefilter.py but uses NHGIS dataset **2019_2023_ACS5a** (5-year ACS
+ending 2023) and the corresponding NHGIS estimate column codes (ASVNE/ASN1/ASQPE/ASRNE).
 
 PARSEFILTER: Uses pandas.read_csv() for parsing, applies date-year validation only.
 This matches HCD's stated methodology: exclude records where activity date ≠ APR year.
 
 Population: 5-year ACS only (one value per jurisdiction). No annual ACS 1-year or DOF comparison.
 
-Outputs:
-- bp_designation.csv: Final joined dataset for BP pipeline (places + counties)
-- co_designation.csv: Final joined dataset for CO pipeline (places + counties)
+Outputs (suffix avoids overwriting the default 2020–2024 pipeline):
+- bp_designation_acs2019_2023.csv
+- co_designation_acs2019_2023.csv
 """
 
 import csv
@@ -45,17 +48,15 @@ def _deduplicate_apr(df):
 
 # Configuration
 NHGIS_API_BASE = "https://api.ipums.org"
-NHGIS_DATASET = "2020_2024_ACS5a"
-# 2014–2018 ACS (5-year) place MHI for real income-change predictor: table B19013 estimate AJZAE001 → merge as place_income_2018
-NHGIS_DATASET_2018_MHI = "2014_2018_ACS5a"
+NHGIS_DATASET = "2019_2023_ACS5a"
 # Population (B01003), median household income (B19013), median family income (B19113), and median home value (B25077); CA-only filter below.
 # B19113 = Median family income; ref_mfi = MSA MFI when available, else county MFI (same fallback as ref_income).
 # Data Finder note: "Total Population AND Household and Family Income" returns 0 tables (no single table has both).
 NHGIS_TABLES = ["B01003", "B19013", "B19113", "B25077"]
 NHGIS_GEOGRAPHIC_EXTENTS = ["06"]
-# MSA-level B19113 (Median Family Income): NHGIS csv_header uses *E001 / *M001 for estimate/margin (not metadata-only AUSS001).
-NHGIS_MSA_MFI_COLUMN = "AUSSE001"
-CACHE_PATH = Path(__file__).resolve().parent / "nhgis_cache.json"
+# MSA-level B19113 (Median Family Income): 2019_2023_ACS5a estimate column ASRNE001.
+NHGIS_MSA_MFI_COLUMN = "ASRNE001"
+CACHE_PATH = Path(__file__).resolve().parent / "nhgis_cache_2019_2023.json"
 CACHE_MAX_AGE_DAYS = 365
 # Years used for permit/rate analysis; population from 5-year ACS only
 permit_years = [2020, 2021, 2022, 2023, 2024]
@@ -562,7 +563,7 @@ if data_from_api:
 for df in [df_place, df_county, df_msa]:
     if df is None or len(df) == 0:
         continue
-    nhgis_cols = [col for col in df.columns if col.startswith(("AUWS", "AUO6", "AURU"))]
+    nhgis_cols = [col for col in df.columns if col.startswith(("ASVNE", "ASN1", "ASQPE"))]
     if NHGIS_MSA_MFI_COLUMN and NHGIS_MSA_MFI_COLUMN in df.columns:
         nhgis_cols.append(NHGIS_MSA_MFI_COLUMN)
     for col in nhgis_cols:
@@ -593,17 +594,17 @@ print(f"County columns with CBSAA: {'CBSAA' in df_county.columns if df_county is
 if "COUNTYA" in df_place.columns:
     print(f"  COUNTYA sample values: {df_place['COUNTYA'].head(10).tolist()}")
     print(f"  COUNTYA unique values: {df_place['COUNTYA'].nunique()}")
-place_income_cols = [c for c in df_place.columns if 'AURU' in c]
-place_home_cols = [c for c in df_place.columns if 'AUWS' in c]
-place_pop_cols = [c for c in df_place.columns if 'AUO6' in c]
-county_home_cols = [c for c in df_county.columns if 'AUWS' in c] if df_county is not None else []
-county_pop_cols = [c for c in df_county.columns if 'AUO6' in c] if df_county is not None else []
-county_income_cols = [c for c in df_county.columns if 'AURU' in c]
-msa_income_cols = [c for c in df_msa.columns if 'AURU' in c]
+place_income_cols = [c for c in df_place.columns if 'ASQPE' in c]
+place_home_cols = [c for c in df_place.columns if 'ASVNE' in c]
+place_pop_cols = [c for c in df_place.columns if 'ASN1' in c]
+county_home_cols = [c for c in df_county.columns if 'ASVNE' in c] if df_county is not None else []
+county_pop_cols = [c for c in df_county.columns if 'ASN1' in c] if df_county is not None else []
+county_income_cols = [c for c in df_county.columns if 'ASQPE' in c]
+msa_income_cols = [c for c in df_msa.columns if 'ASQPE' in c]
 
-print(f"Place columns - Income (AURU): {place_income_cols}, Home (AUWS): {place_home_cols}, Pop (AUO6): {place_pop_cols}")
-print(f"County columns - Income (AURU): {county_income_cols}")
-print(f"MSA columns - Income (AURU): {msa_income_cols}, MFI column configured: {NHGIS_MSA_MFI_COLUMN is not None}")
+print(f"Place columns - Income (ASQPE): {place_income_cols}, Home (ASVNE): {place_home_cols}, Pop (ASN1): {place_pop_cols}")
+print(f"County columns - Income (ASQPE): {county_income_cols}")
+print(f"MSA columns - Income (ASQPE): {msa_income_cols}, MFI column configured: {NHGIS_MSA_MFI_COLUMN is not None}")
 print(f"MSA columns (all): {df_msa.columns.tolist()}")
 for col in ["CBSAA", "STATEA", "COUNTYA"]:
     if col in df_msa.columns:
@@ -621,9 +622,9 @@ for col_list, df, label in [(county_income_cols, df_county, "County"), (msa_inco
         print(f"  Unique values sample: {df[raw_col].dropna().head(10).tolist()}")
 
 # Rename columns and create county column (4-digit NHGIS to 3-digit FIPS)
-if "AUWSE001" not in df_place.columns or "AUO6E001" not in df_place.columns:
+if "ASVNE001" not in df_place.columns or "ASN1E001" not in df_place.columns:
     raise ValueError(f"Missing required columns in place data. Available: {df_place.columns.tolist()}")
-df_place = df_place.rename(columns={"AUWSE001": "median_home_value", "AUO6E001": "population_5year"})
+df_place = df_place.rename(columns={"ASVNE001": "median_home_value", "ASN1E001": "population_5year"})
 
 # Create county column: 3-digit FIPS (county_transform defined at module level)
 if "COUNTYA" in df_place.columns:
@@ -677,18 +678,18 @@ else:
 
 # Rename income columns
 # County income
-if "AURUE001" not in df_county.columns:
-    print(f"WARNING: AURUE001 not found in county data. Available columns: {df_county.columns.tolist()[:20]}...")
+if "ASQPE001" not in df_county.columns:
+    print(f"WARNING: ASQPE001 not found in county data. Available columns: {df_county.columns.tolist()[:20]}...")
     if county_income_cols:
         print(f"  Found alternative income columns: {county_income_cols}, using first: {county_income_cols[0]}")
         df_county = df_county.rename(columns={county_income_cols[0]: "county_income"})
     else:
         raise ValueError(
-            f"Missing AURUE001 in county data and no alternative found. "
+            f"Missing ASQPE001 in county data and no alternative found. "
             f"Available: {df_county.columns.tolist()}"
         )
 else:
-    df_county = df_county.rename(columns={"AURUE001": "county_income"})
+    df_county = df_county.rename(columns={"ASQPE001": "county_income"})
 
 # County median family income (B19113); same NHGIS column as MSA.
 if NHGIS_MSA_MFI_COLUMN and NHGIS_MSA_MFI_COLUMN in df_county.columns:
@@ -697,8 +698,8 @@ elif "county_mfi" not in df_county.columns:
     df_county["county_mfi"] = np.nan
 
 # MSA income
-if "AURUE001" not in df_msa.columns:
-    print(f"WARNING: AURUE001 not found in MSA data. Available columns: {df_msa.columns.tolist()[:20]}...")
+if "ASQPE001" not in df_msa.columns:
+    print(f"WARNING: ASQPE001 not found in MSA data. Available columns: {df_msa.columns.tolist()[:20]}...")
     if msa_income_cols:
         print(f"  Found alternative income columns: {msa_income_cols}, using first: {msa_income_cols[0]}")
         df_msa = df_msa.rename(columns={msa_income_cols[0]: "msa_income"} | 
@@ -709,7 +710,7 @@ if "AURUE001" not in df_msa.columns:
         if "CBSAA" in df_msa.columns:
             df_msa = df_msa.rename(columns={"CBSAA": "msa_id"})
 else:
-    df_msa = df_msa.rename(columns={"AURUE001": "msa_income"} | 
+    df_msa = df_msa.rename(columns={"ASQPE001": "msa_income"} | 
                            ({"CBSAA": "msa_id"} if "CBSAA" in df_msa.columns else {}))
 
 # MSA median family income (B19113)
@@ -728,8 +729,8 @@ print("  Place population: 5-year ACS only")
 # ref_income and median_home_value feed one affordability_ratio per row; same vintage keeps it consistent.
 
 # Clean renamed columns: only clean columns that weren't already cleaned above
-# median_home_value and population_5year were renamed from AUWSE001 and AUO6E001, already cleaned above
-# county_income and msa_income were renamed from AURUE001, already cleaned above (cache or API)
+# median_home_value and population_5year were renamed from ASVNE001 and ASN1E001, already cleaned above
+# county_income and msa_income were renamed from ASQPE001, already cleaned above (cache or API)
 # Only need to clean if they were set to np.nan directly (line 367 for msa_income fallback)
 if "msa_income" in df_msa.columns and df_msa["msa_income"].dtype == object:
     df_msa["msa_income"] = pd.to_numeric(df_msa["msa_income"], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
@@ -1296,8 +1297,8 @@ df_apr_clean = df_apr_clean.assign(
 
 df_final_base = df_final.copy()
 for source_col, dem_col, output_name, unit_pfx, rate_pfx, net_pfx, net_rate_pfx in [
-    ("NO_BUILDING_PERMITS", "dem_bp", "bp_designation.csv", "permit_units", "permit_rate", "net_permits", "net_rate"),
-    ("NO_OTHER_FORMS_OF_READINESS", "dem_co", "co_designation.csv", "comp_units", "comp_rate", "net_comps", "net_comp_rate"),
+    ("NO_BUILDING_PERMITS", "dem_bp", "bp_designation_acs2019_2023.csv", "permit_units", "permit_rate", "net_permits", "net_rate"),
+    ("NO_OTHER_FORMS_OF_READINESS", "dem_co", "co_designation_acs2019_2023.csv", "comp_units", "comp_rate", "net_comps", "net_comp_rate"),
 ]:
     pipeline_label = "BP" if source_col == "NO_BUILDING_PERMITS" else "CO"
     df_final = df_final_base.copy()
