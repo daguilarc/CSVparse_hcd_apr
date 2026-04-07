@@ -18,37 +18,40 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FixedLocator, FuncFormatter, MaxNLocator, MultipleLocator, NullFormatter, NullLocator, ScalarFormatter
 from scipy.special import expit
-from scipy.optimize import approx_fprime
-from scipy.linalg import block_diag
 from scipy import stats as scipy_stats
 import pymc as pm
 import statsmodels.api as sm
 from statsmodels.tools.sm_exceptions import ConvergenceWarning, PerfectSeparationWarning
 from arch.bootstrap import StationaryBootstrap
 from firthmodels import FirthLogisticRegression
+from tqdm import tqdm
+from sklearn.decomposition import PCA
 
 # X-axis label for Zillow Home Value Index % change
 ZHVI_PCT_LABEL = "Zillow Home Value Index % change (Jan 2018 – Dec 2024, Real 2024 Dollars)"
 # X-axis label for affordability ratio (Dec 2024 ZHVI / MSA median household income)
-AFFORD_X_LABEL = "Ratio: Dec. 2024 Zillow Home Value Index / MSA Median Household Income (2019-2023)"
+AFFORD_X_LABEL = "Ratio: Dec. 2024 Zillow Home Value Index / MSA Median Household Income (2020-2024)"
 # ZIP-level: same ratio definition and label
-AFFORD_X_LABEL_ZIP = "Ratio: Dec. 2024 ZHVI / MSA Median Household Income (2019-2023)"
+AFFORD_X_LABEL_ZIP = "Ratio: Dec. 2024 ZHVI / MSA Median Household Income (2020-2024)"
 ZORI_PCT_LABEL = "Zillow Observed Rent Index (ZORI) % change (Jan 2018 – Dec 2024, Real 2024 Dollars)"
 # ZORI affordability: ratio = (monthly_rent × 12) / annual_income; single constant, no magic number in formula
 ZORI_MONTHS_PER_YEAR = 12
-ZORI_AFFORD_X_LABEL = "(Dec. 2024 ZORI / MSA Median Household Income (2019-2023))%"
+ZORI_AFFORD_X_LABEL = "(Dec. 2024 ZORI / MSA Median Household Income (2020-2024))%"
 ZORI_AFFORD_X_LABEL_ZIP = ZORI_AFFORD_X_LABEL
 # Real index dollar change (same window as % change) shown as percent of MSA income
-PCT_AFFORD_X_LABEL = "(Zillow Home Value Index (ZHVI) Dollar Change / MSA Median Household Income (2019-2023))%\n(Jan 2018 – Dec 2024, Real 2024 Dollars)"
+PCT_AFFORD_X_LABEL = "(Zillow Home Value Index (ZHVI) Dollar Change / MSA Median Household Income (2020-2024))%\n(Jan 2018 – Dec 2024, Real 2024 Dollars)"
 PCT_AFFORD_X_LABEL_ZIP = PCT_AFFORD_X_LABEL
-ZORI_PCT_AFFORD_X_LABEL = "(Zillow Observed Rent Index (ZORI) Annualized Dollar Change / MSA Median Household Income (2019-2023))%\n(Jan 2018 – Dec 2024, Real 2024 Dollars)"
+ZORI_PCT_AFFORD_X_LABEL = (
+    "Zillow Observed Rent Index (ZORI) / MSA Median Household Income (2020-2024)%\n"
+    "(Jan 2018 – Dec 2024, Real 2024 Dollars)"
+)
 ZORI_PCT_AFFORD_X_LABEL_ZIP = ZORI_PCT_AFFORD_X_LABEL
-# ZIP codes excluded in _xsf charts (San Francisco outliers); single source for rate-on-rate and outcome×predictor
+# Legacy hardcoded SF ZCTAs (superseded at runtime: _xsf ZIP charts use all ZCTAs with CNTY_CLEAN == SAN FRANCISCO from APR).
 ZIP_XSF_EXCLUDE = {'94102', '94103', '94105'}
 # City (JURISDICTION) excluded in city-level XSF variant
 CITY_XSF_EXCLUDE = {'SAN FRANCISCO'}
-CITY_XLA_EXCLUDE = {'LOS ANGELES'}
-VOWELS = set('AEIOUY')
+# Hash subsample: exclude jurisdictions/ZIPs where hash(key) % HOLDOUT_MODULUS == 0 (~20% holdout)
+HOLDOUT_MODULUS = 5
 # Geography strings for R² diagnostics (single source; used in table/CSV)
 GEOGRAPHY_CITY = "City"
 GEOGRAPHY_ZIP = "ZIP codes"
@@ -56,45 +59,82 @@ GEOGRAPHY_ZIP = "ZIP codes"
 X_COL_PCT_CHANGE_PREDICTORS = ('zhvi_pct_change', 'zori_pct_change')
 # Dollar-change / income predictors: same panel-time structure as long-window % change; allow negative x on linear scale
 X_COL_AFFORD_DELTA_PREDICTORS = ('pct_afford', 'zori_pct_afford')
-X_COL_TWO_PART_LINEAR_X = frozenset(X_COL_PCT_CHANGE_PREDICTORS) | frozenset(X_COL_AFFORD_DELTA_PREDICTORS)
+# % change in real median household income / place population; omit stratum RE when this is the scalar x (collinearity policy)
+X_COL_INCOME_DELTA_PREDICTORS = frozenset({'income_delta_pct_change'})
+X_COL_POP_DELTA_PREDICTORS = frozenset({'population_delta_pct_change'})
+X_COL_TWO_PART_LINEAR_X = (
+    frozenset(X_COL_PCT_CHANGE_PREDICTORS)
+    | frozenset(X_COL_AFFORD_DELTA_PREDICTORS)
+    | X_COL_INCOME_DELTA_PREDICTORS
+    | X_COL_POP_DELTA_PREDICTORS
+)
+X_COL_PERCENT_TICK_PREDICTORS = frozenset(X_COL_TWO_PART_LINEAR_X)
+# Predictors whose x embeds MSA-level ref_income as denominator; county RE confounds with population slope
+X_COL_MSA_INCOME_PREDICTORS = frozenset({
+    'zhvi_afford_ratio', 'pct_afford', 'zori_afford_ratio', 'zori_pct_afford',
+})
 # Moderate-income completions sum DR + NDR moderate CO columns; single label for charts / rate-on-rate
-MODERATE_INCOME_COMPLETIONS_LABEL = "Moderate Income Completions (DR + NDR)"
+MODERATE_INCOME_COMPLETIONS_LABEL = "Multifamily Moderate Income Completions (DR + NDR)"
+
+
+def _x_axis_should_use_percent_ticks(x_col=None, x_label=None):
+    """Single source of truth for percent x-axis formatting across chart paths."""
+    if x_col is not None and x_col in X_COL_PERCENT_TICK_PREDICTORS:
+        return True
+    return x_label in (
+        AFFORD_X_LABEL, ZORI_AFFORD_X_LABEL, PCT_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL,
+    )
+
+
+def _hierarchy_stratum_column(df, x_col):
+    """Stratum RE column for hierarchical model when x is not a linear two-part %-change predictor.
+    Income stratum only (CPI-real raw Δ); None when policy omits stratum RE."""
+    _, _, _, use_stratum_re = _hierarchy_re_policy(x_col, True)
+    if not use_stratum_re:
+        return None
+    if "income_delta_stratum" in df.columns:
+        return "income_delta_stratum"
+    return None
 
 
 def _hierarchy_re_policy(x_col, x_varies_by_year):
-    """Return (use_year_intercept_re, use_year_slope_re, allow_county_year_cell) for hierarchical SMC.
-    Long-window % change and dollar-change/income x are constant within jurisdiction across panel years—omit year REs and county×year."""
+    """Return (use_year_intercept_re, use_year_slope_re, use_county_re, use_sign_re) for hierarchical SMC.
+    Long-window % change and dollar-change/income x are constant within jurisdiction across panel years—omit year REs.
+    MSA-income-denominated x: omit county REs (ref_income constant within MSA; same confound as year REs for % change).
+    Stratum RE (quintile of real income or pop Δ): use when x is not a linear two-part % change predictor (omit when x is delta)."""
+    use_county_re = not (x_col is not None and x_col in X_COL_MSA_INCOME_PREDICTORS)
+    use_sign_re = (
+        x_col is not None
+        and x_col not in X_COL_INCOME_DELTA_PREDICTORS
+        and x_col not in X_COL_POP_DELTA_PREDICTORS
+        and x_col not in X_COL_TWO_PART_LINEAR_X
+    )
     if x_col is not None and x_col in X_COL_TWO_PART_LINEAR_X:
-        return (False, False, False)
-    return (True, bool(x_varies_by_year), True)
+        return (False, False, use_county_re, False)
+    return (True, bool(x_varies_by_year), use_county_re, use_sign_re)
 
 
 def _geo_label(base, exclude_label):
     return f"{base} ({exclude_label})" if exclude_label else base
 
 
-CITY_MFH_SUBVARIANTS = [
-    (CITY_XSF_EXCLUDE, '_xsf', 'excluding San Francisco'),
-    (CITY_XLA_EXCLUDE, '_xla', 'excluding City of Los Angeles'),
-]
 # CA county name → FIPS built from Census national_county2020.txt in __main__ (_load_ca_county_name_to_fips)
 # Legend labels for CI/credible bands (one place for OMNI). Newline before parenthetical for consistent legend layout.
-CI_LABEL_STATIONARY_MC = "95% Confidence Interval\n(Stationary MC Bootstrap)"
+CI_LABEL_STATIONARY_MC = "95% Confidence Interval\n(Stationary MC Bootstrap, Positive Part)"
 CI_LABEL_CREDIBLE_SMC = "95% Credible Interval\n(Sequential Monte Carlo)"
-CI_LABEL_FREQUENTIST = "95% Confidence Interval\n(±2 SE)"
-# Band colors: frequentist (cyan), second band Bayes/bootstrap (pink), overlap (semi-transparent grape purple).
+# Band colors: cyan = stationary MC bootstrap (positive part); pink = hierarchical Bayes SMC; overlap = purple.
 CI_COLOR_CYAN = "cyan"
 CI_COLOR_PINK = "#F472B6"
 CI_COLOR_OVERLAP = "#6B2D5C"
 # R² chart policy: one numeric cutoff (R2_THRESHOLD) but two different R² definitions (name the gate at call sites).
-# - Timeline scatter (median phase days vs predictor): OLS R² from sm.OLS → R2_THRESHOLD_TIMELINE_OLS_CHART
+# - Timeline scatter (median phase days vs predictor): OLS R² from sm.OLS → R2_THRESHOLD_TIMELINE_OLS_CHART (only if ENABLE_CONSTRUCTION_TIMELINE)
 # - Two-part (units, rate-on-rate, ZIP outcomes, timeline comp×phase): McFadden pseudo-R² → R2_THRESHOLD_TWOPART_MCFADDEN_CHART
+# - Secondary two-part gate: OLS R² on y>0 subset must also pass R2_OLS_POSITIVE_THRESHOLD (after McFadden passes).
 R2_THRESHOLD = 0.03
 R2_THRESHOLD_TIMELINE_OLS_CHART = R2_THRESHOLD
 R2_THRESHOLD_TWOPART_MCFADDEN_CHART = R2_THRESHOLD
-# Below this McFadden R²: skip hierarchical Bayes CI (bootstrap fallback) in two-part path
-R2_THRESHOLD_HIERARCHICAL = R2_THRESHOLD
 R2_THRESHOLD_CI_CHART = R2_THRESHOLD  # legacy alias; equals both semantic thresholds numerically
+R2_OLS_POSITIVE_THRESHOLD = 0.20
 
 
 def _rate_per_1000(raw, pop): return (np.asarray(raw,dtype=np.float64)/np.asarray(pop,dtype=np.float64))*1000.0
@@ -119,13 +159,20 @@ def _numerator_over_ref_income(numerator, ref_income, ok_mask):
     v = np.asarray(ok_mask, dtype=bool) & np.isfinite(num) & np.isfinite(ref) & (ref > 0)
     np.divide(num, ref, out=out, where=v)
     return out
-# Hierarchical Bayes RE prior scales (year vs county). County same tightness as year; county×year = product.
+# Hierarchical Bayes RE prior scales (year vs county). County same tightness as year.
 SIGMA_INT_YEAR = 0.5
 SIGMA_SLOPE_YEAR = 0.25
 SIGMA_INT_COUNTY = SIGMA_INT_YEAR
 SIGMA_SLOPE_COUNTY = SIGMA_SLOPE_YEAR
-SIGMA_INT_CY = SIGMA_INT_YEAR * SIGMA_INT_COUNTY
-SIGMA_SLOPE_CY = SIGMA_SLOPE_YEAR * SIGMA_SLOPE_COUNTY
+# Zero-part (Bernoulli logit) RE scales — same numeric values as positive part; separate names for tuning.
+SIGMA_Z_INT_YEAR = SIGMA_INT_YEAR
+SIGMA_Z_SLOPE_YEAR = SIGMA_SLOPE_YEAR
+SIGMA_Z_INT_COUNTY = SIGMA_INT_COUNTY
+SIGMA_Z_SLOPE_COUNTY = SIGMA_SLOPE_COUNTY
+# Quintile stratum RE (five levels on raw Δ): same prior scale as year/county intercept REs
+SIGMA_SIGN_INTERCEPT = SIGMA_INT_YEAR
+N_DELTA_STRATUM_BINS = 5
+N_STRATUM_RE_LEVELS = N_DELTA_STRATUM_BINS
 
 def extract_year_from_date(val):
     """Extract year from date string. Returns year as string or None if invalid/empty.
@@ -499,16 +546,24 @@ def load_a2_csv(filepath, usecols=None):
 
 # Timeline phase day columns (OMNI: single list reused in build_timeline_projects, aggregate, means, long, charts)
 TIMELINE_PHASE_DAYS = ["days_ent_permit", "days_permit_completion", "days_ent_completion"]
-# Phases required to build yearly timeline (all except optional submission)
-TIMELINE_PHASE_DAYS_REQUIRED_YEARLY = ["days_ent_permit", "days_permit_completion", "days_ent_completion"]
+# Yearly timeline uses the same phase set (alias avoids duplicate literals; OMNI Tier 2)
+TIMELINE_PHASE_DAYS_REQUIRED_YEARLY = TIMELINE_PHASE_DAYS
+# Step 11b (construction timeline charts / merges): off by default. APR entitlement / BP / CO date
+# fields are still not considered reliable for modeling (parse coverage, duplicates, year-from-CO, etc.).
+ENABLE_CONSTRUCTION_TIMELINE = False
 
 
 # Configuration
 NHGIS_API_BASE = "https://api.ipums.org"
-NHGIS_DATASET = "2019_2023_ACS5a"
+NHGIS_DATASET = "2020_2024_ACS5a"
 NHGIS_TABLES = ["B25077", "B01003", "B19013"]
+# 2014–2018 ACS 5-year place MHI (B19013 estimate) for real income-change vs 2020–2024 MHI
+NHGIS_DATASET_2018_MHI = "2014_2018_ACS5a"
+NHGIS_TABLES_2018_MHI = ["B19013", "B01003"]
 CACHE_PATH = Path(__file__).resolve().parent / "nhgis_cache.json"
+CACHE_PATH_2018_PLACE = Path(__file__).resolve().parent / "nhgis_cache_2018_place_b19013_b01003.json"
 CACHE_MAX_AGE_DAYS = 365
+IPUMS_API_KEY = os.environ.get("IPUMS_API_KEY", "").strip()
 
 # Census suppression codes to replace with NaN
 SUPPRESSION_CODES = [-666666666, -999999999, -888888888, -555555555]
@@ -527,6 +582,112 @@ def nhgis_api(method, endpoint, json_data=None):
         print(f"Request was: {json_data if json_data else 'GET request'}")
     resp.raise_for_status()
     return resp.json() if resp.text else None
+
+
+def _nhgis_wait_extract(extract_num, timeout_minutes=60, show_bar=False):
+    """Poll GET /extracts/{n} until completed or failed; shared by main NHGIS pull and 2018 MHI."""
+    poll_interval = 1
+    max_polls = (timeout_minutes * 60) // poll_interval
+    timeout_sec = max_polls * poll_interval
+    bar_width = 32
+    start_time = time.time()
+    for poll in range(max_polls):
+        status = nhgis_api("GET", f"/extracts/{extract_num}?collection=nhgis&version=2")
+        elapsed = int(time.time() - start_time)
+        if status["status"] == "completed":
+            print(f"\r✓ Extract #{extract_num} completed in {elapsed}s" + " " * 40)
+            return status
+        if status["status"] == "failed":
+            raise RuntimeError(f"NHGIS extract failed: {status}")
+        done = poll + 1
+        remaining_sec = max(0, timeout_sec - elapsed)
+        if show_bar:
+            filled = min(int(bar_width * done / max_polls), bar_width)
+            bar = "=" * bar_width if done >= max_polls else "=" * filled + ">" + " " * (bar_width - filled - 1)
+            print(
+                f"\r⏳ Extract #{extract_num} [{bar}] wait {done}/{max_polls} | {elapsed}s elapsed, "
+                f"timeout in {remaining_sec}s | Status: {status['status']}   ",
+                end="",
+                flush=True,
+            )
+        else:
+            print(
+                f"\r⏳ Extract #{extract_num} wait {done}/{max_polls} | {elapsed}s | {status['status']}   ",
+                end="",
+                flush=True,
+            )
+        time.sleep(poll_interval)
+    raise TimeoutError(f"Extract #{extract_num} did not complete within {timeout_minutes} minutes")
+
+
+def _nhgis_e001_estimate_column(df, prefer_contains):
+    """NHGIS csv_header: pick *E001 estimate column, preferring names containing prefer_contains (case-insensitive)."""
+    u = prefer_contains.upper()
+    for c in df.columns:
+        s = str(c)
+        if s.endswith("E001") and u in s.upper():
+            return c
+    e001 = [c for c in df.columns if str(c).endswith("E001")]
+    return e001[0] if e001 else None
+
+
+def _b19013_mhi_estimate_column(df):
+    """NHGIS csv_header estimate column for B19013 (*E001); prefers AURU."""
+    return _nhgis_e001_estimate_column(df, "AURU")
+
+
+def _b01003_total_pop_estimate_column(df):
+    """NHGIS 2014–2018 place B01003 total population estimate (*E001); prefers AJWM code."""
+    return _nhgis_e001_estimate_column(df, "AJWM")
+
+
+def _parse_place_b19013_from_zip_bytes(zip_bytes):
+    """CA place B19013 (+ optional B01003) from NHGIS csv_header zip → PLACEA + place_income_2018 + place_population_2018."""
+    df_p = None
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for name in zf.namelist():
+            if name.endswith(".csv") and "place" in name.lower():
+                df_p = pd.read_csv(zf.open(name), encoding="latin-1", low_memory=False)
+                break
+    if df_p is None:
+        raise RuntimeError("2018 MHI zip: no place CSV found")
+    if "STATEA" in df_p.columns:
+        df_p = df_p[df_p["STATEA"].astype(str).str.zfill(2) == "06"].copy()
+    if "PLACEA" not in df_p.columns:
+        raise ValueError(f"2018 MHI place data missing PLACEA. Columns: {df_p.columns.tolist()[:30]}")
+    est_col = _b19013_mhi_estimate_column(df_p)
+    if est_col is None:
+        raise ValueError(f"2018 MHI: no B19013 estimate column (*E001). Columns: {df_p.columns.tolist()}")
+    pop_col = _b01003_total_pop_estimate_column(df_p)
+    out = df_p.copy()
+    out["PLACEA"] = out["PLACEA"].astype(str).str.zfill(5)
+    out["place_income_2018"] = pd.to_numeric(out[est_col], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
+    if pop_col is not None:
+        out["place_population_2018"] = pd.to_numeric(out[pop_col], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
+    else:
+        out["place_population_2018"] = np.nan
+    return out[["PLACEA", "place_income_2018", "place_population_2018"]].drop_duplicates(subset=["PLACEA"])
+
+
+def _fetch_place_mhi_2018_nhgis():
+    """POST 2014–2018 place B19013 extract, wait, download zip; returns PLACEA + place_income_2018."""
+    extract_num = nhgis_api("POST", "/extracts?collection=nhgis&version=2", {
+        "datasets": {NHGIS_DATASET_2018_MHI: {
+            "dataTables": NHGIS_TABLES_2018_MHI,
+            "geogLevels": ["place"],
+            "breakdownValues": ["bs32.ge00"],
+        }},
+        "dataFormat": "csv_header",
+        "breakdownAndDataTypeLayout": "single_file",
+    })["number"]
+    print(f"2018 MHI extract #{extract_num} submitted, waiting...")
+    status = _nhgis_wait_extract(extract_num, show_bar=False)
+    download_links = status.get("downloadLinks", {})
+    if "tableData" not in download_links:
+        raise RuntimeError(f"2018 MHI extract completed but no download link: {status}")
+    download_resp = requests.get(download_links["tableData"]["url"], headers={"Authorization": IPUMS_API_KEY})
+    download_resp.raise_for_status()
+    return _parse_place_b19013_from_zip_bytes(download_resp.content)
 
 
 # Edge cases: Census uses short form (after stripping " city"), map to full proper name
@@ -1008,28 +1169,6 @@ def deflate_zhvi_values(v0_nominal, v1_nominal, source_label="ZHVI"):
     return zhvi_pct_change, v1_nominal
 
 
-def _acs_income_inflation_factor(acs_final_year=2023):
-    """CPI-U ratio: Dec 2024 / calendar-year average of monthly CPI for acs_final_year. None if CPI unavailable."""
-    cpi_data = load_cpi()
-    if cpi_data is None:
-        return None
-    cpi_dec_2024 = get_cpi_for_month(cpi_data, 2024, 12)
-    monthly_cpis = [get_cpi_for_month(cpi_data, acs_final_year, m) for m in range(1, 13)]
-    monthly_cpis = [v for v in monthly_cpis if v is not None]
-    if not monthly_cpis or cpi_dec_2024 is None:
-        return None
-    factor = cpi_dec_2024 / (sum(monthly_cpis) / len(monthly_cpis))
-    print(f"  ACS income: inflating from {acs_final_year} to Dec 2024 (factor={factor:.4f})")
-    return factor
-
-
-def _acs_income_to_real_2024(income_values, factor):
-    """Scale ACS median household income by factor from _acs_income_inflation_factor."""
-    if factor is None:
-        return income_values
-    return np.asarray(income_values, dtype=np.float64) * factor
-
-
 def _load_zillow_monthly_index(path, target_ids, id_col, id_transform_fn, source_label, pct_col, level_col):
     """Load a Zillow monthly index CSV (ZHVI or ZORI); return % change and Dec 2024 level. Single source for load + date resolution + deflate.
     path: Path to CSV. target_ids: optional set to filter rows (e.g. jurisdiction names or zipcodes).
@@ -1126,7 +1265,7 @@ def load_acs_zcta_income(cache_path, api_key=None):
     # Census API: ZCTA is geography 860 with NO state hierarchy—"in=state:06" is not supported.
     # We must request all US ZCTAs then filter client-side to CA (90001-96162). One-time big fetch, then cached.
     # Only request what we use: ZCTA (from "for"), median income, population. NAME not needed.
-    base_url = "https://api.census.gov/data/2023/acs/acs5"
+    base_url = "https://api.census.gov/data/2024/acs/acs5"
     params = {
         "get": "B19013_001E,B01003_001E",
         "for": "zip code tabulation area:*",
@@ -1189,7 +1328,7 @@ def load_acs_zcta_income(cache_path, api_key=None):
 
 # Two-part hurdle rate model: shared by city and ZIP (population from place/county or ZCTA).
 # Part 1: P(Y>0|x)=expit(α+βx). Part 2: Y|Y>0,x ~ N(γ+δx, σ²). E[Y|x]=P(Y>0|x)×(γ+δx).
-# CI: positive-part only; Bayesian SMC then bootstrap fallback.
+# CI: positive-part stationary bootstrap (+ MLE psi) matches fit_two_part_with_ci; hierarchical Bayes when yearly data supports it.
 # Binary stage: Firth logit when available (avoids perfect-separation warnings); else statsmodels Logit with warning filter.
 
 
@@ -1203,8 +1342,11 @@ def _fit_binary_stage_two_part(x_1d, z):
     if n < 5 or x_1d.shape[0] != n:
         return None
     try:
-        full = FirthLogisticRegression(fit_intercept=True).fit(x_1d.reshape(-1, 1), z)
-        null = FirthLogisticRegression(fit_intercept=True).fit(np.zeros((n, 1)), z)
+        # Bootstrap resamples often land near separation; Firth may emit step-halving noise before a valid fit.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=ConvergenceWarning)
+            full = FirthLogisticRegression(fit_intercept=True).fit(x_1d.reshape(-1, 1), z)
+            null = FirthLogisticRegression(fit_intercept=True).fit(np.zeros((n, 1)), z)
         if not getattr(full, "converged_", True) or not np.all(np.isfinite(full.coef_)) or not np.isfinite(full.intercept_):
             raise ValueError("Firth did not converge or non-finite coefs")
         return (float(full.intercept_), float(full.coef_[0]), float(full.loglik_), float(null.loglik_), None)
@@ -1226,96 +1368,19 @@ def _fit_binary_stage_two_part(x_1d, z):
         return None
 
 
-def ci_two_part(x, y_rate, n_draws=5000, x_range=None):
-    """CI for two-part rate. If x_range given: try Bayesian full two-part curve (SMC) first; on failure use bootstrap so band follows MLE. Else: positive-part only (SMC then bootstrap)."""
-    x_arr = np.asarray(x, dtype=np.float64)
-    y_arr = np.asarray(y_rate, dtype=np.float64)
-    valid_all = np.isfinite(x_arr) & np.isfinite(y_arr) & (y_arr >= 0)
-    if not np.any(valid_all) or valid_all.sum() < 15:
-        return None
-    x_all = x_arr[valid_all]
-    y_all = y_arr[valid_all]
-    if x_range is not None:
-        x_range = np.asarray(x_range, dtype=np.float64)
-        x_mean, x_sd = x_all.mean(), x_all.std()
-        if x_sd > 0 and np.isfinite(x_mean) and np.isfinite(x_sd):
-            x_std_all = (x_all - x_mean) / x_sd
-            z_pos = (y_all > 0).astype(np.float64)
-            pos_mask = y_all > 0
-            n_pos = int(pos_mask.sum())
-            if n_pos >= 10:
-                y_obs_pos = y_all[pos_mask]
-                try:
-                    with pm.Model():
-                        alpha = pm.Normal('alpha', 0, 2)
-                        beta = pm.Normal('beta', 0, 2)
-                        gamma = pm.Normal('gamma', 0, 2)
-                        delta = pm.Normal('delta', 0, 2)
-                        sigma = pm.HalfNormal('sigma', 1)
-                        p_pos = pm.math.invlogit(alpha + beta * x_std_all)
-                        pm.Bernoulli('z', p=p_pos, observed=z_pos)
-                        mu_pos = gamma + delta * x_std_all[pos_mask]
-                        pm.Normal('y_pos', mu=mu_pos, sigma=sigma, observed=y_obs_pos)
-                        idata = pm.sample_smc(draws=n_draws, chains=4, cores=4, progressbar=True, compute_convergence_checks=False)
-                    alpha_d = idata.posterior['alpha'].values.flatten()
-                    beta_d = idata.posterior['beta'].values.flatten()
-                    gamma_d = idata.posterior['gamma'].values.flatten()
-                    delta_d = idata.posterior['delta'].values.flatten()
-                    sigma_d = idata.posterior['sigma'].values.flatten()
-                    x_range_std = (x_range - x_mean) / x_sd
-                    p_pos_range = expit(alpha_d[:, None] + beta_d[:, None] * x_range_std[None, :])
-                    eta_range = gamma_d[:, None] + delta_d[:, None] * x_range_std[None, :]
-                    curve = p_pos_range * eta_range
-                    return {'curve_samples': np.asarray(curve), 'method': 'bayesian'}
-                except Exception as e:
-                    print(f"      Hierarchical Bayes full-curve SMC failed ({type(e).__name__}: {e}); falling back to Stationary MC Bootstrap")
-        block_size = max(2, int(np.sqrt(len(x_all))))
-        sort_idx = np.argsort(x_all)
-        x_sorted = np.asarray(x_all, dtype=np.float64)[sort_idx]
-        y_sorted = np.asarray(y_all, dtype=np.float64)[sort_idx]
-        curves = []
-        bs = StationaryBootstrap(block_size, x_sorted, y_sorted)
-        for data in bs.bootstrap(1000):
-            x_b, y_b = data[0][0], data[0][1]
-            fit = mle_two_part(x_b, y_b)
-            if fit is not None:
-                curves.append(fit['predict'](x_range))
-        if len(curves) < 100:
-            return None
-        return {'curve_samples': np.array(curves), 'method': 'bootstrap'}
-    valid = (y_all > 0)
-    if not np.any(valid):
-        return None
-    x_pos = x_all[valid]
-    y_pos = y_all[valid]
-    if len(x_pos) < 10:
-        return None
-    x_mean, x_sd = x_pos.mean(), x_pos.std()
-    if x_sd <= 0 or not np.isfinite(x_mean) or not np.isfinite(x_sd):
-        return None
-    x_std = (x_pos - x_mean) / x_sd
-    try:
-        with pm.Model():
-            intercept = pm.Normal('intercept', mu=0, sigma=2)
-            slope = pm.Normal('slope', mu=0, sigma=2)
-            sigma = pm.HalfNormal('sigma', sigma=1)
-            mu = intercept + slope * x_std
-            pm.Normal('y', mu=mu, sigma=sigma, observed=y_pos)
-            idata = pm.sample_smc(draws=n_draws, chains=4, cores=4, progressbar=True, compute_convergence_checks=False)
-        slope_std = idata.posterior['slope'].values.flatten()
-        intercept_std = idata.posterior['intercept'].values.flatten()
-        return {
-            'intercept_samples': intercept_std - slope_std * x_mean / x_sd,
-            'slope_samples': slope_std / x_sd,
-            'method': 'bayesian',
-        }
-    except (ValueError, FloatingPointError):
-        pass
-    # Fallback: Stationary MC Bootstrap (OMNI: same as all other chart CI fallbacks)
-    boot_int, boot_slope = stationary_bootstrap_ols(x_pos, y_pos, n_boot=1000, min_success=100)
-    if boot_int is None:
-        return None
-    return {'intercept_samples': boot_int, 'slope_samples': boot_slope, 'method': 'bootstrap'}
+def _full_two_part_curve_matrix(alpha, beta, intercept, slope, x_sc):
+    """Full two-part mean curve samples: psi*eta with psi=expit(alpha+beta*x), eta=intercept+slope*x.
+    alpha..slope are 1D arrays of equal length n_draws; x_sc is 1D (or scalar, promoted) length n_x. Returns shape (n_draws, n_x)."""
+    a = np.asarray(alpha, dtype=np.float64)
+    b = np.asarray(beta, dtype=np.float64)
+    g = np.asarray(intercept, dtype=np.float64)
+    d = np.asarray(slope, dtype=np.float64)
+    x = np.atleast_1d(np.asarray(x_sc, dtype=np.float64))
+    if a.shape != b.shape or a.shape != g.shape or a.shape != d.shape:
+        raise ValueError("alpha, beta, intercept, slope must have the same shape")
+    psi_s = expit(a[:, None] + b[:, None] * x[None, :])
+    eta_s = g[:, None] + d[:, None] * x[None, :]
+    return psi_s * eta_s
 
 
 def _ci_from_samples(x_scaled, alpha_s=None, beta_s=None, int_s=None, slope_s=None,
@@ -1329,9 +1394,13 @@ def _ci_from_samples(x_scaled, alpha_s=None, beta_s=None, int_s=None, slope_s=No
         return (np.percentile(curve_samples, 2.5, axis=0),
                 np.percentile(curve_samples, 97.5, axis=0))
     if all(s is not None for s in (alpha_s, beta_s, int_s, slope_s)):
-        psi_s = expit(alpha_s[:, None] + beta_s[:, None] * x_scaled[None, :])
-        eta_s = int_s[:, None] + slope_s[:, None] * x_scaled[None, :]
-        curves = psi_s * eta_s
+        curves = _full_two_part_curve_matrix(
+            np.asarray(alpha_s, dtype=np.float64),
+            np.asarray(beta_s, dtype=np.float64),
+            np.asarray(int_s, dtype=np.float64),
+            np.asarray(slope_s, dtype=np.float64),
+            np.asarray(x_scaled, dtype=np.float64),
+        )
         return (np.percentile(curves, 2.5, axis=0), np.percentile(curves, 97.5, axis=0))
     if int_s is not None and slope_s is not None:
         if psi_mle is not None and eta_mle is not None:
@@ -1344,121 +1413,80 @@ def _ci_from_samples(x_scaled, alpha_s=None, beta_s=None, int_s=None, slope_s=No
     return (None, None)
 
 
-def _freq_ci_delta_method(x_sc, alpha_mle, beta_mle, intercept_mle, slope_mle, cov_alpha_beta, cov_gamma_delta):
-    """Frequentist 95% CI band for E[Y|X] = psi*mu using delta method: SE = sqrt(grad' V grad), grad from numerical differentiation.
-    Returns (freq_ci_lo, freq_ci_hi) 1d arrays same length as x_sc, or (None, None) if cov missing/non-finite."""
-    if cov_alpha_beta is None or cov_gamma_delta is None:
-        return (None, None)
-    cov_alpha_beta = np.asarray(cov_alpha_beta, dtype=np.float64)
-    cov_gamma_delta = np.asarray(cov_gamma_delta, dtype=np.float64)
-    if cov_alpha_beta.shape != (2, 2) or cov_gamma_delta.shape != (2, 2):
-        return (None, None)
-    if not np.all(np.isfinite(cov_alpha_beta)) or not np.all(np.isfinite(cov_gamma_delta)):
-        return (None, None)
-    x_sc = np.atleast_1d(np.asarray(x_sc, dtype=np.float64))
-    theta_mle = np.array([alpha_mle, beta_mle, intercept_mle, slope_mle], dtype=np.float64)
-    V = block_diag(cov_alpha_beta, cov_gamma_delta)
-    eps = np.sqrt(np.finfo(np.float64).eps) * (1.0 + np.abs(theta_mle))
-    freq_lo_list = []
-    freq_hi_list = []
-    for x in x_sc:
-        def g_x(theta):
-            psi = expit(theta[0] + theta[1] * x)
-            eta = theta[2] + theta[3] * x
-            mu = eta
-            return float(psi * mu)
-        grad = approx_fprime(theta_mle, g_x, eps)
-        var_g = float(grad @ V @ grad)
-        se = np.sqrt(var_g) if var_g > 0 else 0.0
-        mle_y_x = g_x(theta_mle)
-        freq_lo_list.append(max(mle_y_x - 2 * se, 0.0))
-        freq_hi_list.append(mle_y_x + 2 * se)
-    return (np.array(freq_lo_list), np.array(freq_hi_list))
+def _expand_ci_curve_arrays(ci_result, x_range):
+    """Ensure boot_curve_samples / bayes_curve_samples exist from boot_* / Bayes sample keys + MLE scalars."""
+    out = dict(ci_result) if ci_result else {}
+    if not out:
+        return out
+    x_sc = np.asarray(x_range, dtype=np.float64)
+    am, bm = out.get('alpha_mle'), out.get('beta_mle')
+    gm, dm = out.get('intercept_mle'), out.get('slope_mle')
+    if out.get('boot_curve_samples') is None and out.get('boot_intercept_samples') is not None and out.get('boot_slope_samples') is not None:
+        bi = np.asarray(out['boot_intercept_samples'], dtype=np.float64)
+        bs = np.asarray(out['boot_slope_samples'], dtype=np.float64)
+        if am is not None and bm is not None and gm is not None and dm is not None:
+            n_boot = bi.shape[0]
+            a = np.full(n_boot, float(am), dtype=np.float64)
+            b = np.full(n_boot, float(bm), dtype=np.float64)
+            out['boot_curve_samples'] = _full_two_part_curve_matrix(a, b, bi, bs, x_sc)
+    if out.get('bayes_curve_samples') is None:
+        aks, bks = out.get('alpha_samples'), out.get('beta_samples')
+        iks, sks = out.get('intercept_samples'), out.get('slope_samples')
+        if all(s is not None for s in (aks, bks, iks, sks)):
+            a = np.asarray(aks, dtype=np.float64)
+            b = np.asarray(bks, dtype=np.float64)
+            g = np.asarray(iks, dtype=np.float64)
+            d = np.asarray(sks, dtype=np.float64)
+            out['bayes_curve_samples'] = _full_two_part_curve_matrix(a, b, g, d, x_sc)
+    return out
 
 
 def _build_mle_ci(result, x_range_raw):
     """MLE curve + CI bands from fit_two_part_with_ci result.
-    Returns (mle_y, ci_lo, ci_hi, ci_method, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean).
-    Freq band = frequentist 95% CI from MLE + delta method when cov available; bayes band from posterior when available.
-    bayes_mean = posterior predictive mean when Bayesian samples exist, else None."""
+    Returns (mle_y, boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean).
+    Cyan = stationary MC on positive part with MLE psi; pink = full hierarchical posterior when all four sample arrays exist."""
     is_log = (result.get('x_transform') == 'log')
-    x_sc = np.log(np.maximum(x_range_raw, 1e-300)) if is_log else x_range_raw
+    x_sc = np.log(np.maximum(x_range_raw, 1e-300)) if is_log else np.asarray(x_range_raw, dtype=np.float64)
     eta = result['intercept_mle'] + result['slope_mle'] * x_sc
     psi = expit(result['alpha_mle'] + result['beta_mle'] * x_sc)
     mle_y = psi * eta
-    ci_lo, ci_hi = _ci_from_samples(
-        x_sc, alpha_s=result.get('alpha_samples'), beta_s=result.get('beta_samples'),
-        int_s=result.get('intercept_samples'), slope_s=result.get('slope_samples'),
-        psi_mle=psi, eta_mle=eta)
-    ci_method = result.get('ci_method')
-    freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = None, None, None, None, None
-    cov_ab = result.get('cov_alpha_beta')
-    cov_gd = result.get('cov_gamma_delta')
-    if cov_ab is not None and cov_gd is not None:
-        freq_ci_lo, freq_ci_hi = _freq_ci_delta_method(
-            x_sc, result['alpha_mle'], result['beta_mle'], result['intercept_mle'], result['slope_mle'],
-            cov_ab, cov_gd)
-    if ci_method in ('bayesian', 'bootstrap') and all(result.get(k) is not None for k in ('alpha_samples', 'beta_samples', 'intercept_samples', 'slope_samples')):
-        alpha_s = np.asarray(result['alpha_samples'])
-        beta_s = np.asarray(result['beta_samples'])
-        int_s = np.asarray(result['intercept_samples'])
-        slope_s = np.asarray(result['slope_samples'])
-        psi_s = expit(alpha_s[:, None] + beta_s[:, None] * x_sc[None, :])
-        eta_s = int_s[:, None] + slope_s[:, None] * x_sc[None, :]
-        curves = psi_s * eta_s
+    bi, bs = result.get('boot_intercept_samples'), result.get('boot_slope_samples')
+    if bi is not None and bs is not None:
+        boot_ci_lo, boot_ci_hi = _ci_from_samples(
+            x_sc, int_s=np.asarray(bi, dtype=np.float64), slope_s=np.asarray(bs, dtype=np.float64),
+            psi_mle=psi, eta_mle=eta)
+    else:
+        boot_ci_lo, boot_ci_hi = None, None
+    bayes_ci_lo, bayes_ci_hi, bayes_mean = None, None, None
+    if all(result.get(k) is not None for k in ('alpha_samples', 'beta_samples', 'intercept_samples', 'slope_samples')):
+        alpha_s = np.asarray(result['alpha_samples'], dtype=np.float64)
+        beta_s = np.asarray(result['beta_samples'], dtype=np.float64)
+        int_s = np.asarray(result['intercept_samples'], dtype=np.float64)
+        slope_s = np.asarray(result['slope_samples'], dtype=np.float64)
+        curves = _full_two_part_curve_matrix(alpha_s, beta_s, int_s, slope_s, x_sc)
         bayes_ci_lo = np.percentile(curves, 2.5, axis=0)
         bayes_ci_hi = np.percentile(curves, 97.5, axis=0)
         bayes_mean = np.mean(curves, axis=0)
-    return (mle_y, ci_lo, ci_hi, ci_method, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean)
+    return (mle_y, boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean)
 
 
-def _extract_ci_band(ci_result, x_range, mle_y=None, mle_result=None):
-    """CI band from ci_two_part result.
-    Returns (ci_lo, ci_hi, ci_method, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean).
-    Freq band = frequentist 95% CI from mle_result (MLE + cov + delta method) when mle_result has cov; else None.
-    Bayes band from curve_samples or alpha/beta/int/slope samples when available. bayes_mean = posterior mean when curves exist, else None."""
-    freq_ci_lo, freq_ci_hi = None, None
-    if mle_result is not None:
-        cov_ab = mle_result.get('cov_alpha_beta')
-        cov_gd = mle_result.get('cov_gamma_delta')
-        if cov_ab is not None and cov_gd is not None:
-            freq_ci_lo, freq_ci_hi = _freq_ci_delta_method(
-                x_range,
-                mle_result['alpha_mle'], mle_result['beta_mle'],
-                mle_result['intercept_mle'], mle_result['slope_mle'],
-                cov_ab, cov_gd)
-
+def _extract_ci_band(ci_result, x_range):
+    """CI bands from pooled ci_two_part (stationary positive-part + MLE psi) or fit_two_part_with_ci-style dict.
+    Returns (boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean)."""
     if ci_result is None:
-        return (None, None, None, freq_ci_lo, freq_ci_hi, None, None, None)
-
-    method = ci_result.get('method', 'bootstrap')
-    curve_samples = ci_result.get('curve_samples')
-    alpha_s = ci_result.get('alpha_samples')
-    beta_s = ci_result.get('beta_samples')
-    int_s = ci_result.get('intercept_samples')
-    slope_s = ci_result.get('slope_samples')
-    ci_lo, ci_hi = _ci_from_samples(
-        x_range, alpha_s=alpha_s, beta_s=beta_s,
-        int_s=int_s, slope_s=slope_s,
-        curve_samples=curve_samples)
-    bayes_ci_lo, bayes_ci_hi = None, None
-    bayes_mean = None
-    if curve_samples is not None or all(s is not None for s in (alpha_s, beta_s, int_s, slope_s)):
-        if curve_samples is not None:
-            curves = np.asarray(curve_samples)
-        else:
-            alpha_s = np.asarray(alpha_s)
-            beta_s = np.asarray(beta_s)
-            int_s = np.asarray(int_s)
-            slope_s = np.asarray(slope_s)
-            x_sc = np.asarray(x_range)
-            psi_s = expit(alpha_s[:, None] + beta_s[:, None] * x_sc[None, :])
-            eta_s = int_s[:, None] + slope_s[:, None] * x_sc[None, :]
-            curves = psi_s * eta_s
-        bayes_ci_lo = np.percentile(curves, 2.5, axis=0)
-        bayes_ci_hi = np.percentile(curves, 97.5, axis=0)
-        bayes_mean = np.mean(curves, axis=0)
-    return (ci_lo, ci_hi, method, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean)
+        return (None, None, None, None, None)
+    ci = _expand_ci_curve_arrays(ci_result, x_range)
+    boot_lo = boot_hi = bayes_lo = bayes_hi = bayes_mean = None
+    if ci.get('boot_curve_samples') is not None:
+        bc = np.asarray(ci['boot_curve_samples'], dtype=np.float64)
+        boot_lo = np.percentile(bc, 2.5, axis=0)
+        boot_hi = np.percentile(bc, 97.5, axis=0)
+    if ci.get('bayes_curve_samples') is not None:
+        bc = np.asarray(ci['bayes_curve_samples'], dtype=np.float64)
+        bayes_lo = np.percentile(bc, 2.5, axis=0)
+        bayes_hi = np.percentile(bc, 97.5, axis=0)
+        bayes_mean = np.mean(bc, axis=0)
+    return (boot_lo, boot_hi, bayes_lo, bayes_hi, bayes_mean)
 
 
 def _set_log_dollar_ticks(ax, x_lo, x_hi):
@@ -1469,27 +1497,25 @@ def _set_log_dollar_ticks(ax, x_lo, x_hi):
     if len(in_range) < 2:
         in_range = [ticks[0], x_hi] if x_hi > ticks[0] else ticks[:2]
     if in_range and in_range[-1] < x_hi:
-        in_range = list(in_range) + [float(x_hi)]
+        log_gap = np.log(x_hi) - np.log(in_range[-1])
+        log_span = np.log(x_hi) - np.log(max(in_range[0], 1.0))
+        if log_span > 0 and log_gap / log_span > 0.05:
+            in_range = list(in_range) + [float(x_hi)]
     _apply_log_axis_dollar_ticks(ax, in_range, ticks, x_hi)
 
 
-def _draw_ci_bands_on_ax(ax, x_line, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, ci_lo, ci_hi, ci_method):
-    """Draw CI bands on ax; returns patch for legend (one Patch, two-Patch list, or None)."""
+def _draw_ci_bands_on_ax(ax, x_line, boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi):
+    """Draw CI bands: cyan = stationary MC bootstrap (positive part); pink = hierarchical Bayes."""
     ci_patch = None
-    if freq_ci_lo is not None and freq_ci_hi is not None and bayes_ci_lo is not None and bayes_ci_hi is not None:
-        patch_freq = ax.fill_between(x_line, freq_ci_lo, freq_ci_hi, alpha=0.3, color=CI_COLOR_CYAN, label=CI_LABEL_FREQUENTIST)
-        bayes_label = CI_LABEL_STATIONARY_MC if ci_method == 'bootstrap' else CI_LABEL_CREDIBLE_SMC
-        patch_bayes = ax.fill_between(x_line, bayes_ci_lo, bayes_ci_hi, alpha=0.3, color=CI_COLOR_PINK, label=bayes_label)
-        overlap_lo = np.maximum(np.maximum(freq_ci_lo, bayes_ci_lo), 0)
-        overlap_hi = np.minimum(freq_ci_hi, bayes_ci_hi)
+    if boot_ci_lo is not None and boot_ci_hi is not None and bayes_ci_lo is not None and bayes_ci_hi is not None:
+        patch_boot = ax.fill_between(x_line, boot_ci_lo, boot_ci_hi, alpha=0.3, color=CI_COLOR_CYAN, label=CI_LABEL_STATIONARY_MC)
+        patch_bayes = ax.fill_between(x_line, bayes_ci_lo, bayes_ci_hi, alpha=0.3, color=CI_COLOR_PINK, label=CI_LABEL_CREDIBLE_SMC)
+        overlap_lo = np.maximum(np.maximum(boot_ci_lo, bayes_ci_lo), 0)
+        overlap_hi = np.minimum(boot_ci_hi, bayes_ci_hi)
         ax.fill_between(x_line, overlap_lo, overlap_hi, alpha=0.3, color=CI_COLOR_OVERLAP)
-        ci_patch = [patch_freq, patch_bayes]
-    elif freq_ci_lo is not None and freq_ci_hi is not None:
-        patch_freq = ax.fill_between(x_line, freq_ci_lo, freq_ci_hi, alpha=0.3, color=CI_COLOR_CYAN, label=CI_LABEL_FREQUENTIST)
-        ci_patch = patch_freq
-    elif ci_lo is not None and ci_hi is not None:
-        ci_label = CI_LABEL_STATIONARY_MC if ci_method == 'bootstrap' else CI_LABEL_CREDIBLE_SMC
-        ci_patch = ax.fill_between(x_line, ci_lo, ci_hi, alpha=0.3, color=CI_COLOR_PINK, label=ci_label)
+        ci_patch = [patch_boot, patch_bayes]
+    elif boot_ci_lo is not None and boot_ci_hi is not None:
+        ci_patch = ax.fill_between(x_line, boot_ci_lo, boot_ci_hi, alpha=0.3, color=CI_COLOR_CYAN, label=CI_LABEL_STATIONARY_MC)
     return ci_patch
 
 
@@ -1510,6 +1536,29 @@ def _ols_r2_positive_subset_match_export(x_col, x_data, y_rate, x_data_for_ols=N
     """OLS R² on y>0; same x/y scaling as chart legend and r2_diagnostics CSV (see _append_two_part_r2_diagnostics_row)."""
     xd_ols = x_data if x_data_for_ols is None else x_data_for_ols
     return _ols_r2_positive_subset(xd_ols, y_rate, x_col)
+
+
+def _positive_part_line_from_two_part(x_model_grid, intercept_mle, slope_mle):
+    """Predict positive-part mean from two-part MLE positive-part estimates on model-scale x grid."""
+    xg = np.asarray(x_model_grid, dtype=np.float64)
+    return intercept_mle + slope_mle * xg
+
+
+def _r2_positive_subset_vs_mle_line(x_data, y_rate, intercept_mle, slope_mle):
+    """R² on y>0 vs the positive-part MLE line (same x scale as two-part fit); no separate OLS refit."""
+    xd = np.asarray(x_data, dtype=np.float64)
+    yr = np.asarray(y_rate, dtype=np.float64)
+    pos = (yr > 0) & np.isfinite(xd) & np.isfinite(yr)
+    if pos.sum() < 3:
+        return np.nan
+    x_p, y_p = xd[pos], yr[pos]
+    y_hat = float(intercept_mle) + float(slope_mle) * x_p
+    ss_res = float(np.sum((y_p - y_hat) ** 2))
+    y_mean = float(np.mean(y_p))
+    ss_tot = float(np.sum((y_p - y_mean) ** 2))
+    if ss_tot <= 0:
+        return np.nan
+    return 1.0 - ss_res / ss_tot
 
 
 def _fmt_ols_r2(val):
@@ -1554,20 +1603,90 @@ def _append_timeline_r2_diagnostics_row(r2_list, regression_label, geography, ol
 
 def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
                         x_label, y_label, data_label='Cities', apr_year_range='2018-2024',
-                        r2=0.0, ols_r2=None, ci_lo=None, ci_hi=None, ci_method=None,
-                        freq_ci_lo=None, freq_ci_hi=None, bayes_ci_lo=None, bayes_ci_hi=None,
+                        r2=0.0, ols_r2=None,
+                        boot_ci_lo=None, boot_ci_hi=None, bayes_ci_lo=None, bayes_ci_hi=None,
                         bayes_mean=None,
                         labels=None, label_cleanup=None, use_log_x=False,
                         x_tick_dollar=False, x_tick_percent=False, x_tick_days=False,
-                        also_annotate_second_max_x=False):
+                        also_annotate_second_max_x=False,
+                        positive_ols_simple=False, x_col_for_ols=None,
+                        positive_line_y=None, positive_ols_r2=None):
     """Unified two-part regression chart. Scatter always filtered to y > 0.
     x_scatter, y_scatter: raw data arrays (same length; y=0 rows excluded from scatter).
-    x_line, mle_y: MLE curve arrays in display space. ci_lo, ci_hi: CI band over x_line (or None).
-    When freq_ci_lo/hi and bayes_ci_lo/hi are all provided, two bands are drawn (cyan freq, pink bayes, purple overlap).
-    Otherwise single band uses ci_lo/ci_hi with pink and label by ci_method.
+    x_line, mle_y: MLE curve arrays in display space.
+    boot_ci_lo/hi: stationary MC (positive part); bayes_ci_lo/hi: hierarchical SMC when available.
     bayes_mean: if not None, plot posterior predictive mean line (Hierarchical Bayes).
     ols_r2: if finite, second legend line for OLS R² on y>0 subset (same x scaling as scatter).
-    x_tick_dollar/percent/days: mutually exclusive x-axis formatting flags."""
+    x_tick_dollar/percent/days: mutually exclusive x-axis formatting flags.
+    positive_ols_simple: if True, only scatter + positive-part line from two-part fit (no MLE/CI/Bayes/McFadden)."""
+    if positive_ols_simple:
+        if positive_line_y is None:
+            raise ValueError("positive_ols_simple requires positive_line_y from two-part fit output")
+        y_ols_line = np.asarray(positive_line_y, dtype=np.float64)
+        ols_r2_simple = positive_ols_r2
+        setup_chart_style()
+        fig, ax = _fig_ax_square_plot()
+        nz = y_scatter > 0
+        x_nz, y_nz = x_scatter[nz], y_scatter[nz]
+        labels_nz = labels[nz] if labels is not None else None
+        scatter_suffix = f'n={len(x_scatter)}' + (f'; {apr_year_range}' if apr_year_range else '')
+        ols_line_handle, = ax.plot(
+            x_line, y_ols_line, color='#1d4ed8', linewidth=2,
+            label='Positive-part MLE line\n(reused from two-part fit)',
+        )
+        scatter_handle = ax.scatter(x_nz, y_nz, color='#ED7D31', alpha=0.6, s=40,
+                                    edgecolors='none', label=f'{data_label}\n({scatter_suffix})')
+        r2_ols_handle = None
+        if ols_r2_simple is not None and np.isfinite(ols_r2_simple):
+            ols_str = f'{ols_r2_simple:.2e}' if abs(ols_r2_simple) < 0.001 else f'{ols_r2_simple:.3f}'
+            r2_ols_handle, = ax.plot([], [], ' ', label=f"R² (y>0 vs positive-part line) = {ols_str}")
+        ax.set_xlim(x_line.min(), x_line.max())
+        if use_log_x:
+            ax.set_xscale('log')
+        y_max = (np.max(y_nz) if len(y_nz) > 0 else 1) * 1.05
+        ax.set_ylim(0, y_max)
+        ann_list = []
+        if labels_nz is not None and len(labels_nz) > 0:
+            cleanup = label_cleanup or (lambda s: str(s))
+            ann_list = annotate_top_n_by_y(ax, x_nz, y_nz, labels_nz, n=3, label_cleanup=cleanup)
+            if also_annotate_second_max_x and len(x_nz) >= 2:
+                top3_y_idx = set(np.argsort(y_nz)[::-1][:3])
+                idx_2nd_x = np.argsort(x_nz)[-2]
+                if idx_2nd_x not in top3_y_idx:
+                    ann2 = ax.annotate(cleanup(labels_nz[idx_2nd_x]), (x_nz[idx_2nd_x], y_nz[idx_2nd_x]),
+                                       fontsize=7, alpha=0.8, xytext=_xytext_keep_inside(ax, x_nz[idx_2nd_x], y_nz[idx_2nd_x], label=cleanup(labels_nz[idx_2nd_x])),
+                                       textcoords='offset points', annotation_clip=True)
+                    ann_list.append(ann2)
+            if ann_list:
+                _resolve_scatter_label_overlaps(ax, fig, ann_list)
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        ax.set_title('')
+        handles = [ols_line_handle, scatter_handle] + ([r2_ols_handle] if r2_ols_handle is not None else [])
+        leg = ax.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False)
+        x_lo, x_hi = float(x_line.min()), float(x_line.max())
+        if use_log_x and x_tick_dollar:
+            _set_log_dollar_ticks(ax, x_lo, x_hi)
+        elif use_log_x and x_tick_days:
+            fmt = ScalarFormatter()
+            fmt.set_scientific(False)
+            ax.xaxis.set_major_formatter(fmt)
+        elif use_log_x:
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
+        elif x_tick_dollar:
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'${x:,.0f}'))
+        elif x_tick_percent:
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.0f}%'))
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune="lower"))
+        else:
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune="lower"))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:,.0f}'))
+        fig.savefig(output_path, dpi=150, bbox_inches='tight', bbox_extra_artists=[leg], facecolor='white')
+        plt.close(fig)
+        print(f"    Saved: {output_path}")
+        return
+
     setup_chart_style()
     fig, ax = _fig_ax_square_plot()
     nz = y_scatter > 0
@@ -1580,7 +1699,7 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
     if bayes_mean is not None:
         bayes_mean_handle, = ax.plot(x_line, bayes_mean, color='#C04060', linewidth=2, linestyle='-',
                                      label='Posterior Predictive Mean\n(Hierarchical Bayes)')
-    ci_patch = _draw_ci_bands_on_ax(ax, x_line, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, ci_lo, ci_hi, ci_method)
+    ci_patch = _draw_ci_bands_on_ax(ax, x_line, boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi)
     scatter_handle = ax.scatter(x_nz, y_nz, color='#ED7D31', alpha=0.6, s=40,
                                 edgecolors='none', label=f'{data_label}\n({scatter_suffix})')
     r2_str = f'{r2:.2e}' if abs(r2) < 0.001 else f'{r2:.3f}'
@@ -1629,22 +1748,228 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
         ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'${x:,.0f}'))
     elif x_tick_percent:
         ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.0f}%'))
-        ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune="lower"))
     else:
         ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
-        ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune="lower"))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:,.0f}'))
-    if use_log_x:
-        fig.canvas.draw()
-        if x_tick_dollar:
-            _set_log_dollar_ticks(ax, max(x_lo, 1.0), x_hi)
-        elif x_tick_days:
-            fmt = ScalarFormatter()
-            fmt.set_scientific(False)
-            ax.xaxis.set_major_formatter(fmt)
     fig.savefig(output_path, dpi=150, bbox_inches='tight', bbox_extra_artists=[leg], facecolor='white')
     plt.close(fig)
     print(f"    Saved: {output_path}")
+
+
+def _plot_zip_outcome_two_part_and_optional_positive_ols(
+    main_png_path,
+    x_scatter_display,
+    y_rate,
+    x_line_display,
+    mle_y_line,
+    x_label_full,
+    y_label_chart,
+    data_label,
+    apr_year_range,
+    mcfadden_r2,
+    ols_r2_out,
+    boot_ci_lo,
+    boot_ci_hi,
+    bayes_ci_lo,
+    bayes_ci_hi,
+    bayes_mean,
+    zip_labels,
+    use_log_x,
+    x_tick_dollar,
+    x_col,
+    positive_line_y,
+    positive_ols_r2,
+):
+    """Main ZIP two-part chart plus optional ZHVI/ZORI % simple-OLS companion (one call site)."""
+    plot_two_part_chart(
+        x_scatter=x_scatter_display,
+        y_scatter=y_rate,
+        x_line=x_line_display,
+        mle_y=mle_y_line,
+        output_path=main_png_path,
+        x_label=x_label_full,
+        y_label=y_label_chart,
+        data_label=data_label,
+        apr_year_range=apr_year_range,
+        r2=mcfadden_r2,
+        ols_r2=ols_r2_out,
+        boot_ci_lo=boot_ci_lo,
+        boot_ci_hi=boot_ci_hi,
+        bayes_ci_lo=bayes_ci_lo,
+        bayes_ci_hi=bayes_ci_hi,
+        bayes_mean=bayes_mean,
+        labels=zip_labels,
+        use_log_x=use_log_x,
+        x_tick_dollar=x_tick_dollar,
+        also_annotate_second_max_x=True,
+    )
+    if x_col not in X_COL_PCT_CHANGE_PREDICTORS:
+        return
+    ols_png = main_png_path.with_name(f'{main_png_path.stem}_positive_ols{main_png_path.suffix}')
+    plot_two_part_chart(
+        x_scatter=x_scatter_display,
+        y_scatter=y_rate,
+        x_line=x_line_display,
+        mle_y=mle_y_line,
+        output_path=ols_png,
+        x_label=x_label_full,
+        y_label=y_label_chart,
+        data_label=data_label,
+        apr_year_range=apr_year_range,
+        r2=0.0,
+        ols_r2=None,
+        boot_ci_lo=None,
+        boot_ci_hi=None,
+        bayes_ci_lo=None,
+        bayes_ci_hi=None,
+        bayes_mean=None,
+        labels=zip_labels,
+        use_log_x=use_log_x,
+        x_tick_dollar=x_tick_dollar,
+        also_annotate_second_max_x=True,
+        positive_ols_simple=True,
+        x_col_for_ols=x_col,
+        positive_line_y=positive_line_y,
+        positive_ols_r2=positive_ols_r2,
+    )
+
+
+def _zip_outcome_predictor_fit_ci_and_charts(
+    df_v,
+    y_col,
+    y_label,
+    x_col,
+    x_tag,
+    x_axis_label,
+    use_log_x,
+    x_tick_dollar,
+    require_msa,
+    suffix,
+    exclude_label,
+    df_zip_yearly_long,
+    all_r2_results,
+    charts_skipped_low_r2,
+    chart_parent_dir,
+):
+    """ZIP outcome×predictor: MLE, CI, R² row, and chart emission (inner body of triple loop)."""
+    use_zips = set(df_v['zipcode'].astype(str).str.zfill(5))
+    x_pred = df_v[x_col].values.astype(float) if not use_log_x else np.log(df_v[x_col].values)
+    y_rate = (df_v[y_col].values.astype(float) / df_v['population'].values) * 1000.0
+    print(f"\n  --- {y_label} vs {'raw ' + x_col if not use_log_x else 'log(' + x_col + ')'}{suffix or ''} ---")
+    mle_result = mle_two_part(x_pred, y_rate)
+    if mle_result is None:
+        print(f"      Insufficient data for two-step MLE")
+        return
+    geography_zip = _geo_label(GEOGRAPHY_ZIP, exclude_label)
+    reg_zip_out = f"{y_label} (per 1000 pop) vs {x_axis_label}"
+    x_range_ror = np.linspace(x_pred.min(), x_pred.max(), 100)
+    x_disp_ols = np.exp(mle_result['x']) if use_log_x else mle_result['x']
+    x_for_ols = x_disp_ols if use_log_x else None
+    ols_r2_line = _ols_r2_positive_subset_match_export(
+        x_col, mle_result['x'], mle_result['y_rate'], x_for_ols,
+    )
+    if mle_result['mcfadden_r2'] < R2_THRESHOLD_TWOPART_MCFADDEN_CHART:
+        _append_two_part_r2_diagnostics_row(
+            all_r2_results, reg_zip_out, geography_zip, mle_result, x_col,
+            mle_result['x'], mle_result['y_rate'], x_range_ror, None, None,
+            x_data_for_ols=x_disp_ols,
+        )
+        charts_skipped_low_r2.append((f"zip_{y_col.replace('total_', '')}_{x_tag}{suffix or ''}", mle_result['mcfadden_r2']))
+        print(
+            f"      McFadden's R² = {mle_result['mcfadden_r2']:.3f} < {R2_THRESHOLD_TWOPART_MCFADDEN_CHART}, "
+            f"skipping CI and chart; OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_line)}"
+        )
+        return
+    if not np.isfinite(ols_r2_line) or ols_r2_line < R2_OLS_POSITIVE_THRESHOLD:
+        _append_two_part_r2_diagnostics_row(
+            all_r2_results, reg_zip_out, geography_zip, mle_result, x_col,
+            mle_result['x'], mle_result['y_rate'], x_range_ror, None, None,
+            x_data_for_ols=x_disp_ols,
+        )
+        charts_skipped_low_r2.append((f"zip_{y_col.replace('total_', '')}_{x_tag}{suffix or ''}", ols_r2_line))
+        print(
+            f"      OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_line)} < {R2_OLS_POSITIVE_THRESHOLD}, "
+            f"skipping CI and chart; McFadden's R² = {mle_result['mcfadden_r2']:.3f}"
+        )
+        return
+    print(
+        f"      Two-step MLE: slope={mle_result['slope_mle']:.4f}, "
+        f"McFadden R²={mle_result['mcfadden_r2']:.4f}, OLS R² (y>0)={_fmt_ols_r2(ols_r2_line)}, n={mle_result['n_total']}"
+    )
+    pred_filter = (lambda zy_df: (zy_df[x_col].notna() & np.isfinite(zy_df[x_col].values))
+                   if not use_log_x else (zy_df[x_col].notna() & (zy_df[x_col] > 0)))
+    ci_result = fit_two_part_with_ci(
+        None, None, x_col, y_col, None,
+        log_x=use_log_x, y_is_rate=True,
+        x_varies_by_year=False,
+        zip_x_pred_totals=df_v[x_col].values.astype(float),
+        zip_y_rate_totals=y_rate,
+        zip_df_yearly_long=df_zip_yearly_long, zip_use_zips=use_zips,
+        zip_x_is_rate=False, zip_pred_filter_fn=pred_filter,
+        zip_df_totals_valid=df_v,
+    )
+    if ci_result is None:
+        ci_result = ci_two_part(mle_result, x_pred, y_rate)
+    else:
+        ci_result = {
+            **{k: mle_result[k] for k in ('alpha_mle', 'beta_mle', 'intercept_mle', 'slope_mle')},
+            **ci_result,
+        }
+    boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(ci_result, x_range_ror)
+    ci_m = 'bayesian' if bayes_mean is not None else None
+    ols_r2_zip_out = _append_two_part_r2_diagnostics_row(
+        all_r2_results, reg_zip_out, geography_zip, mle_result, x_col,
+        mle_result['x'], mle_result['y_rate'], x_range_ror, bayes_mean, ci_m,
+        x_data_for_ols=x_disp_ols,
+    )
+    file_tag = f'{y_col.replace("total_", "")}_{x_tag}{suffix}'
+    output_path = chart_parent_dir / f'zip_{file_tag}.png'
+    out_valid = np.isfinite(x_pred) & np.isfinite(y_rate) & (y_rate >= 0)
+    zip_labels = (df_v['zipcode'].values[out_valid] if 'zipcode' in df_v.columns
+                  else np.array([f'ZIP_{i}' for i in np.where(out_valid)[0]]))
+    x_scatter_display = x_disp_ols
+    x_line_display = np.exp(x_range_ror) if use_log_x else x_range_ror
+    positive_line_y = _positive_part_line_from_two_part(
+        x_range_ror,
+        float(mle_result['intercept_mle']),
+        float(mle_result['slope_mle']),
+    )
+    r2_mle_line_zip = _r2_positive_subset_vs_mle_line(
+        mle_result['x'], mle_result['y_rate'],
+        float(mle_result['intercept_mle']), float(mle_result['slope_mle']),
+    )
+    filter_note = "Metro Regions only" if require_msa else None
+    if filter_note:
+        x_label_full = f'{x_axis_label}\n{filter_note}'
+    else:
+        x_label_full = x_axis_label
+    data_label_zip_out = f'ZIP Codes {exclude_label}' if exclude_label else 'ZIP Codes'
+    _plot_zip_outcome_two_part_and_optional_positive_ols(
+        output_path,
+        x_scatter_display,
+        mle_result['y_rate'],
+        x_line_display,
+        mle_result['predict'](x_range_ror),
+        x_label_full,
+        f'{y_label} (per 1000 pop)',
+        data_label_zip_out,
+        '',
+        mle_result['mcfadden_r2'],
+        ols_r2_zip_out,
+        boot_ci_lo,
+        boot_ci_hi,
+        bayes_ci_lo,
+        bayes_ci_hi,
+        bayes_mean,
+        zip_labels,
+        use_log_x,
+        x_tick_dollar,
+        x_col,
+        positive_line_y,
+        r2_mle_line_zip,
+    )
 
 
 def _xytext_keep_inside(ax, x_val, y_val=None, label=None):
@@ -1784,7 +2109,7 @@ def stationary_bootstrap_ols(x, y, n_boot=10000, min_success=100):
     block_size = max(2, int(np.sqrt(n_obs)))
     boot_i, boot_s = [], []
     bs = StationaryBootstrap(block_size, x_sorted, y_sorted)
-    for data in bs.bootstrap(n_boot):
+    for data in tqdm(bs.bootstrap(n_boot), total=n_boot, desc="Stationary Bootstrap"):
         x_b, y_b = data[0][0], data[0][1]
         try:
             fit_b = sm.OLS(y_b, sm.add_constant(x_b)).fit()
@@ -1795,6 +2120,34 @@ def stationary_bootstrap_ols(x, y, n_boot=10000, min_success=100):
     if len(boot_i) < min_success:
         return None, None
     return np.array(boot_i), np.array(boot_s)
+
+
+def _pooled_two_part_stationary_ci(mle_result, x_arr, y_rate_arr, n_boot=10000, min_success=100):
+    """Pooled fallback when fit_two_part_with_ci is unavailable: stationary OLS on y>0, MLE hurdle fixed.
+    Same estimand as fit_two_part_with_ci cyan band (boot_intercept/slope + alpha_mle/beta_mle)."""
+    x_arr = np.asarray(x_arr, dtype=np.float64)
+    y_arr = np.asarray(y_rate_arr, dtype=np.float64)
+    pos_mask = y_arr > 0
+    if int(pos_mask.sum()) < 10:
+        return None
+    bi, bs = stationary_bootstrap_ols(
+        x_arr[pos_mask], y_arr[pos_mask], n_boot=n_boot, min_success=min_success,
+    )
+    if bi is None:
+        return None
+    return {
+        'alpha_mle': float(mle_result['alpha_mle']),
+        'beta_mle': float(mle_result['beta_mle']),
+        'intercept_mle': float(mle_result['intercept_mle']),
+        'slope_mle': float(mle_result['slope_mle']),
+        'boot_intercept_samples': bi,
+        'boot_slope_samples': bs,
+    }
+
+
+def ci_two_part(mle_result, x_arr, y_rate_arr):
+    """Pooled two-part CI only when hierarchical path is unavailable: positive-part stationary bootstrap + MLE psi."""
+    return _pooled_two_part_stationary_ci(mle_result, x_arr, y_rate_arr)
 
 
 def parse_apr_date(val):
@@ -1893,7 +2246,9 @@ def timeline_jurisdiction_means(df_jy, juris_col="JURIS_CLEAN", phase_cols=None)
 def build_timeline_jurisdiction_year_long(df_jy, df_final, juris_col="JURIS_CLEAN",
                                          completions_db_prefix="DB_CO", completions_owner_prefix="total_owner_CO"):
     """Build long table: one row per (jurisdiction, year) with wait times and yearly completions.
-    Years derived from df_jy only (single source of truth). OMNI: concat once."""
+    Years derived from df_jy only (single source of truth). OMNI: concat once.
+    Tier 1 risk (future runs): inner merge below drops rows if JURIS_CLEAN/YEAR keys lack matching
+    JURISDICTION or yearly DB_CO_*/total_owner_CO_* columns in df_final (silent row loss)."""
     if df_jy.empty or "YEAR" not in df_jy.columns or juris_col not in df_jy.columns:
         return pd.DataFrame()
     jy_cols = [juris_col, "YEAR", "n_projects"] + [c for c in TIMELINE_PHASE_DAYS if c in df_jy.columns]
@@ -1930,7 +2285,7 @@ def build_timeline_jurisdiction_year_long(df_jy, df_final, juris_col="JURIS_CLEA
         return pd.DataFrame()
     comp_long = pd.concat(year_dfs, ignore_index=True)
     comp_long["YEAR"] = pd.to_numeric(comp_long["YEAR"], errors="coerce").astype(np.int64)
-    # One merge: comp_long (JURISDICTION, YEAR, completions_DB, completions_owner) with df_jy_sub (JURIS_CLEAN, YEAR, ...)
+    # Inner join: misaligned place names or missing year columns in df_final drop jurisdiction-years quietly.
     merged = df_jy_sub.merge(comp_long, left_on=[juris_col, "YEAR"], right_on=[key_final, "YEAR"], how="inner")
     merged = merged.drop(columns=[key_final], errors="ignore")
     return merged
@@ -1946,10 +2301,7 @@ def _timeline_ci_samples(use_hierarchical, df_yearly, yearly_y_col, pred_col, pe
         )
         if hi is not None:
             ci_method = hi.get("method", "bayesian")
-            if ci_method != "bayesian":
-                print(f"  Warning: hierarchical_ci_transformed returned method='{ci_method}' for {phase_tag} vs {pred_col}, falling back to bootstrap")
-            else:
-                return (hi["intercept_samples"], hi["slope_samples"], ci_method)
+            return (hi["intercept_samples"], hi["slope_samples"], ci_method)
         else:
             print(f"  Warning: hierarchical_ci_transformed returned None for {phase_tag} vs {pred_col}, falling back to bootstrap")
     elif use_log_y:
@@ -1967,7 +2319,7 @@ def _timeline_ci_samples(use_hierarchical, df_yearly, yearly_y_col, pred_col, pe
 
 def hierarchical_ci_transformed(df, year_col, x_col, y_col, years, x_transform='log', y_transform='log', n_draws=5000, county_col='county'):
     """Hierarchical Bayesian CI for transformed outcome (non-hurdle, single-part OLS-style).
-    Hierarchy: population -> year REs -> county REs (always county).
+    Hierarchy: population -> year REs -> county REs (omitted when x_col in X_COL_MSA_INCOME_PREDICTORS).
     Fallback: hierarchical SMC -> stationary MC bootstrap."""
     if df.empty or year_col not in df.columns or x_col not in df.columns or y_col not in df.columns:
         reason = "empty df" if df.empty else f"missing columns: {[c for c in [year_col, x_col, y_col] if c not in df.columns]}"
@@ -2023,20 +2375,17 @@ def hierarchical_ci_transformed(df, year_col, x_col, y_col, years, x_transform='
         print(f"  [hierarchical_ci_transformed] None: x mean/sd invalid (mean={x_mean}, sd={x_sd})")
         return None
     x_std = (x_arr - x_mean) / x_sd
-    use_year_intercept_re, use_year_slope_re, allow_cy = _hierarchy_re_policy(x_col, True)
-    if allow_cy and county_idx is not None and n_counties >= 2:
-        cell_idx = county_idx * n_years + year_idx
-        n_cells = n_counties * n_years
-    else:
-        cell_idx = None
-        n_cells = 0
+    use_year_intercept_re, use_year_slope_re, use_county_re, _use_sign_re = _hierarchy_re_policy(x_col, True)
     if not use_year_intercept_re:
-        print("  [hierarchical_ci_transformed] Omitting year and county×year REs (predictor absorbs time window)")
+        print("  [hierarchical_ci_transformed] Omitting year REs (predictor absorbs time window)")
+    if not use_county_re:
+        print("  [hierarchical_ci_transformed] Omitting county REs (predictor embeds MSA-level income)")
+    county_idx_smc = county_idx if use_county_re else None
+    n_counties_smc = n_counties if use_county_re else 0
     try:
         out = _hierarchical_year_county_smc(
-            x_std, y_arr, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
+            x_std, y_arr, year_idx, n_years, county_idx_smc, n_counties_smc, x_mean, x_sd, n_draws,
             use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
-            cell_idx=cell_idx, n_cells=n_cells,
         )
         if out is None:
             raise ValueError("SMC returned None")
@@ -2053,16 +2402,8 @@ def hierarchical_ci_transformed(df, year_col, x_col, y_col, years, x_transform='
             'method': 'bayesian'
         }
     except (ValueError, FloatingPointError, Exception) as e:
-        print(f"  Warning: Hierarchical Bayes SMC failed, falling back to Stationary MC Bootstrap: {type(e).__name__}: {e}")
-    boot_i, boot_s = stationary_bootstrap_ols(x_arr, y_arr, n_boot=5000, min_success=100)
-    if boot_i is None:
-        print(f"  [hierarchical_ci_transformed] None: bootstrap fallback also failed")
-        return None
-    return {
-        'intercept_samples': boot_i,
-        'slope_samples': boot_s,
-        'method': 'bootstrap'
-    }
+        print(f"  [hierarchical_ci_transformed] SMC failed: {type(e).__name__}: {e}")
+    return None
 
 
 def load_zhvi(zhvi_path, target_jurisdictions):
@@ -2128,6 +2469,516 @@ def permit_rate(df, permit_years, permit_cols, rate_cols):
     return df
 
 
+# EV1 PCA: category-specific net MF CO completions (per 1k pop) + income/population % change only.
+# Excludes BP streams, project-total (PROJ_/total_db) columns, and standalone demolition rates.
+_EV1_PCA_CITY_CO_COUNT_COLS = (
+    "TOTAL_MF_CO_total",
+    "DB_CO_total",
+    "total_owner_CO_total",
+    "mf_owner_CO_total",
+    "VLOW_LOW_CO_total",
+    "MOD_CO_total",
+)
+_EV1_PCA_ZIP_CO_COUNT_COLS = (
+    "net_MF_CO",
+    "dr_db_CO",
+    "total_owner_CO",
+    "mf_owner_CO",
+    "vlow_low_CO",
+    "mod_CO",
+)
+EV1_PCA_DELTA_COLS = ("income_delta_pct_change", "population_delta_pct_change")
+
+_EV1_PCA_FEATURE_DISPLAY_NAMES = {
+    "TOTAL_MF_CO_total": "Net multifamily completions (per 1k pop)",
+    "DB_CO_total": "Deed-restricted density bonus completions (per 1k pop)",
+    "total_owner_CO_total": "For-sale owner completions (per 1k pop)",
+    "mf_owner_CO_total": "Multifamily for-sale completions (per 1k pop)",
+    "VLOW_LOW_CO_total": "Very low + low income completions (per 1k pop)",
+    "MOD_CO_total": f"{MODERATE_INCOME_COMPLETIONS_LABEL} (per 1k pop)",
+    "net_MF_CO": "Net multifamily completions (per 1k pop)",
+    "dr_db_CO": "Deed-restricted density bonus completions (per 1k pop)",
+    "total_owner_CO": "For-sale owner completions (per 1k pop)",
+    "mf_owner_CO": "Multifamily for-sale completions (per 1k pop)",
+    "vlow_low_CO": "Very low + low income completions (per 1k pop)",
+    "mod_CO": f"{MODERATE_INCOME_COMPLETIONS_LABEL} (per 1k pop)",
+    "income_delta_pct_change": "% change in real median household income",
+    "population_delta_pct_change": "% change in place population",
+}
+
+
+def _mf_pca_rate_column_name(count_col):
+    return f"mf_pca_r__{count_col}"
+
+
+def _ev1_pca_co_count_cols(geo_tag):
+    if geo_tag == "city":
+        return _EV1_PCA_CITY_CO_COUNT_COLS
+    if geo_tag == "zip":
+        return _EV1_PCA_ZIP_CO_COUNT_COLS
+    raise ValueError(f"unknown geo_tag {geo_tag!r}")
+
+
+def _ev1_pca_expected_ordered_feature_cols(geo_tag):
+    rate_names = tuple(_mf_pca_rate_column_name(c) for c in _ev1_pca_co_count_cols(geo_tag))
+    return rate_names + EV1_PCA_DELTA_COLS
+
+
+def _ev1_pca_feature_display_name(internal_name):
+    return _EV1_PCA_FEATURE_DISPLAY_NAMES.get(str(internal_name), str(internal_name))
+
+
+def _ev1_pca_attach_feature_columns(df, geo_tag):
+    """Build EV1 PCA feature columns: CO net rates (per 1k pop) + two ACS delta predictors. Mutates ``df`` in place.
+
+    Contract: fixed ordered feature set per ``geo_tag``; fail fast if required source columns are missing.
+    """
+    co_counts = _ev1_pca_co_count_cols(geo_tag)
+    missing_co = [c for c in co_counts if c not in df.columns]
+    if missing_co:
+        raise ValueError(f"{geo_tag}: EV1 PCA missing required CO count columns {missing_co}")
+    missing_delta = [c for c in EV1_PCA_DELTA_COLS if c not in df.columns]
+    if missing_delta:
+        raise ValueError(f"{geo_tag}: EV1 PCA missing required delta columns {missing_delta}")
+    if "population" not in df.columns:
+        raise ValueError(f"{geo_tag}: population column required for EV1 PCA CO rates")
+    pop = pd.to_numeric(df["population"], errors="coerce").to_numpy(dtype=np.float64)
+    feature_cols = []
+    for c in co_counts:
+        cnt = pd.to_numeric(df[c], errors="coerce").to_numpy(dtype=np.float64)
+        rname = _mf_pca_rate_column_name(c)
+        df[rname] = np.where(np.isfinite(pop) & (pop > 0), (cnt / pop) * 1000.0, np.nan)
+        feature_cols.append(rname)
+    for dcol in EV1_PCA_DELTA_COLS:
+        df[dcol] = pd.to_numeric(df[dcol], errors="coerce")
+        feature_cols.append(dcol)
+    expected = _ev1_pca_expected_ordered_feature_cols(geo_tag)
+    if tuple(feature_cols) != expected:
+        raise ValueError(f"{geo_tag}: EV1 PCA internal feature column order mismatch")
+    for rname in feature_cols[: len(co_counts)]:
+        if not pd.api.types.is_numeric_dtype(df[rname]):
+            raise ValueError(f"{geo_tag}: EV1 PCA rate column {rname} is not numeric after conversion")
+    for dcol in EV1_PCA_DELTA_COLS:
+        if not pd.api.types.is_numeric_dtype(df[dcol]):
+            raise ValueError(f"{geo_tag}: EV1 PCA delta column {dcol} is not numeric after conversion")
+    return list(feature_cols)
+
+
+def _prepare_ev1_pca_data(df, feature_cols, predictor_col, geo_tag, label_col=None):
+    """Build standardized feature matrix, EV1 loadings/scores, PC1 variance share, filtered predictor, geo labels."""
+    expected = list(_ev1_pca_expected_ordered_feature_cols(geo_tag))
+    if list(feature_cols) != expected:
+        raise ValueError(
+            f"{geo_tag}:{predictor_col} EV1 PCA feature set must match contract (got {feature_cols!r})"
+        )
+    required_cols = list(dict.fromkeys(feature_cols + [predictor_col]))
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"{geo_tag}:{predictor_col} missing columns {missing}")
+    if label_col is not None and label_col not in df.columns:
+        raise ValueError(f"{geo_tag}:{predictor_col} missing label column {label_col}")
+    numeric = df[required_cols].apply(pd.to_numeric, errors="coerce")
+    finite_mask = np.isfinite(numeric.to_numpy(dtype=np.float64)).all(axis=1)
+    prepared = numeric.loc[finite_mask, required_cols].copy()
+    n_after_finite = int(len(prepared))
+    if n_after_finite < 20:
+        raise ValueError(f"{geo_tag}:{predictor_col} insufficient rows after finite filter ({n_after_finite})")
+    x_mat = prepared[feature_cols].to_numpy(dtype=np.float64)
+    x_mean = x_mat.mean(axis=0)
+    x_std = x_mat.std(axis=0)
+    nonzero = x_std > 0
+    if int(nonzero.sum()) < 2:
+        raise ValueError(
+            f"{geo_tag}:{predictor_col} fewer than 2 EV1 PCA features with positive variance after row filter"
+        )
+    x_keep = x_mat[:, nonzero]
+    std_keep = x_std[nonzero]
+    x_scaled = (x_keep - x_mean[nonzero]) / std_keep
+    if x_scaled.shape[1] < 2:
+        raise ValueError(f"{geo_tag}:{predictor_col} scaled EV1 feature matrix has fewer than 2 columns")
+    pca = PCA(n_components=1, whiten=False)
+    pca.fit(x_scaled)
+    ratio0 = float(pca.explained_variance_ratio_[0])
+    if not np.isfinite(ratio0):
+        raise ValueError(f"{geo_tag}:{predictor_col} PCA explained_variance_ratio_[0] is not finite")
+    ev1_var_explained_pct = 100.0 * ratio0
+    if ev1_var_explained_pct < 0.0 or ev1_var_explained_pct > 100.0:
+        raise ValueError(
+            f"{geo_tag}:{predictor_col} invalid ev1 variance explained pct {ev1_var_explained_pct}"
+        )
+    loadings = np.asarray(pca.components_[0], dtype=np.float64)
+    abs_sum = float(np.abs(loadings).sum())
+    if not np.isfinite(abs_sum) or abs_sum <= 0.0:
+        raise ValueError(f"{geo_tag}:{predictor_col} invalid EV1 loading normalization denominator")
+    scores = np.asarray(pca.transform(x_scaled)[:, 0], dtype=np.float64)
+    if not np.isfinite(scores).all():
+        raise ValueError(f"{geo_tag}:{predictor_col} EV1 scores contain non-finite values")
+    dropped_zero_var = [
+        (c.replace("mf_pca_r__", "", 1) if str(c).startswith("mf_pca_r__") else c)
+        for c, k in zip(feature_cols, nonzero.tolist())
+        if not k
+    ]
+    kept_raw = [c for c, k in zip(feature_cols, nonzero.tolist()) if k]
+    kept_features = [
+        c.replace("mf_pca_r__", "", 1) if str(c).startswith("mf_pca_r__") else c for c in kept_raw
+    ]
+    shares = 100.0 * np.abs(loadings) / abs_sum
+    composition = pd.DataFrame({
+        "feature": kept_features,
+        "loading": loadings,
+        "share_pct": shares,
+    }).sort_values("share_pct", ascending=False).reset_index(drop=True)
+    share_sum = float(composition["share_pct"].sum())
+    if not np.isfinite(share_sum) or not np.isclose(share_sum, 100.0, atol=1e-4):
+        raise ValueError(f"{geo_tag}:{predictor_col} EV1 composition shares sum to {share_sum}, expected 100")
+    if label_col is None:
+        geo_labels = None
+    else:
+        lbl = df.loc[prepared.index, label_col].astype(str).str.strip()
+        if geo_tag == "zip":
+            lbl = lbl.str.replace(r"\D", "", regex=True).str.zfill(5)
+        geo_labels = lbl.to_numpy()
+    return (
+        prepared[predictor_col].to_numpy(dtype=np.float64),
+        scores,
+        composition,
+        ev1_var_explained_pct,
+        geo_labels,
+        dropped_zero_var,
+        n_after_finite,
+    )
+
+
+def _ev1_ci_method_chart_caption(ci_method):
+    if ci_method == "stationary_bootstrap_mc":
+        return "Band: 95% from stationary bootstrap of OLS (sorted by EV1 score)"
+    if ci_method == "ols_analytic_fallback":
+        return "Band: 95% OLS mean-response interval (bootstrap unavailable; not same estimand as bootstrap)"
+    return f"CI method: {ci_method}"
+
+
+def _ev1_variance_captions(ev1_var_explained_pct):
+    """Return pie subtitle line and OLS x-axis label sharing one formatted percent string."""
+    pct_str = f"{ev1_var_explained_pct:.1f}"
+    pie_line2 = (
+        f"Explains {pct_str}% of variance in standardized EV1 inputs "
+        "(MF CO rates per 1k pop + income and population % change)"
+    )
+    ols_xlabel = f"EV1 composite score ({pct_str}% variance; MF CO rates + demographic change)"
+    return pie_line2, ols_xlabel
+
+
+def _plot_ev1_pie_annotations_staggered(ax, composition_df, wedges):
+    """Side-based EV1 pie labels with vertical staggering to reduce collisions."""
+    dy = 0.16
+    entries = []
+    for idx, wedge in enumerate(wedges):
+        angle = (wedge.theta1 + wedge.theta2) / 2.0
+        rad = np.deg2rad(angle)
+        xc = np.cos(rad)
+        yc = np.sin(rad)
+        pct = float(composition_df.iloc[idx]["share_pct"])
+        feat = composition_df.iloc[idx]["feature"]
+        disp = _ev1_pca_feature_display_name(feat)
+        entries.append((xc, yc, pct, disp, xc >= 0.0))
+
+    def _place(side_entries, sign):
+        if not side_entries:
+            return
+        side_entries.sort(key=lambda t: t[1], reverse=True)
+        n = len(side_entries)
+        for rank, e in enumerate(side_entries):
+            xc, yc, pct, disp, _ = e
+            offset_y = (rank - (n - 1) / 2.0) * dy
+            text_x = 1.36 * sign
+            text_y = 1.2 * yc + offset_y
+            ax.annotate(
+                f"{disp} ({pct:.1f}%)",
+                xy=(xc, yc),
+                xytext=(text_x, text_y),
+                textcoords="data",
+                ha="left" if sign > 0 else "right",
+                va="center",
+                fontsize=9,
+                arrowprops=dict(arrowstyle="-", color="black", lw=0.8, connectionstyle="arc3,rad=0.2"),
+            )
+
+    right = [e for e in entries if e[4]]
+    left = [e for e in entries if not e[4]]
+    _place(right, 1)
+    _place(left, -1)
+
+
+def _plot_ev1_composition_pie(composition_df, output_path, title):
+    """Plot EV1 loading composition pie chart."""
+    total_share = float(composition_df["share_pct"].sum())
+    if not np.isfinite(total_share) or not np.isclose(total_share, 100.0, atol=1e-6):
+        raise ValueError(f"Pie normalization failed: shares sum to {total_share}")
+    setup_chart_style()
+    fig, ax = plt.subplots(figsize=(10, 8))
+    wedges, _ = ax.pie(
+        composition_df["share_pct"].to_numpy(dtype=np.float64),
+        labels=None,
+        startangle=90,
+    )
+    _plot_ev1_pie_annotations_staggered(ax, composition_df, wedges)
+    fig.subplots_adjust(top=0.86)
+    ax.set_title(title, pad=26)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: {output_path.name}")
+
+
+def _ev1_ols_bootstrap_diagnostics_and_band(
+    ev1_scores, predictor_vals, geo_tag, predictor_col, n_boot=10000, min_success=100,
+):
+    """OLS fit, stationary-bootstrap pointwise band on the fitted line, and slope CI. Single bootstrap draw."""
+    x = np.asarray(ev1_scores, dtype=np.float64)
+    y = np.asarray(predictor_vals, dtype=np.float64)
+    x_std = np.nanstd(x)
+    if not np.isfinite(x_std) or x_std == 0.0:
+        raise ValueError(f"{geo_tag}:{predictor_col} EV1 composite has zero or invalid variance")
+    fit = sm.OLS(y, sm.add_constant(x)).fit()
+    x_line = np.linspace(float(np.nanmin(x)), float(np.nanmax(x)), 200)
+    y_line = np.asarray(fit.params[0] + fit.params[1] * x_line, dtype=np.float64)
+    bi, bs = stationary_bootstrap_ols(x, y, n_boot=n_boot, min_success=min_success)
+    if bi is not None and len(bi) >= min_success:
+        curves = bi[:, np.newaxis] + bs[:, np.newaxis] * x_line[np.newaxis, :]
+        y_lo = np.percentile(curves, 2.5, axis=0)
+        y_hi = np.percentile(curves, 97.5, axis=0)
+        ci_method = "stationary_bootstrap_mc"
+        coef_ci_low = float(np.percentile(bs, 2.5))
+        coef_ci_high = float(np.percentile(bs, 97.5))
+    else:
+        pred = fit.get_prediction(sm.add_constant(x_line)).summary_frame(alpha=0.05)
+        y_lo = pred["mean_ci_lower"].to_numpy(dtype=np.float64)
+        y_hi = pred["mean_ci_upper"].to_numpy(dtype=np.float64)
+        ci_method = "ols_analytic_fallback"
+        ci_tab = fit.conf_int(alpha=0.05)
+        coef_ci_low = float(ci_tab[1, 0])
+        coef_ci_high = float(ci_tab[1, 1])
+    diagnostics = {
+        "geography": geo_tag,
+        "predictor": predictor_col,
+        "n_obs": int(len(y)),
+        "coef": float(fit.params[1]),
+        "coef_ci_low_95": coef_ci_low,
+        "coef_ci_high_95": coef_ci_high,
+        "p_value": float(fit.pvalues[1]),
+        "r2": float(fit.rsquared),
+        "ci_method": ci_method,
+    }
+    return x_line, y_line, y_lo, y_hi, diagnostics
+
+
+def _annotate_pca_ev1_ols_scatter(ax, fig, x, y, labels, also_annotate_second_max_x):
+    """Top-N-by-y labels plus optional second-largest-x point (parity with ``plot_two_part_chart``)."""
+    if labels is None or len(labels) == 0:
+        return
+    cleanup = lambda s: str(s)
+    ann_list = annotate_top_n_by_y(ax, x, y, labels, n=3, label_cleanup=cleanup)
+    if also_annotate_second_max_x and len(x) >= 2:
+        top3_y_idx = set(np.argsort(y)[::-1][:3])
+        idx_2nd_x = int(np.argsort(x)[-2])
+        if idx_2nd_x not in top3_y_idx:
+            ann2 = ax.annotate(
+                cleanup(labels[idx_2nd_x]),
+                (x[idx_2nd_x], y[idx_2nd_x]),
+                fontsize=7,
+                alpha=0.8,
+                xytext=_xytext_keep_inside(
+                    ax, x[idx_2nd_x], y[idx_2nd_x], label=cleanup(labels[idx_2nd_x]),
+                ),
+                textcoords="offset points",
+                annotation_clip=True,
+            )
+            ann_list.append(ann2)
+    if ann_list:
+        _resolve_scatter_label_overlaps(ax, fig, ann_list)
+
+
+def _plot_ev1_ols_chart(
+    ev1_scores,
+    affordability_vals,
+    output_path,
+    title,
+    y_label,
+    x_label,
+    x_line,
+    y_line,
+    y_ci_lo,
+    y_ci_hi,
+    geo_labels=None,
+    data_label=None,
+    also_annotate_second_max_x=True,
+    predictor_col=None,
+    ci_method=None,
+):
+    """Plot rotated spec: affordability (Y) ~ EV1 (X) with OLS line, 95% CI band, tight axis limits, optional geo labels."""
+    x = np.asarray(ev1_scores, dtype=np.float64)
+    y = np.asarray(affordability_vals, dtype=np.float64)
+    x_line = np.asarray(x_line, dtype=np.float64)
+    y_line = np.asarray(y_line, dtype=np.float64)
+    y_ci_lo = np.asarray(y_ci_lo, dtype=np.float64)
+    y_ci_hi = np.asarray(y_ci_hi, dtype=np.float64)
+    setup_chart_style()
+    fig, ax = plt.subplots(figsize=(10, 8))
+    lab = data_label or "Observations"
+    ax.scatter(
+        x, y, color="#ED7D31", alpha=0.6, s=40, edgecolors="none",
+        label=f"{lab} (n={len(x)})",
+    )
+    ax.plot(x_line, y_line, color="#4472C4", linewidth=2, label="OLS fitted line")
+    ax.fill_between(x_line, y_ci_lo, y_ci_hi, color=CI_COLOR_CYAN, alpha=0.3, label="95% confidence interval")
+    _annotate_pca_ev1_ols_scatter(ax, fig, x, y, geo_labels, also_annotate_second_max_x)
+    x_lo = float(min(np.nanmin(x), np.nanmin(x_line)))
+    x_hi = float(max(np.nanmax(x), np.nanmax(x_line)))
+    xr = x_hi - x_lo
+    pad_x = 1e-9 if xr <= 0 else max(1e-9, 0.002 * xr)
+    ax.set_xlim(x_lo - pad_x, x_hi + pad_x)
+    y_sc_min, y_sc_max = float(np.nanmin(y)), float(np.nanmax(y))
+    y_band_min = float(np.nanmin(np.concatenate([y_ci_lo, y])))
+    y_band_max = float(np.nanmax(np.concatenate([y_ci_hi, y])))
+    y_lo = min(y_sc_min, y_band_min, float(np.nanmin(y_line)))
+    y_hi = max(y_sc_max, y_band_max, float(np.nanmax(y_line)))
+    yr = y_hi - y_lo
+    pad_y = 1e-9 if yr <= 0 else max(1e-9, 0.002 * yr)
+    ax.set_ylim(y_lo - pad_y, y_hi + pad_y)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    if predictor_col is not None and predictor_col in X_COL_AFFORD_DELTA_PREDICTORS:
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    if ci_method:
+        ax.set_title(f"{title}\n{_ev1_ci_method_chart_caption(ci_method)}", fontsize=10)
+    else:
+        ax.set_title(title)
+    ax.legend(loc="best", frameon=False)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved: {output_path.name}")
+
+
+def run_pca_ev1_affordability(df_city, df_zip, output_dir):
+    """PCA on standardized EV1 inputs (MF CO rates per 1k + income/population % change); OLS affordability ~ EV1."""
+    specs = [
+        ("city", df_city, "pct_afford", "ZHVI", "pca_ev1_pie_city_pct_afford.png", "pca_ev1_ols_city_pct_afford.png"),
+        ("city", df_city, "zori_pct_afford", "ZORI", "pca_ev1_pie_city_zori_pct_afford.png", "pca_ev1_ols_city_zori_pct_afford.png"),
+        ("zip", df_zip, "pct_afford", "ZHVI", "pca_ev1_pie_zip_pct_afford.png", "pca_ev1_ols_zip_pct_afford.png"),
+        ("zip", df_zip, "zori_pct_afford", "ZORI", "pca_ev1_pie_zip_zori_pct_afford.png", "pca_ev1_ols_zip_zori_pct_afford.png"),
+    ]
+    y_labels = {
+        "pct_afford": "Percent affordability change",
+        "zori_pct_afford": "ZORI affordability change",
+    }
+    ols_rows = []
+    for geo_tag, df_geo, predictor_col, zillow_family, pie_name, ols_name in specs:
+        if df_geo is None or len(df_geo) == 0:
+            print(f"  Skipping {geo_tag}:{predictor_col} (no data)")
+            continue
+        label_col = "JURISDICTION" if geo_tag == "city" else "zipcode"
+        if label_col not in df_geo.columns:
+            print(f"  Skipping {geo_tag}:{predictor_col} (missing {label_col} for chart labels)")
+            continue
+        df_w = df_geo.copy()
+        n_rows_before_ev1 = int(len(df_w))
+        try:
+            feature_cols = _ev1_pca_attach_feature_columns(df_w, geo_tag)
+        except ValueError as e:
+            print(f"  Skipping {geo_tag}:{predictor_col} ({e})")
+            continue
+        n_co_rates = len(_ev1_pca_co_count_cols(geo_tag))
+        if len(feature_cols) != n_co_rates + len(EV1_PCA_DELTA_COLS):
+            print(f"  Skipping {geo_tag}:{predictor_col} (unexpected EV1 feature column count)")
+            continue
+        try:
+            (
+                affordability_vals,
+                ev1_scores,
+                composition,
+                ev1_var_explained_pct,
+                geo_labels,
+                dropped_zero_var,
+                n_after_finite,
+            ) = _prepare_ev1_pca_data(
+                df_w, feature_cols, predictor_col, geo_tag, label_col=label_col,
+            )
+        except ValueError as e:
+            print(f"  Skipping {geo_tag}:{predictor_col} ({e})")
+            continue
+        n_dropped_nonfinite = n_rows_before_ev1 - n_after_finite
+        print(
+            f"  EV1 PCA rows: {n_after_finite}/{n_rows_before_ev1} finite "
+            f"({n_dropped_nonfinite} dropped non-finite); [{geo_tag}:{predictor_col}]"
+        )
+        if dropped_zero_var:
+            print(
+                f"  EV1 PCA zero-variance excluded before PCA: {', '.join(dropped_zero_var)} "
+                f"[{geo_tag}:{predictor_col}]"
+            )
+        pie_line2, ols_xlabel = _ev1_variance_captions(ev1_var_explained_pct)
+        pie_title = (
+            f"EV1 Composition ({geo_tag.upper()} - {predictor_col}; {zillow_family})\n{pie_line2}"
+        )
+        _plot_ev1_composition_pie(composition, output_dir / pie_name, pie_title)
+        data_label = "Cities" if geo_tag == "city" else "ZIP codes"
+        ols_title = (
+            f"{geo_tag.upper()}: {y_labels.get(predictor_col, predictor_col)} vs EV1 "
+            f"(MF CO + demographics; {zillow_family})"
+        )
+        try:
+            x_line, y_line, y_ci_lo, y_ci_hi, ols_diag = _ev1_ols_bootstrap_diagnostics_and_band(
+                ev1_scores, affordability_vals, geo_tag, predictor_col,
+            )
+        except ValueError as e:
+            print(f"  Skipping {geo_tag}:{predictor_col} OLS/CI ({e})")
+            continue
+        _plot_ev1_ols_chart(
+            ev1_scores,
+            affordability_vals,
+            output_dir / ols_name,
+            ols_title,
+            y_labels.get(predictor_col, predictor_col),
+            ols_xlabel,
+            x_line,
+            y_line,
+            y_ci_lo,
+            y_ci_hi,
+            geo_labels=geo_labels,
+            data_label=data_label,
+            also_annotate_second_max_x=True,
+            predictor_col=predictor_col,
+            ci_method=ols_diag.get("ci_method"),
+        )
+        ols_row = dict(ols_diag)
+        ols_row["n_features"] = int(len(composition))
+        ols_row["n_mf_rate_features_input"] = int(n_co_rates)
+        ols_row["n_ev1_pca_features_contract"] = int(len(feature_cols))
+        ols_row["n_ev1_pca_features_input"] = int(len(feature_cols))
+        ols_row["n_ev1_pca_features_in_pca"] = int(len(composition))
+        ols_row["ev1_pca_finite_rows"] = int(n_after_finite)
+        ols_row["ev1_pca_rows_dropped_nonfinite"] = int(n_dropped_nonfinite)
+        ols_row["pca_zero_variance_dropped"] = "|".join(dropped_zero_var) if dropped_zero_var else ""
+        ols_row["ev1_definition_version"] = "ev1_co_net_mf_plus_acs_deltas_2026"
+        ols_row["pca_feature_set"] = "|".join(composition["feature"].astype(str).tolist())
+        ols_row["ev1_variance_explained_pct"] = ev1_var_explained_pct
+        ols_rows.append(ols_row)
+    if ols_rows:
+        print(
+            f"  EV1 PCA diagnostics rows written: {len(ols_rows)} "
+            "(expect up to 4 when city and ZIP both have full columns and all strata succeed)"
+        )
+    if not ols_rows:
+        print("  PCA/EV1/OLS: no strata produced output")
+        return None
+    df_diag = pd.DataFrame(ols_rows)
+    out_csv = output_dir / "pca_ev1_ols_diagnostics.csv"
+    df_diag.to_csv(out_csv, index=False)
+    print("\nPCA EV1 OLS diagnostics:")
+    print(df_diag.to_string(index=False))
+    print(f"  Wrote: {out_csv.name}")
+    return df_diag
+
+
 def agg_permits(df_hcd, row_filter, permit_years, value_col="units_BP", prefix="net_permits", group_col="JURIS_CLEAN"):
     """Aggregate permit/CO/demolition counts by group_col and year, returning dataframe ready for merge.
     
@@ -2174,6 +3025,8 @@ def _fig_ax_square_plot(fig_w=9.0, fig_h=8.0, square_frac=0.84, left=0.08, botto
     w_norm = sq_in / fig_w
     h_norm = sq_in / fig_h
     ax = fig.add_axes([left, bottom, w_norm, h_norm])
+    ax.xaxis.set_major_locator(MaxNLocator(prune="lower"))
+    ax.yaxis.set_major_locator(MaxNLocator(prune="lower"))
     return fig, ax
 
 
@@ -2223,7 +3076,15 @@ def mle_two_part(x, y_rate):
     psi_mle = float(expit(alpha_mle + beta_mle * x_all).mean())
 
     def predict(x_new):
-        return expit(alpha_mle + beta_mle * x_new) * (gamma_mle + delta_mle * x_new)
+        x_arr = np.asarray(x_new, dtype=np.float64)
+        flat = x_arr.ndim == 0
+        row = _full_two_part_curve_matrix(
+            np.array([alpha_mle]), np.array([beta_mle]),
+            np.array([gamma_mle]), np.array([delta_mle]), x_arr,
+        )[0]
+        if flat:
+            return float(row[0])
+        return row
 
     return {
         'intercept_mle': gamma_mle, 'slope_mle': delta_mle,
@@ -2240,7 +3101,16 @@ def mle_two_part(x, y_rate):
 
 def _build_county_to_idx(df, year_col, years, county_col='county'):
     """Build county -> index mapping for hierarchical model second level (always county).
-    Returns (county_to_idx, n_counties); county_to_idx is non-empty only when n_counties >= 2."""
+    Returns (county_to_idx, n_counties); county_to_idx is non-empty only when n_counties >= 2.
+
+    Singleton county groups (e.g. San Francisco city-county): mixed/random-effects models handle
+    uneven group sizes; singletons contribute to slopes and total variance but not to
+    within-cluster variance partitioning, and are heavily shrunk toward the grand mean via the
+    HalfNormal prior on county RE scale (partial pooling). See:
+    https://stats.stackexchange.com/questions/482555/single-observation-with-some-groups-multilevel-model-or-other-analysis
+    McNeish & Stapleton (2016), "The Effect of Small Sample Size on Two-Level Model Estimates,"
+    Educational Psychology Review 28, https://doi.org/10.1007/s10648-014-9287-x
+    """
     county_to_idx = {}
     n_counties = 0
     if county_col and county_col in df.columns:
@@ -2253,13 +3123,17 @@ def _build_county_to_idx(df, year_col, years, county_col='county'):
 
 def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_transform='log', county_col='county',
                     rate_precomputed=False, x_varies_by_year=True):
-    """Bayesian Hierarchical Model for CIs with proper fallback cascade.
-    Hierarchy: population -> year REs -> county REs (always county, never city/jurisdiction).
-    Cascade: hierarchical full two-part -> pooled-zero + hierarchical-positive -> stationary MC bootstrap.
-    county_col: column for county grouping; if present and >=2 unique, county REs are used."""
-    x_all, y_rate_all, year_idx_all, county_idx_all = [], [], [], []
+    """Bayesian Hierarchical Model for CIs with fallback cascade (no bootstrap inside this function).
+    Hierarchy: population -> year REs -> county REs (never city/jurisdiction; no county×year layer).
+    County REs omitted when x_col is in X_COL_MSA_INCOME_PREDICTORS (MSA income in denominator of x).
+    Cascade: hierarchical full two-part -> pooled-zero + hierarchical-positive; else None.
+    county_col: column for county grouping; if present and >=2 unique, county REs are used unless policy omits them."""
+    x_all, y_rate_all, year_idx_all, county_idx_all, sign_idx_all = [], [], [], [], []
     year_to_idx = {yr: i for i, yr in enumerate(years)}
     county_to_idx, n_counties = _build_county_to_idx(df, year_col, years, county_col)
+    _, _, _, use_sign_re = _hierarchy_re_policy(x_col, x_varies_by_year)
+    stratum_col = _hierarchy_stratum_column(df, x_col)
+    has_stratum_col = use_sign_re and stratum_col is not None and stratum_col in df.columns
     allow_negative = (x_transform is None or x_transform == 'identity')
     x_finite = np.isfinite(np.asarray(df[x_col].values, dtype=np.float64)) if allow_negative else None
     for year in years:
@@ -2280,6 +3154,11 @@ def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_
         year_idx_all.extend([year_to_idx[year]] * len(vd))
         if n_counties >= 2:
             county_idx_all.extend(vd[county_col].map(county_to_idx).astype(np.intp).tolist())
+        if has_stratum_col:
+            sq = pd.to_numeric(vd[stratum_col], errors="coerce")
+            sign_idx_all.extend(
+                np.clip(np.nan_to_num(sq.values, nan=0.0), 0, N_STRATUM_RE_LEVELS - 1).astype(np.intp).tolist()
+            )
     if len(x_all) < 20:
         print(f"      [HIERARCHICAL] Insufficient data ({len(x_all)} obs)")
         return None
@@ -2287,12 +3166,15 @@ def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_
     y_rate_arr = np.array(y_rate_all, dtype=np.float64)
     year_idx = np.array(year_idx_all, dtype=np.intp)
     county_idx = np.array(county_idx_all, dtype=np.intp) if county_idx_all else None
+    sign_idx_arr = np.array(sign_idx_all, dtype=np.intp) if has_stratum_col and len(sign_idx_all) == len(x_arr) else None
     valid = np.isfinite(x_arr) & np.isfinite(y_rate_arr) & (y_rate_arr >= 0)
     if not np.all(valid):
         n_dropped = np.sum(~valid)
         x_arr, y_rate_arr, year_idx = x_arr[valid], y_rate_arr[valid], year_idx[valid]
         if county_idx is not None:
             county_idx = county_idx[valid]
+        if sign_idx_arr is not None:
+            sign_idx_arr = sign_idx_arr[valid]
         if n_dropped > 0:
             print(f"      [HIERARCHICAL] Dropped {n_dropped} obs with NaN/inf")
     if len(x_arr) < 20:
@@ -2306,21 +3188,22 @@ def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_
         print(f"      [HIERARCHICAL] Constant x (sd=0); skipping SMC")
         return None
     n_years = len(years)
-    use_year_intercept_re, use_year_slope_re, allow_cy = _hierarchy_re_policy(x_col, x_varies_by_year)
-    if allow_cy and county_idx is not None and n_counties >= 2:
-        cell_idx = county_idx * n_years + year_idx
-        n_cells = n_counties * n_years
-    else:
-        cell_idx = None
-        n_cells = 0
+    use_year_intercept_re, use_year_slope_re, use_county_re, use_sign_re = _hierarchy_re_policy(x_col, x_varies_by_year)
     if not use_year_intercept_re:
-        print("      [HIERARCHICAL] Omitting year and county×year REs (predictor absorbs time window)")
+        print("      [HIERARCHICAL] Omitting year REs (predictor absorbs time window)")
+    if not use_county_re:
+        print("      [HIERARCHICAL] Omitting county REs (predictor embeds MSA-level income)")
     print(f"      [HIERARCHICAL] {len(x_arr)} obs across {n_years} years, {n_counties} counties (linear positive part)")
+    county_idx_smc = county_idx if use_county_re else None
+    n_counties_smc = n_counties if use_county_re else 0
+    use_sign_smc = use_sign_re and sign_idx_arr is not None
     # --- Fallback cascade ---
-    # Step 1: Try hierarchical full two-part (pooled zero + hierarchical positive with year+county+county×year REs)
-    result = _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
-                                            use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
-                                            cell_idx=cell_idx, n_cells=n_cells)
+    # Step 1: Try hierarchical full two-part (hierarchical zero + hierarchical positive with year+county REs)
+    result = _hierarchical_full_two_part_smc(
+        x_arr, y_rate_arr, year_idx, n_years, county_idx_smc, n_counties_smc, x_mean, x_sd, n_draws,
+        use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
+        use_sign_re=use_sign_smc, sign_idx=sign_idx_arr,
+    )
     if result is not None:
         return result
     print(f"      [HIERARCHICAL] Full two-part hierarchical failed; trying pooled-zero + hierarchical-positive")
@@ -2329,16 +3212,16 @@ def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_
     x_pos = x_arr[positive_mask]
     y_model_pos = y_rate_arr[positive_mask]
     year_idx_pos = year_idx[positive_mask]
-    county_idx_pos = county_idx[positive_mask] if county_idx is not None else None
+    county_idx_pos = county_idx_smc[positive_mask] if county_idx_smc is not None else None
+    sign_idx_pos = sign_idx_arr[positive_mask] if sign_idx_arr is not None else None
     if len(x_pos) < 10:
         print(f"      [HIERARCHICAL] Insufficient positive observations ({len(x_pos)}); skipping CI")
         return None
     if len(x_pos) >= 20:
-        cell_idx_pos = cell_idx[positive_mask] if cell_idx is not None else None
         smc_pos = _hierarchical_ci_smc(x_pos, y_model_pos, year_idx_pos, n_years, x_mean, x_sd, n_draws,
                                        use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
-                                       county_idx_pos=county_idx_pos, n_counties=n_counties,
-                                       cell_idx_pos=cell_idx_pos, n_cells=n_cells)
+                                       county_idx_pos=county_idx_pos, n_counties=n_counties_smc,
+                                       use_sign_re=use_sign_smc, sign_idx=sign_idx_pos)
         if smc_pos is not None:
             x_std_all = (x_arr - x_mean) / x_sd
             z_pos_arr = (y_rate_arr > 0).astype(np.float64)
@@ -2349,20 +3232,10 @@ def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_
                 smc_pos['method'] = 'bayesian'
                 print(f"      [HIERARCHICAL] Pooled-zero + hierarchical-positive succeeded")
             return smc_pos
-        print(f"      [HIERARCHICAL] Hierarchical positive-only also failed; falling back to Stationary MC Bootstrap")
+        print(f"      [HIERARCHICAL] Hierarchical positive-only also failed")
     else:
         print(f"      [HIERARCHICAL] Only {len(x_pos)} positive obs; skipping SMC")
-    # Step 3: Stationary MC Bootstrap (entire curve)
-    boot_intercepts, boot_slopes = stationary_bootstrap_ols(x_pos, y_model_pos, n_boot=1000, min_success=100)
-    if boot_intercepts is None:
-        print(f"      [BOOTSTRAP] Too few successful Stationary MC Bootstrap samples; skipping CI")
-        return None
-    print(f"      [BOOTSTRAP] Stationary MC Bootstrap: {len(boot_intercepts)} successful samples")
-    return {
-        'intercept_samples': boot_intercepts,
-        'slope_samples': boot_slopes,
-        'method': 'bootstrap'
-    }
+    return None
 
 
 def _pooled_zero_part_fe(x_std, z_pos, x_mean, x_sd):
@@ -2380,74 +3253,55 @@ def _pooled_zero_part_fe(x_std, z_pos, x_mean, x_sd):
         return (None, None)
 
 
-def _add_county_year_re_to_model(n_cells, include_slope=True):
-    """Add county×year random effects to the current PyMC model. Must be called inside pm.Model() context.
-    Returns (intercept_cy, slope_cy) tensors of shape (n_cells,) for indexing with cell_idx.
-    When include_slope is False, returns (intercept_cy, None) to omit slope_cy from the model."""
-    sigma_int_cy = pm.HalfNormal('sigma_int_cy', sigma=SIGMA_INT_CY)
-    int_cy_raw = pm.Normal('int_cy_raw', mu=0, sigma=1, shape=n_cells)
-    intercept_cy = pm.Deterministic('intercept_cy', sigma_int_cy * int_cy_raw)
-
-    if not include_slope:
-        return (intercept_cy, None)
-
-    sigma_slope_cy = pm.HalfNormal('sigma_slope_cy', sigma=SIGMA_SLOPE_CY)
-    slope_cy_raw = pm.Normal('slope_cy_raw', mu=0, sigma=1, shape=n_cells)
-    slope_cy = pm.Deterministic('slope_cy', sigma_slope_cy * slope_cy_raw)
-    return (intercept_cy, slope_cy)
+def _non_centered_re(label, sigma_scale, shape, center=None):
+    """Non-centered parameterization for a random effect. Must be called inside pm.Model() context.
+    Creates sigma ~ HalfNormal(sigma_scale), raw ~ Normal(0,1,shape), returns Deterministic.
+    If center is provided: result = center + sigma * raw (year-level, offset from population).
+    If center is None: result = sigma * raw (county-level, zero-mean deviation)."""
+    sigma = pm.HalfNormal(f'sigma_{label}', sigma=sigma_scale)
+    raw = pm.Normal(f'{label}_raw', mu=0, sigma=1, shape=shape)
+    if center is not None:
+        return pm.Deterministic(label, center + sigma * raw)
+    return pm.Deterministic(label, sigma * raw)
 
 
 def _hierarchical_year_county_smc(x_std, y_obs, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
-                                  use_year_intercept_re=True, use_year_slope_re=True, cell_idx=None, n_cells=0):
-    """Single PyMC model: population line + optional year REs + optional county REs + optional county×year.
+                                  use_year_intercept_re=True, use_year_slope_re=True,
+                                  use_sign_re=False, sign_idx=None):
+    """Single PyMC model: population line + optional year REs + optional county REs + optional sign RE on mu.
     Returns (intercept_std, slope_std) in standardized x space, or None on failure.
     When n_counties >= 2, county_idx must be an int array of shape (n_obs,); else county_idx is ignored.
-    When use_county and cell_idx/n_cells are provided, county×year REs are added (cell_idx = county_idx * n_years + year_idx).
 
     Used by _hierarchical_ci_smc (positive-part CI) and hierarchical_ci_transformed (non-hurdle CI).
     Data prep and unstandardization differ at the call sites; only the model and SMC run are shared."""
     use_county = n_counties >= 2 and county_idx is not None
-    use_cy = use_county and n_cells > 0 and cell_idx is not None
     with pm.Model():
         intercept_pop = pm.Normal('intercept_pop', mu=0, sigma=2)
         slope_pop = pm.Normal('slope_pop', mu=0, sigma=1)
         if use_year_intercept_re:
-            sigma_int_year = pm.HalfNormal('sigma_int_year', sigma=SIGMA_INT_YEAR)
-            int_year_raw = pm.Normal('int_year_raw', mu=0, sigma=1, shape=n_years)
-            intercept_year = pm.Deterministic('intercept_year', intercept_pop + sigma_int_year * int_year_raw)
+            intercept_year = _non_centered_re('intercept_year', SIGMA_INT_YEAR, n_years, center=intercept_pop)
         else:
             intercept_year = None
 
         if use_year_slope_re:
-            sigma_slope_year = pm.HalfNormal('sigma_slope_year', sigma=SIGMA_SLOPE_YEAR)
-            slope_year_raw = pm.Normal('slope_year_raw', mu=0, sigma=1, shape=n_years)
-            slope_year = pm.Deterministic('slope_year', slope_pop + sigma_slope_year * slope_year_raw)
+            slope_year = _non_centered_re('slope_year', SIGMA_SLOPE_YEAR, n_years, center=slope_pop)
             slope_year_term = slope_year[year_idx]
         else:
             slope_year_term = slope_pop
 
         base_int = intercept_year[year_idx] if use_year_intercept_re else intercept_pop
         if use_county:
-            sigma_int_county = pm.HalfNormal('sigma_int_county', sigma=SIGMA_INT_COUNTY)
-            sigma_slope_county = pm.HalfNormal('sigma_slope_county', sigma=SIGMA_SLOPE_COUNTY)
-            int_county_raw = pm.Normal('int_county_raw', mu=0, sigma=1, shape=n_counties)
-            slope_county_raw = pm.Normal('slope_county_raw', mu=0, sigma=1, shape=n_counties)
-            intercept_county = pm.Deterministic('intercept_county', sigma_int_county * int_county_raw)
-            slope_county = pm.Deterministic('slope_county', sigma_slope_county * slope_county_raw)
-            if use_cy:
-                intercept_cy, slope_cy = _add_county_year_re_to_model(n_cells, include_slope=use_year_slope_re)
-                slope_cy_term = slope_cy[cell_idx] if slope_cy is not None else 0
-                mu = (
-                    base_int + intercept_county[county_idx] + intercept_cy[cell_idx]
-                    + (slope_year_term + slope_county[county_idx] + slope_cy_term) * x_std
-                )
-            else:
-                mu = (
-                    base_int + intercept_county[county_idx]
-                    + (slope_year_term + slope_county[county_idx]) * x_std
-                )
+            intercept_county = _non_centered_re('intercept_county', SIGMA_INT_COUNTY, n_counties)
+            slope_county = _non_centered_re('slope_county', SIGMA_SLOPE_COUNTY, n_counties)
+            mu = (
+                base_int + intercept_county[county_idx]
+                + (slope_year_term + slope_county[county_idx]) * x_std
+            )
         else:
             mu = base_int + slope_year_term * x_std
+        if use_sign_re and sign_idx is not None:
+            y_sign = _non_centered_re('y_sign_int_posonly', SIGMA_SIGN_INTERCEPT, N_STRATUM_RE_LEVELS)
+            mu = mu + y_sign[sign_idx]
         sigma_obs = pm.HalfNormal('sigma_obs', sigma=1)
         pm.Normal('y', mu=mu, sigma=sigma_obs, observed=y_obs)
         try:
@@ -2460,8 +3314,9 @@ def _hierarchical_year_county_smc(x_std, y_obs, year_idx, n_years, county_idx, n
 
 
 def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
-                                   use_year_intercept_re=True, use_year_slope_re=True, cell_idx=None, n_cells=0):
-    """Hierarchical full two-part model: pooled zero part (Bernoulli) + hierarchical positive part (optional year / CY REs).
+                                   use_year_intercept_re=True, use_year_slope_re=True,
+                                   use_sign_re=False, sign_idx=None):
+    """Hierarchical two-part model: hierarchical zero part (Bernoulli, county + optional year REs) + hierarchical positive part.
     Fallback cascade: if this model fails, caller should try pooled zero + hierarchical positive-only, then bootstrap.
     Returns dict with alpha_samples, beta_samples, intercept_samples, slope_samples, method or None."""
     x_std = (x_arr - x_mean) / x_sd
@@ -2475,27 +3330,36 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
     year_idx_pos = year_idx[pos_mask]
     use_county = n_counties >= 2 and county_idx is not None
     county_idx_pos = county_idx[pos_mask] if use_county else None
-    use_cy = use_county and n_cells > 0 and cell_idx is not None
-    cell_idx_pos = cell_idx[pos_mask] if use_cy else None
+    sign_idx_pos = sign_idx[pos_mask] if use_sign_re and sign_idx is not None else None
     try:
         with pm.Model():
             alpha = pm.Normal('alpha', 0, 2)
             beta = pm.Normal('beta', 0, 2)
-            p_pos = pm.math.invlogit(alpha + beta * x_std)
+            logit_mu = alpha + beta * x_std
+            if use_year_intercept_re:
+                z_intercept_year = _non_centered_re('z_intercept_year', SIGMA_Z_INT_YEAR, n_years)
+                logit_mu = logit_mu + z_intercept_year[year_idx]
+            if use_year_slope_re:
+                z_slope_year = _non_centered_re('z_slope_year', SIGMA_Z_SLOPE_YEAR, n_years)
+                logit_mu = logit_mu + z_slope_year[year_idx] * x_std
+            if use_county:
+                z_intercept_county = _non_centered_re('z_intercept_county', SIGMA_Z_INT_COUNTY, n_counties)
+                z_slope_county = _non_centered_re('z_slope_county', SIGMA_Z_SLOPE_COUNTY, n_counties)
+                logit_mu = logit_mu + z_intercept_county[county_idx] + z_slope_county[county_idx] * x_std
+            if use_sign_re and sign_idx is not None:
+                z_sign = _non_centered_re('z_sign_int', SIGMA_Z_INT_YEAR, N_STRATUM_RE_LEVELS)
+                logit_mu = logit_mu + z_sign[sign_idx]
+            p_pos = pm.math.invlogit(logit_mu)
             pm.Bernoulli('z', p=p_pos, observed=z_pos)
             intercept_pop = pm.Normal('intercept_pop', mu=0, sigma=2)
             slope_pop = pm.Normal('slope_pop', mu=0, sigma=1)
             if use_year_intercept_re:
-                sigma_int_year = pm.HalfNormal('sigma_int_year', sigma=SIGMA_INT_YEAR)
-                int_year_raw = pm.Normal('int_year_raw', mu=0, sigma=1, shape=n_years)
-                intercept_year = pm.Deterministic('intercept_year', intercept_pop + sigma_int_year * int_year_raw)
+                intercept_year = _non_centered_re('intercept_year', SIGMA_INT_YEAR, n_years, center=intercept_pop)
             else:
                 intercept_year = None
 
             if use_year_slope_re:
-                sigma_slope_year = pm.HalfNormal('sigma_slope_year', sigma=SIGMA_SLOPE_YEAR)
-                slope_year_raw = pm.Normal('slope_year_raw', mu=0, sigma=1, shape=n_years)
-                slope_year = pm.Deterministic('slope_year', slope_pop + sigma_slope_year * slope_year_raw)
+                slope_year = _non_centered_re('slope_year', SIGMA_SLOPE_YEAR, n_years, center=slope_pop)
                 slope_year_term = slope_year[year_idx_pos]
             else:
                 slope_year_term = slope_pop
@@ -2503,17 +3367,12 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
             int_base = intercept_year[year_idx_pos] if use_year_intercept_re else intercept_pop
             mu_pos = int_base + slope_year_term * x_pos_std
             if use_county:
-                sigma_int_county = pm.HalfNormal('sigma_int_county', sigma=SIGMA_INT_COUNTY)
-                sigma_slope_county = pm.HalfNormal('sigma_slope_county', sigma=SIGMA_SLOPE_COUNTY)
-                int_county_raw = pm.Normal('int_county_raw', mu=0, sigma=1, shape=n_counties)
-                slope_county_raw = pm.Normal('slope_county_raw', mu=0, sigma=1, shape=n_counties)
-                intercept_county = pm.Deterministic('intercept_county', sigma_int_county * int_county_raw)
-                slope_county = pm.Deterministic('slope_county', sigma_slope_county * slope_county_raw)
+                intercept_county = _non_centered_re('intercept_county', SIGMA_INT_COUNTY, n_counties)
+                slope_county = _non_centered_re('slope_county', SIGMA_SLOPE_COUNTY, n_counties)
                 mu_pos = mu_pos + intercept_county[county_idx_pos] + slope_county[county_idx_pos] * x_pos_std
-            if use_cy:
-                intercept_cy, slope_cy = _add_county_year_re_to_model(n_cells, include_slope=use_year_slope_re)
-                slope_cy_term = slope_cy[cell_idx_pos] if slope_cy is not None else 0
-                mu_pos = mu_pos + intercept_cy[cell_idx_pos] + slope_cy_term * x_pos_std
+            if use_sign_re and sign_idx_pos is not None:
+                y_sign = _non_centered_re('y_sign_int', SIGMA_SIGN_INTERCEPT, N_STRATUM_RE_LEVELS)
+                mu_pos = mu_pos + y_sign[sign_idx_pos]
             sigma_obs = pm.HalfNormal('sigma_obs', sigma=1)
             pm.Normal('y_pos', mu=mu_pos, sigma=sigma_obs, observed=y_obs_pos)
             idata = pm.sample_smc(draws=n_draws, chains=4, cores=4, progressbar=True, compute_convergence_checks=False)
@@ -2539,13 +3398,14 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
 
 
 def _hierarchical_ci_smc(x_pos, y_pos, year_idx_pos, n_years, x_mean, x_sd, n_draws, county_idx_pos=None, n_counties=0,
-                        use_year_intercept_re=True, use_year_slope_re=True, cell_idx_pos=None, n_cells=0):
+                        use_year_intercept_re=True, use_year_slope_re=True,
+                        use_sign_re=False, sign_idx=None):
     """Run PyMC SMC for hierarchical CI (positive part only, no zero part). Returns None on failure."""
     x_std = (x_pos - x_mean) / x_sd
     out = _hierarchical_year_county_smc(
         x_std, y_pos, year_idx_pos, n_years, county_idx_pos, n_counties, x_mean, x_sd, n_draws,
         use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
-        cell_idx=cell_idx_pos, n_cells=n_cells
+        use_sign_re=use_sign_re, sign_idx=sign_idx,
     )
     if out is None:
         return None
@@ -2611,12 +3471,18 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
             df_zt, df_zy, x_col_ci, 'y_rate', zip_years,
             log_x=log_x, y_is_rate=True, rate_precomputed=True, x_varies_by_year=x_varies_by_year
         )
-        if hi is None or hi.get('intercept_samples') is None:
+        if hi is None or hi.get('boot_intercept_samples') is None:
             return None
         return {
-            'intercept_samples': hi['intercept_samples'],
-            'slope_samples': hi['slope_samples'],
-            'method': hi.get('ci_method', 'bayesian'),
+            'boot_intercept_samples': hi['boot_intercept_samples'],
+            'boot_slope_samples': hi['boot_slope_samples'],
+            'intercept_samples': hi.get('intercept_samples'),
+            'slope_samples': hi.get('slope_samples'),
+            'alpha_mle': hi['alpha_mle'],
+            'beta_mle': hi['beta_mle'],
+            'intercept_mle': hi['intercept_mle'],
+            'slope_mle': hi['slope_mle'],
+            'method': hi.get('ci_method'),
             **({k: hi[k] for k in ('alpha_samples', 'beta_samples') if hi.get(k) is not None}),
         }
     pop_col = 'population'
@@ -2670,28 +3536,38 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
             f"OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_pos)}"
         )
         return None
+    if not np.isfinite(ols_r2_pos) or ols_r2_pos < R2_OLS_POSITIVE_THRESHOLD:
+        if r2_diagnostics is not None:
+            _append_two_part_r2_diagnostics_row(
+                r2_diagnostics, reg_lbl, geo_lbl, mle_result, x_col, x_raw, all_rate, x_line_diag, None, None,
+            )
+        if skipped_low_r2 is not None and chart_id is not None:
+            skipped_low_r2.append((chart_id, ols_r2_pos))
+        print(
+            f"    OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_pos)} < {R2_OLS_POSITIVE_THRESHOLD}, "
+            f"skipping CI and chart; McFadden's R² = {mle_result['mcfadden_r2']:.3f}"
+        )
+        return None
     x_transform = None if allow_negative_x else ('log' if log_x else None)
+    smc_result = None
     if y_is_rate:
         if county_col not in df_yearly.columns:
-            print(f"    Missing '{county_col}' in df_yearly, skipping hierarchical CI")
-            smc_result = None
-        elif mle_result['mcfadden_r2'] < R2_THRESHOLD_HIERARCHICAL:
-            print(f"    McFadden's R² < {R2_THRESHOLD_HIERARCHICAL}, skipping hierarchical CI (bootstrap fallback)")
-            smc_result = None
+            print(f"    Missing '{county_col}' in df_yearly, skipping hierarchical Bayes CI")
         else:
             print(f"    Running Bayesian Hierarchical Model for CIs...")
-            smc_result = hierarchical_ci(df_yearly, 'year', x_col, y_col, pop_col, years, x_transform=x_transform,
-                                         county_col=county_col, rate_precomputed=rate_precomputed,
-                                         x_varies_by_year=x_varies_by_year)
-    else:
-        smc_result = None
-        pos_mask = all_rate > 0
-        if pos_mask.sum() >= 10:
-            x_pos = all_x[pos_mask]
-            y_model_pos = all_rate[pos_mask]
-            bi, bs_slope = stationary_bootstrap_ols(x_pos, y_model_pos, n_boot=5000, min_success=500)
-            if bi is not None:
-                smc_result = {'intercept_samples': bi, 'slope_samples': bs_slope, 'method': 'bootstrap'}
+            smc_result = hierarchical_ci(
+                df_yearly, 'year', x_col, y_col, pop_col, years, x_transform=x_transform,
+                county_col=county_col, rate_precomputed=rate_precomputed,
+                x_varies_by_year=x_varies_by_year,
+            )
+    pos_mask = all_rate > 0
+    boot_intercept_samples, boot_slope_samples = None, None
+    if pos_mask.sum() >= 10:
+        x_pos = all_x[pos_mask]
+        y_model_pos = all_rate[pos_mask]
+        min_succ = 100 if y_is_rate else 500
+        boot_intercept_samples, boot_slope_samples = stationary_bootstrap_ols(
+            x_pos, y_model_pos, n_boot=10000, min_success=min_succ)
     diag_rows = [
         ('N observations', mle_result['n_total'], 'd'), ('N zeros', mle_result['n_zero'], 'd'),
         ('N positive', mle_result['n_pos'], 'd'), ('MLE Intercept', mle_result['intercept_mle'], '.4f'),
@@ -2704,18 +3580,19 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
     for label, val, fmt in diag_rows:
         print(f"    {label:<25} {val:>15{fmt}}")
     print("    " + "-"*50)
+    ci_method_out = 'bayesian' if (smc_result and smc_result.get('method') == 'bayesian') else None
     out = {
         'intercept_mle': mle_result['intercept_mle'],
         'slope_mle': mle_result['slope_mle'],
         'alpha_mle': mle_result['alpha_mle'],
         'beta_mle': mle_result['beta_mle'],
-        'cov_alpha_beta': mle_result.get('cov_alpha_beta'),
-        'cov_gamma_delta': mle_result.get('cov_gamma_delta'),
-        'intercept_samples': smc_result['intercept_samples'] if smc_result else None,
-        'slope_samples': smc_result['slope_samples'] if smc_result else None,
+        'boot_intercept_samples': boot_intercept_samples,
+        'boot_slope_samples': boot_slope_samples,
+        'intercept_samples': smc_result.get('intercept_samples') if smc_result else None,
+        'slope_samples': smc_result.get('slope_samples') if smc_result else None,
         'alpha_samples': smc_result.get('alpha_samples') if smc_result else None,
         'beta_samples': smc_result.get('beta_samples') if smc_result else None,
-        'ci_method': smc_result.get('method') if smc_result else None,
+        'ci_method': ci_method_out,
         'x_data': x_raw,
         'y_data': all_rate,
         'jurisdictions': all_labels,
@@ -2723,7 +3600,7 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
         'mle_result': mle_result,
         'x_transform': x_transform,
     }
-    _, _, _, _, _, _, _, _, bayes_mean_csv = _build_mle_ci(out, x_line_diag)
+    _, _, _, _, _, bayes_mean_csv = _build_mle_ci(out, x_line_diag)
     ci_m_csv = out.get('ci_method')
     if r2_diagnostics is not None:
         ols_sq = _append_two_part_r2_diagnostics_row(
@@ -2804,7 +3681,7 @@ def _income_x_label(income_label, acs_year_range, filter_note, is_log_x):
         if income_label == AFFORD_X_LABEL:
             x_label = AFFORD_X_LABEL
         else:
-            yr = f'ACS {acs_year_range}' if acs_year_range == '2019-2023' else (acs_year_range or '')
+            yr = f'ACS {acs_year_range}' if acs_year_range == '2020-2024' else (acs_year_range or '')
             x_label = f'{income_label} ({yr}), log scale' if yr else f'{income_label}, log scale'
         if filter_note:
             x_label = f'{x_label}\n{filter_note}'
@@ -2813,7 +3690,8 @@ def _income_x_label(income_label, acs_year_range, filter_note, is_log_x):
     return x_label
 
 
-def _plot_income_chart(result, output_path, title_suffix, acs_year_range, apr_year_range, data_label):
+def _plot_income_chart(result, output_path, title_suffix, acs_year_range, apr_year_range, data_label,
+                       positive_ols_simple=False, x_col_for_ols=None):
     """Chart for income/ZHVI/afford/timeline regressions: builds labels, computes MLE/CI, delegates to plot_two_part_chart."""
     income_label = result.get('income_label', 'County Income')
     filter_note = result.get('x_axis_filter_note', '')
@@ -2835,7 +3713,38 @@ def _plot_income_chart(result, output_path, title_suffix, acs_year_range, apr_ye
     else:
         x_scatter_plot = x_data
         x_line_plot = x_range
-    mle_y, ci_lo, ci_hi, ci_method, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _build_mle_ci(result, x_range)
+    if positive_ols_simple:
+        positive_line_y = _positive_part_line_from_two_part(
+            x_range,
+            float(result['intercept_mle']),
+            float(result['slope_mle']),
+        )
+        r2_mle_line = _r2_positive_subset_vs_mle_line(
+            result['x_data'], result['y_data'],
+            float(result['intercept_mle']), float(result['slope_mle']),
+        )
+        plot_two_part_chart(
+            x_scatter=x_scatter_plot, y_scatter=result['y_data'],
+            x_line=x_line_plot, mle_y=np.zeros_like(x_line_plot),
+            output_path=output_path,
+            x_label=x_label, y_label=y_label,
+            data_label=data_label, apr_year_range=apr_year_range,
+            r2=0.0, ols_r2=None,
+            boot_ci_lo=None, boot_ci_hi=None, bayes_ci_lo=None, bayes_ci_hi=None,
+            bayes_mean=None,
+            labels=result.get('jurisdictions'),
+            label_cleanup=lambda s: str(s).replace(' COUNTY', ''),
+            use_log_x=is_log_x,
+            x_tick_dollar=is_log_x and not x_is_days,
+            x_tick_percent=(not is_log_x and _x_axis_should_use_percent_ticks(x_col_for_ols, income_label)),
+            x_tick_days=is_log_x and x_is_days,
+            positive_ols_simple=True,
+            x_col_for_ols=x_col_for_ols,
+            positive_line_y=positive_line_y,
+            positive_ols_r2=r2_mle_line,
+        )
+        return
+    mle_y, boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _build_mle_ci(result, x_range)
     plot_two_part_chart(
         x_scatter=x_scatter_plot, y_scatter=result['y_data'],
         x_line=x_line_plot, mle_y=mle_y,
@@ -2844,16 +3753,13 @@ def _plot_income_chart(result, output_path, title_suffix, acs_year_range, apr_ye
         data_label=data_label, apr_year_range=apr_year_range,
         r2=result['mcfadden_r2'],
         ols_r2=result.get('ols_rsquared'),
-        ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_method,
-        freq_ci_lo=freq_ci_lo, freq_ci_hi=freq_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
+        boot_ci_lo=boot_ci_lo, boot_ci_hi=boot_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
         bayes_mean=bayes_mean,
         labels=result.get('jurisdictions'),
         label_cleanup=lambda s: str(s).replace(' COUNTY', ''),
         use_log_x=is_log_x,
         x_tick_dollar=is_log_x and not x_is_days,
-        x_tick_percent=(not is_log_x and income_label in (
-            AFFORD_X_LABEL, ZORI_AFFORD_X_LABEL, PCT_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL,
-        )),
+        x_tick_percent=(not is_log_x and _x_axis_should_use_percent_ticks(x_col_for_ols, income_label)),
         x_tick_days=is_log_x and x_is_days,
     )
 
@@ -2878,7 +3784,10 @@ def run_one_regression(df_geo, dr_type, type_label, geo_label, x_col, file_tag, 
     if not yearly_cols:
         print(f"    No yearly data found, skipping")
         return
-    keep_cols = list({label_col, 'county', x_col, 'population'})
+    keep_cols = [label_col, 'county', x_col, 'population']
+    _sc = _hierarchy_stratum_column(df_geo, x_col)
+    if _sc and _sc in df_geo.columns:
+        keep_cols.append(_sc)
     df_totals = df_geo[keep_cols + [total_col]].rename(columns={total_col: 'units'})
     df_yearly = pd.concat([
         df_geo[keep_cols].assign(year=y, units=df_geo[f'{cat_prefix}_{y}'])
@@ -2898,6 +3807,7 @@ def run_one_regression(df_geo, dr_type, type_label, geo_label, x_col, file_tag, 
     )
     regression_results = fit_two_part_with_ci(
         df_totals, df_yearly, x_col, 'units', years,
+        log_x=x_col not in X_COL_TWO_PART_LINEAR_X,
         skipped_low_r2=skipped_low_r2, chart_id=chart_id if skipped_low_r2 is not None else None,
         county_col='county', label_col=label_col,
         x_varies_by_year=False,
@@ -2915,10 +3825,21 @@ def run_one_regression(df_geo, dr_type, type_label, geo_label, x_col, file_tag, 
         regression_results,
         output_dir / f'{file_prefix}_{cat_suffix.lower()}_{file_tag}.png',
         title_suffix=title_suffix,
-        acs_year_range='2019-2023',
+        acs_year_range='2020-2024',
         apr_year_range=f'{min(years)}-{max(years)}',
         data_label=geo_label,
     )
+    if x_col in X_COL_PCT_CHANGE_PREDICTORS:
+        _plot_income_chart(
+            regression_results,
+            output_dir / f'{file_prefix}_{cat_suffix.lower()}_{file_tag}_positive_ols.png',
+            title_suffix=title_suffix,
+            acs_year_range='2020-2024',
+            apr_year_range=f'{min(years)}-{max(years)}',
+            data_label=geo_label,
+            positive_ols_simple=True,
+            x_col_for_ols=x_col,
+        )
 
 
 if __name__ == "__main__":
@@ -2999,7 +3920,8 @@ if __name__ == "__main__":
     if df_place is None:
         data_from_api = True
         print("Cache expired or missing, fetching from NHGIS API...")
-        IPUMS_API_KEY = input("Enter your IPUMS API Key: ")
+        if not IPUMS_API_KEY:
+            IPUMS_API_KEY = input("Enter your IPUMS API Key: ").strip()
 
         extract_num = nhgis_api("POST", "/extracts?collection=nhgis&version=2", {
             "datasets": {NHGIS_DATASET: {
@@ -3011,32 +3933,7 @@ if __name__ == "__main__":
             "breakdownAndDataTypeLayout": "single_file"
         })["number"]
         print(f"Extract #{extract_num} submitted, waiting for completion...")
-        # Wait loop: one GET per iteration, 1s sleep. No change to POST/GET URLs or extract payload.
-        # Completion: we break only on status["status"] == "completed". Timeout only after max_polls.
-        poll_interval = 1
-        timeout_minutes = 60
-        max_polls = (timeout_minutes * 60) // poll_interval
-        timeout_sec = max_polls * poll_interval
-        bar_width = 32
-
-        start_time = time.time()
-        for poll in range(max_polls):
-            status = nhgis_api("GET", f"/extracts/{extract_num}?collection=nhgis&version=2")
-            elapsed = int(time.time() - start_time)
-            if status["status"] == "completed":
-                print(f"\r✓ Extract #{extract_num} completed in {elapsed}s" + " " * 40)
-                break
-            if status["status"] == "failed":
-                raise RuntimeError(f"NHGIS extract failed: {status}")
-            done = poll + 1
-            pct = 100.0 * done / max_polls
-            filled = min(int(bar_width * done / max_polls), bar_width)
-            bar = "=" * bar_width if done >= max_polls else "=" * filled + ">" + " " * (bar_width - filled - 1)
-            remaining_sec = max(0, timeout_sec - elapsed)
-            print(f"\r⏳ Extract #{extract_num} [{bar}] wait {done}/{max_polls} | {elapsed}s elapsed, timeout in {remaining_sec}s | Status: {status['status']}   ", end="", flush=True)
-            time.sleep(poll_interval)
-        else:
-            raise TimeoutError(f"Extract did not complete within {timeout_minutes} minutes")
+        status = _nhgis_wait_extract(extract_num, timeout_minutes=60, show_bar=True)
 
         download_links = status.get("downloadLinks", {})
         if "tableData" not in download_links:
@@ -3065,6 +3962,38 @@ if __name__ == "__main__":
             df_place = df_place[df_place["STATEA"] == "06"].copy()
         if df_county is not None and "STATEA" in df_county.columns:
             df_county = df_county[df_county["STATEA"] == "06"].copy()
+
+    # Step 2b: 2014–2018 place MHI (B19013) for income delta — cache or NHGIS, merge onto df_place
+    if df_place is not None and "PLACEA" in df_place.columns:
+        df_place = df_place.copy()
+        df_place["PLACEA"] = df_place["PLACEA"].astype(str).str.zfill(5)
+        mhi_18 = None
+        need_18 = True
+        if CACHE_PATH_2018_PLACE.exists():
+            try:
+                with open(CACHE_PATH_2018_PLACE) as f:
+                    c18 = json.load(f)
+                dt = datetime.fromisoformat(c18.get("cached_at", "1970-01-01"))
+                if datetime.now() - dt < timedelta(days=CACHE_MAX_AGE_DAYS):
+                    mhi_18 = pd.DataFrame(c18["data"])
+                    need_18 = False
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                pass
+        if need_18:
+            if not IPUMS_API_KEY:
+                IPUMS_API_KEY = input("Enter your IPUMS API Key: ").strip()
+            print("Fetching 2014–2018 ACS place MHI (NHGIS)...")
+            mhi_18 = _fetch_place_mhi_2018_nhgis()
+            with open(CACHE_PATH_2018_PLACE, "w") as f:
+                json.dump(
+                    {"cached_at": datetime.now().isoformat(), "data": mhi_18.to_dict(orient="list")},
+                    f,
+                )
+            print(f"Cached to {CACHE_PATH_2018_PLACE}")
+        if mhi_18 is not None and len(mhi_18) > 0:
+            df_place = df_place.merge(mhi_18, on="PLACEA", how="left")
+        elif "place_income_2018" not in df_place.columns:
+            df_place["place_income_2018"] = np.nan
 
     # Step 3: Link places to counties using relationship file
     # Always merge PLACE_TYPE if available, even if COUNTYA already exists (needed for filtering incorporated cities)
@@ -3136,7 +4065,7 @@ if __name__ == "__main__":
     for df in [df_place, df_county, df_msa]:
         if df is None or len(df) == 0:
             continue
-        nhgis_cols = [col for col in df.columns if col.startswith(("ASVNE", "ASN1", "ASQPE"))]
+        nhgis_cols = [col for col in df.columns if col.startswith(("AUWS", "AUO6", "AURU"))]
         for col in nhgis_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
 
@@ -3168,17 +4097,17 @@ if __name__ == "__main__":
     if "COUNTYA" in df_place.columns:
         print(f"  COUNTYA sample values: {df_place['COUNTYA'].head(10).tolist()}")
         print(f"  COUNTYA unique values: {df_place['COUNTYA'].nunique()}")
-    place_income_cols = [c for c in df_place.columns if 'ASQPE' in c]
-    place_home_cols = [c for c in df_place.columns if 'ASVNE' in c]
-    place_pop_cols = [c for c in df_place.columns if 'ASN1' in c]
-    county_home_cols = [c for c in df_county.columns if 'ASVNE' in c] if df_county is not None else []
-    county_pop_cols = [c for c in df_county.columns if 'ASN1' in c] if df_county is not None else []
-    county_income_cols = [c for c in df_county.columns if 'ASQPE' in c]
-    msa_income_cols = [c for c in df_msa.columns if 'ASQPE' in c]
+    place_income_cols = [c for c in df_place.columns if 'AURU' in c]
+    place_home_cols = [c for c in df_place.columns if 'AUWS' in c]
+    place_pop_cols = [c for c in df_place.columns if 'AUO6' in c]
+    county_home_cols = [c for c in df_county.columns if 'AUWS' in c] if df_county is not None else []
+    county_pop_cols = [c for c in df_county.columns if 'AUO6' in c] if df_county is not None else []
+    county_income_cols = [c for c in df_county.columns if 'AURU' in c]
+    msa_income_cols = [c for c in df_msa.columns if 'AURU' in c]
 
-    print(f"Place columns - Income (ASQPE): {place_income_cols}, Home (ASVNE): {place_home_cols}, Pop (ASN1): {place_pop_cols}")
-    print(f"County columns - Income (ASQPE): {county_income_cols}")
-    print(f"MSA columns - Income (ASQPE): {msa_income_cols}")
+    print(f"Place columns - Income (AURU): {place_income_cols}, Home (AUWS): {place_home_cols}, Pop (AUO6): {place_pop_cols}")
+    print(f"County columns - Income (AURU): {county_income_cols}")
+    print(f"MSA columns - Income (AURU): {msa_income_cols}")
     print(f"MSA columns (all): {df_msa.columns.tolist()}")
     for col in ["CBSAA", "STATEA", "COUNTYA"]:
         if col in df_msa.columns:
@@ -3196,9 +4125,9 @@ if __name__ == "__main__":
             print(f"  Unique values sample: {df[raw_col].dropna().head(10).tolist()}")
 
     # Rename columns and create county column (4-digit NHGIS to 3-digit FIPS)
-    if "ASVNE001" not in df_place.columns or "ASN1E001" not in df_place.columns:
+    if "AUWSE001" not in df_place.columns or "AUO6E001" not in df_place.columns:
         raise ValueError(f"Missing required columns in place data. Available: {df_place.columns.tolist()}")
-    df_place = df_place.rename(columns={"ASVNE001": "median_home_value", "ASN1E001": "population"})
+    df_place = df_place.rename(columns={"AUWSE001": "median_home_value", "AUO6E001": "population"})
     
     # Add place-level income (city's own median income)
     if place_income_cols:
@@ -3261,22 +4190,22 @@ if __name__ == "__main__":
 
     # Rename income columns
     # County income
-    if "ASQPE001" not in df_county.columns:
-        print(f"WARNING: ASQPE001 not found in county data. Available columns: {df_county.columns.tolist()[:20]}...")
+    if "AURUE001" not in df_county.columns:
+        print(f"WARNING: AURUE001 not found in county data. Available columns: {df_county.columns.tolist()[:20]}...")
         if county_income_cols:
             print(f"  Found alternative income columns: {county_income_cols}, using first: {county_income_cols[0]}")
             df_county = df_county.rename(columns={county_income_cols[0]: "county_income"})
         else:
             raise ValueError(
-                f"Missing ASQPE001 in county data and no alternative found. "
+                f"Missing AURUE001 in county data and no alternative found. "
                 f"Available: {df_county.columns.tolist()}"
             )
     else:
-        df_county = df_county.rename(columns={"ASQPE001": "county_income"})
+        df_county = df_county.rename(columns={"AURUE001": "county_income"})
 
     # MSA income
-    if "ASQPE001" not in df_msa.columns:
-        print(f"WARNING: ASQPE001 not found in MSA data. Available columns: {df_msa.columns.tolist()[:20]}...")
+    if "AURUE001" not in df_msa.columns:
+        print(f"WARNING: AURUE001 not found in MSA data. Available columns: {df_msa.columns.tolist()[:20]}...")
         if msa_income_cols:
             print(f"  Found alternative income columns: {msa_income_cols}, using first: {msa_income_cols[0]}")
             df_msa = df_msa.rename(columns={msa_income_cols[0]: "msa_income"} | 
@@ -3287,27 +4216,18 @@ if __name__ == "__main__":
             if "CBSAA" in df_msa.columns:
                 df_msa = df_msa.rename(columns={"CBSAA": "msa_id"})
     else:
-        df_msa = df_msa.rename(columns={"ASQPE001": "msa_income"} | 
+        df_msa = df_msa.rename(columns={"AURUE001": "msa_income"} | 
                                ({"CBSAA": "msa_id"} if "CBSAA" in df_msa.columns else {}))
 
     # Normalize place names for joining
     df_place["JURISDICTION"] = df_place["NAME_E"].apply(juris_caps)
 
     # Clean renamed columns: only clean columns that weren't already cleaned above
-    # median_home_value and population were renamed from ASVNE001 and ASN1E001, already cleaned above
-    # county_income and msa_income were renamed from ASQPE001, already cleaned above (cache or API)
+    # median_home_value and population were renamed from AUWSE001 and AUO6E001, already cleaned above
+    # county_income and msa_income were renamed from AURUE001, already cleaned above (cache or API)
     # Only need to clean if they were set to np.nan directly (line 367 for msa_income fallback)
     if "msa_income" in df_msa.columns and df_msa["msa_income"].dtype == object:
         df_msa["msa_income"] = pd.to_numeric(df_msa["msa_income"], errors="coerce").replace(SUPPRESSION_CODES, np.nan)
-
-    _acs_ifac = _acs_income_inflation_factor(2023)
-    for col, df_src in (
-        ("place_income", df_place),
-        ("county_income", df_county),
-        ("msa_income", df_msa),
-    ):
-        if col in df_src.columns:
-            df_src[col] = _acs_income_to_real_2024(df_src[col].values, _acs_ifac)
 
     # Step 5: merge place → county (for county_income) and place → MSA (for msa_income)
     # Select only needed columns from place data before merging
@@ -3344,6 +4264,10 @@ if __name__ == "__main__":
     place_cols = ["JURISDICTION", "county", "msa_id", "median_home_value", "population"]
     if "place_income" in df_place.columns:
         place_cols.append("place_income")
+    if "place_income_2018" in df_place.columns:
+        place_cols.append("place_income_2018")
+    if "place_population_2018" in df_place.columns:
+        place_cols.append("place_population_2018")
     df_final = df_place[place_cols].copy()
     # Set geography_type based on incorporation status: "City" for incorporated places, "Place" for CDPs/unincorporated
     if "PLACE_TYPE" in df_place.columns:
@@ -3502,6 +4426,55 @@ if __name__ == "__main__":
     # Reference income: Use MSA income if available, otherwise fall back to county income
     # This handles places not in MSAs (rural areas, micropolitan areas) correctly
     df_final["ref_income"] = df_final["msa_income"].fillna(df_final["county_income"])
+
+    # Real median household income change (2014–2018 ACS → 2020–2024 ACS), CPI-deflated; predictor = % change in real $.
+    if "place_income_2018" not in df_final.columns:
+        df_final["place_income_2018"] = np.nan
+    cpi_data_inc = load_cpi()
+    cpi_2018_01 = get_cpi_for_month(cpi_data_inc, 2018, 1) if cpi_data_inc else None
+    cpi_2024_12 = get_cpi_for_month(cpi_data_inc, 2024, 12) if cpi_data_inc else None
+    pi24 = pd.to_numeric(df_final["place_income"], errors="coerce")
+    pi18 = pd.to_numeric(df_final["place_income_2018"], errors="coerce")
+    if cpi_2018_01 and cpi_2024_12:
+        pi18_real = pi18 * (float(cpi_2024_12) / float(cpi_2018_01))
+    else:
+        pi18_real = pi18
+    delta_mhi = pi24 - pi18_real
+    df_final["income_delta_raw"] = delta_mhi
+    inc_q = pd.Series(np.nan, index=df_final.index, dtype=np.float64)
+    fin_inc = delta_mhi.notna() & np.isfinite(pd.to_numeric(delta_mhi, errors="coerce"))
+    if fin_inc.sum() >= N_DELTA_STRATUM_BINS:
+        try:
+            inc_q.loc[fin_inc] = pd.qcut(delta_mhi[fin_inc], q=N_DELTA_STRATUM_BINS, labels=False, duplicates="drop")
+        except (ValueError, TypeError):
+            pass
+    df_final["income_delta_stratum"] = inc_q
+    pi18r = np.asarray(pi18_real, dtype=np.float64)
+    dm = np.asarray(delta_mhi, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        income_pct = np.where(
+            (pi18r > 0) & np.isfinite(pi18r) & np.isfinite(dm),
+            100.0 * dm / pi18r,
+            np.nan,
+        )
+    df_final["income_delta_pct_change"] = income_pct
+    df_final["income_delta_positive"] = (delta_mhi > 0).astype(np.float64)
+
+    if "place_population_2018" not in df_final.columns:
+        df_final["place_population_2018"] = np.nan
+    pop_now = pd.to_numeric(df_final["population"], errors="coerce")
+    pop_18 = pd.to_numeric(df_final["place_population_2018"], errors="coerce")
+    delta_pop = pop_now - pop_18
+    df_final["population_delta_raw"] = delta_pop
+    pop18a = np.asarray(pop_18, dtype=np.float64)
+    dpop = np.asarray(delta_pop, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pop_pct = np.where(
+            (pop18a > 0) & np.isfinite(pop18a) & np.isfinite(dpop),
+            100.0 * dpop / pop18a,
+            np.nan,
+        )
+    df_final["population_delta_pct_change"] = pop_pct
 
     # Calculate affordability ratio: check ref_income not null and > 0, median_home_value not null
     # Efficient condition: check null first to avoid unnecessary > 0 comparison on null values
@@ -3669,7 +4642,8 @@ if __name__ == "__main__":
         ("units_CO", "co_net"),
     ]
 
-    # Aggregate all metrics for cities, filter to incorporated, merge to df_final
+    # Aggregate all metrics for cities, filter to incorporated, merge to df_final.
+    # Tier 1 risk: intended one row per incorporated city on JURISDICTION; APR agg should be unique per JURIS_CLEAN per metric.
     first_merge = True
     for value_col, prefix in agg_specs:
         agg_all = agg_permits(df_apr_all, is_city_all, permit_years, value_col, prefix)
@@ -3885,6 +4859,25 @@ if __name__ == "__main__":
     total_all_city = agg_owner_co_bp(city_sub_all, pd.Series(True, index=city_sub_all.index), "TOTAL", permit_years, "JURIS_CLEAN")
     city_sub_mf = df_apr_all[is_city_all & mf_mask_all]
     total_mf_city = agg_owner_co_bp(city_sub_mf, pd.Series(True, index=city_sub_mf.index), "TOTAL_MF", permit_years, "JURIS_CLEAN")
+    mf_owner_city = None
+    if "is_owner" in df_apr_all.columns:
+        mf_owner_co = agg_permits(
+            df_apr_all,
+            is_city_all & mf_mask_all & df_apr_all["is_owner"],
+            permit_years,
+            "units_CO",
+            "mf_owner_CO",
+            "JURIS_CLEAN",
+        )
+        mf_owner_bp = agg_permits(
+            df_apr_all,
+            is_city_all & mf_mask_all & df_apr_all["is_owner"],
+            permit_years,
+            "units_BP",
+            "mf_owner_BP",
+            "JURIS_CLEAN",
+        )
+        mf_owner_city = mf_owner_co.merge(mf_owner_bp, on="JURIS_CLEAN", how="outer")
     # Diagnose owner CO: why all zeros?
     total_owner_co_cols = [c for c in total_owner_city.columns if c.startswith("total_owner_CO_")]
     if total_owner_co_cols:
@@ -3894,7 +4887,10 @@ if __name__ == "__main__":
     else:
         print(f"  total_owner_city: no total_owner_CO_* columns (agg returned empty structure)")
     df_city_units = df_city_units.merge(total_owner_city, on="JURIS_CLEAN", how="left").merge(db_owner_city, on="JURIS_CLEAN", how="left").merge(total_all_city, on="JURIS_CLEAN", how="left").merge(total_mf_city, on="JURIS_CLEAN", how="left")
-    # Income-tier CO (Very low + Low, Moderate) by jurisdiction and year, no DR_TYPE filter
+    if mf_owner_city is not None:
+        df_city_units = df_city_units.merge(mf_owner_city, on="JURIS_CLEAN", how="left")
+    # Income-tier CO (Very low + Low, Moderate) by jurisdiction and year, no DR_TYPE filter.
+    # Tier 1 risk: duplicate (JURIS_CLEAN, YEAR) before pivot would aggregate (mean), not error.
     city_income_co = city_sub.groupby(["JURIS_CLEAN", "YEAR"])[["units_VLOW_LOW_CO", "units_MOD_CO"]].sum().reset_index()
     vlow_low_unstack = city_income_co.pivot_table(index="JURIS_CLEAN", columns="YEAR", values="units_VLOW_LOW_CO").reindex(columns=permit_years).fillna(0).reset_index()
     vlow_low_unstack.columns = ["JURIS_CLEAN"] + [f"VLOW_LOW_CO_{int(y)}" for y in permit_years]
@@ -4033,7 +5029,7 @@ if __name__ == "__main__":
         print(f"  Counties with net permits: {(df_county_rows['total_net_permits'] > 0).sum()}")
         print(f"  Counties with COs: {(df_county_rows['total_cos'] > 0).sum()}")
 
-        # Combine place and county results
+        # Tier 1 risk: concat assumes city JURISDICTION labels do not collide with county rows (same string = duplicate key).
         df_final = pd.concat([df_final, df_county_rows], ignore_index=True)
         print(f"  Combined total: {len(df_final)} rows (places + counties)")
     else:
@@ -4041,7 +5037,7 @@ if __name__ == "__main__":
 
     # Step 10b: Apply totals and population-adjusted rates to combined cities + counties
     # Fill NaN with 0 for all yearly columns (DR, PROJ, owner tenure, TOTAL, income-tier)
-    owner_year_cols = [f"{pre}_{cat}_{y}" for pre in ["total_owner", "db_owner", "TOTAL", "TOTAL_MF"] for cat in ["CO", "BP"] for y in permit_years]
+    owner_year_cols = [f"{pre}_{cat}_{y}" for pre in ["total_owner", "db_owner", "TOTAL", "TOTAL_MF", "mf_owner"] for cat in ["CO", "BP"] for y in permit_years]
     income_tier_year_cols = [f"VLOW_LOW_CO_{y}" for y in permit_years] + [f"MOD_CO_{y}" for y in permit_years]
     for col in all_year_cols + all_proj_year_cols + owner_year_cols + income_tier_year_cols:
         if col in df_final.columns:
@@ -4083,7 +5079,7 @@ if __name__ == "__main__":
     new_cols["total_units_all"] = new_cols["total_units_DB"] + new_cols["total_units_INC"]
 
     # Owner tenure and TOTAL totals (CO and BP only)
-    for prefix in ["total_owner", "db_owner", "TOTAL", "TOTAL_MF"]:
+    for prefix in ["total_owner", "db_owner", "TOTAL", "TOTAL_MF", "mf_owner"]:
         for cat in ["CO", "BP"]:
             existing_cols = [f"{prefix}_{cat}_{y}" for y in permit_years if f"{prefix}_{cat}_{y}" in df_final.columns]
             new_cols[f"{prefix}_{cat}_total"] = df_final[existing_cols].sum(axis=1).values if existing_cols else 0
@@ -4119,7 +5115,10 @@ if __name__ == "__main__":
     # Step 11: select only relevant columns for output (remove raw NHGIS columns and duplicates)
     # Build output columns: base ACS cols + net new units + (yearly + pop + total + avg) for each DR_TYPE + category
     output_cols = ["JURISDICTION", "county", "geography_type", "median_home_value", "home_ref", "population",
-                   "place_income", "county_income", "msa_income", "ref_income", "affordability_ratio",
+                   "place_income", "place_income_2018", "place_population_2018",
+                   "income_delta_raw", "income_delta_stratum", "income_delta_pct_change", "income_delta_positive",
+                   "population_delta_raw", "population_delta_pct_change",
+                   "county_income", "msa_income", "ref_income", "affordability_ratio",
                    "zhvi_pct_change", "zhvi_dec2024", "zhvi_afford_ratio", "pct_afford",
                    "zori_pct_change", "zori_dec2024", "zori_afford_ratio", "zori_pct_afford"]
 
@@ -4145,7 +5144,7 @@ if __name__ == "__main__":
             output_cols += [f"{dr}_{cat}_total", f"PROJ_{dr}_{cat}_total"]
     output_cols += ["dr_units_all", "total_units_all"]
     # Owner tenure and TOTAL columns (yearly + totals)
-    for prefix in ["total_owner", "db_owner", "TOTAL", "TOTAL_MF"]:
+    for prefix in ["total_owner", "db_owner", "TOTAL", "TOTAL_MF", "mf_owner"]:
         for cat in ["CO", "BP"]:
             output_cols += [f"{prefix}_{cat}_{y}" for y in permit_years]
             output_cols.append(f"{prefix}_{cat}_total")
@@ -4159,307 +5158,304 @@ if __name__ == "__main__":
     sample_cols = ["JURISDICTION", "geography_type", "dr_units_DB_CO", "total_units_DB_CO", "dr_units_DB_BP", "total_units_DB_BP", "dr_units_DB"]
     print(df_final[[c for c in sample_cols if c in df_final.columns]].head(10))
 
-    # =============================================================================
-    # Step 11b: Construction Timeline (entitlement -> permit -> completion)
-    # Three avg wait times per jurisdiction; hierarchical Bayes for CI/variance;
-    # regress total DB CO and total owner CO on the three wait times. OMNI: one pipeline.
-    # =============================================================================
-    print("\n" + "="*70)
-    print("CONSTRUCTION TIMELINE: Wait times by jurisdiction")
-    print("="*70)
+    # Buddha Tier 1 harness: real df_final + APR; exit before timeline charts / MCMC (set ACS_V2_HARNESS_TIER1=1)
+    if os.environ.get("ACS_V2_HARNESS_TIER1", "").strip().lower() in ("1", "true", "yes"):
+        from harness_buddha_tier1_impl import run_full_pipeline_tier1_checks
+        run_full_pipeline_tier1_checks(
+            df_final=df_final,
+            df_apr_master=df_apr_master,
+            permit_years=permit_years,
+        )
+        raise SystemExit(0)
 
-    df_projects = build_timeline_projects(df_apr_master)
-    if df_projects.empty:
-        print("  No project-level timeline (missing date columns or keys). Skipping timeline step.")
-    else:
-        if "JURIS_NAME" in df_projects.columns and "JURIS_CLEAN" not in df_projects.columns:
-            df_projects["JURIS_CLEAN"] = df_projects["JURIS_NAME"].apply(juris_caps)
-        # Restrict to incorporated cities (and counties in df_final) so wait times match pipeline
-        incorporated_jurisdictions_timeline = set(df_final["JURISDICTION"].dropna().unique())
-        df_projects = df_projects[df_projects["JURIS_CLEAN"].isin(incorporated_jurisdictions_timeline)].copy()
-        print(f"  Projects with valid non-zero phase durations (incorporated only): {len(df_projects):,}")
-
-        df_jy = aggregate_timeline_by_jurisdiction_year(df_projects, juris_col="JURIS_CLEAN", min_projects=1)
-        df_cities_timeline = None
-        wait_time_specs_timeline = ()
-        comp_series_timeline = ()
-        permit_years_timeline = []
-        if df_jy.empty:
-            print("  No jurisdiction-year timeline data. Skipping timeline aggregation.")
+    if ENABLE_CONSTRUCTION_TIMELINE:
+        # =============================================================================
+        # Step 11b: Construction Timeline (entitlement -> permit -> completion)
+        # Runs only when ENABLE_CONSTRUCTION_TIMELINE is True (default False: APR dates unreliable).
+        # Three avg wait times per jurisdiction; hierarchical Bayes for CI/variance;
+        # regress total DB CO and total owner CO on the three wait times. OMNI: one pipeline.
+        # =============================================================================
+        print("\n" + "="*70)
+        print("CONSTRUCTION TIMELINE: Wait times by jurisdiction")
+        print("="*70)
+    
+        df_projects = build_timeline_projects(df_apr_master)
+        if df_projects.empty:
+            print("  No project-level timeline (missing date columns or keys). Skipping timeline step.")
         else:
-            print(f"  Jurisdiction-year cells: {len(df_jy):,} (no per-year minimum)")
-
-        df_juris_timeline = timeline_jurisdiction_means(df_jy, juris_col="JURIS_CLEAN")
-        if not df_juris_timeline.empty:
-            df_final = df_final.merge(
-                df_juris_timeline,
-                left_on="JURISDICTION", right_on="JURIS_CLEAN", how="left"
-            )
-            df_final = df_final.drop(columns=["JURIS_CLEAN"], errors="ignore")
-            print(f"  Merged timeline to df_final for {df_juris_timeline['JURIS_CLEAN'].nunique()} jurisdictions")
-
-        # Build df_cities for timeline charts (two-part regressions run after fit_two_part_with_ci is defined)
-        cities_mask = (df_final["geography_type"] == "City") if "geography_type" in df_final.columns else pd.Series(True, index=df_final.index)
-        if "population" in df_final.columns:
-            cities_mask = cities_mask & df_final["population"].notna() & (df_final["population"] > 0)
-        df_cities_timeline = df_final.loc[cities_mask].copy()
-        if "n_projects_total" in df_cities_timeline.columns:
-            df_cities_timeline = df_cities_timeline[df_cities_timeline["n_projects_total"].notna() & (df_cities_timeline["n_projects_total"] >= 10)].copy()
-            print(f"  Cities with >= 10 projects total (timeline charts): {len(df_cities_timeline)}")
-        # Timeline charts: one spec per phase present in df_cities_timeline (OMNI: single list, no copy-paste).
-        wait_time_specs_timeline = [
-            ("median_days_ent_permit", "Entitlement to Permit", "ent_permit"),
-        ]
-        # Timeline two-part: Entitlement to Permit vs DB CO only (owner CO chart disabled)
-        comp_series_timeline = [
-            ("dr_units_DB_CO", "Deed Restricted DB CO", "dr_db_co", "DB_CO"),
-            ("total_net_permits", "Net Building Permits", "net_bp", "net_permits"),
-        ]
-        permit_years_timeline = [y for y in permit_years if f"DB_CO_{y}" in df_cities_timeline.columns or f"total_owner_CO_{y}" in df_cities_timeline.columns]
-        if not permit_years_timeline:
-            permit_years_timeline = sorted(set(int(c.split("_")[-1]) for c in df_cities_timeline.columns if c.startswith("DB_CO_") and c.split("_")[-1].isdigit())) or [2019, 2020, 2021, 2022, 2023]
-        timeline_dir = Path(__file__).resolve().parent
-        line_color = "#4472C4"
-        ci_color = "purple"
-        point_color = "#ED7D31"
-        plt.rcParams.update({
-            'font.family': 'sans-serif', 'font.size': 10, 'axes.titlesize': 12, 'axes.titleweight': 'bold',
-            'axes.labelsize': 10, 'axes.grid': True, 'axes.axisbelow': True, 'grid.alpha': 0.3,
-            'legend.frameon': True, 'legend.fancybox': False, 'legend.edgecolor': 'black', 'legend.fontsize': 9,
-            'figure.facecolor': 'white', 'axes.facecolor': 'white', 'axes.edgecolor': 'black', 'axes.linewidth': 0.8,
-        })
-        # OLS: income/ZHVI/afford (x) predicts log(wait time) (y). CI: hierarchical Bayes -> SMC -> bootstrap fallback.
-        timeline_outcomes = [
-            ("place_income", "City Median Household Income", "log", np.exp),
-            ("zhvi_pct_change", ZHVI_PCT_LABEL, "identity", lambda x: x),
-            ("zhvi_afford_ratio", AFFORD_X_LABEL, "identity", lambda x: x),
-            ("pct_afford", PCT_AFFORD_X_LABEL, "identity", lambda x: x),
-            ("zori_pct_change", ZORI_PCT_LABEL, "identity", lambda x: x),
-            ("zori_afford_ratio", ZORI_AFFORD_X_LABEL, "identity", lambda x: x),
-            ("zori_pct_afford", ZORI_PCT_AFFORD_X_LABEL, "identity", lambda x: x),
-        ]
-        n_boot = 10000
-        phase_to_yearly_y = {"median_days_ent_permit": "days_ent_permit", "median_days_permit_completion": "days_permit_completion", "median_days_ent_completion": "days_ent_completion"}
-        phase_label_map = {
-            "median_days_ent_permit": "Entitlement to Permit",
-            "median_days_permit_completion": "Permit to Completion",
-            "median_days_ent_completion": "Entitlement to Completion",
-        }
-        df_yearly_timeline = None
-        if not df_jy.empty and "JURIS_CLEAN" in df_jy.columns and "YEAR" in df_jy.columns:
-            if all(c in df_jy.columns for c in TIMELINE_PHASE_DAYS_REQUIRED_YEARLY):
-                cols_cities = [
-                    "JURISDICTION", "county", "place_income", "zhvi_pct_change", "zhvi_afford_ratio", "pct_afford",
-                    "zori_pct_change", "zori_afford_ratio", "zori_pct_afford", "population",
-                ]
-                cols_cities = [c for c in cols_cities if c in df_cities_timeline.columns]
-                if cols_cities and not df_jy.empty:
-                    df_yearly_timeline = df_jy.merge(
-                        df_cities_timeline[cols_cities],
-                        left_on="JURIS_CLEAN", right_on="JURISDICTION", how="inner"
-                    )
-                    if "JURIS_CLEAN" in df_yearly_timeline.columns:
-                        df_yearly_timeline = df_yearly_timeline.drop(columns=["JURIS_CLEAN"])
-                    if df_yearly_timeline.empty:
-                        df_yearly_timeline = None
-        df_timeline_use = df_cities_timeline
-        df_yearly_timeline_use = df_yearly_timeline
-        for phase_col, phase_label, phase_tag in wait_time_specs_timeline:
-            if phase_col not in df_timeline_use.columns:
-                continue
-            yearly_y_col = phase_to_yearly_y.get(phase_col)
-            for pred_col, pred_label, pred_scale, inv_fun in timeline_outcomes:
-                if pred_col not in df_timeline_use.columns:
-                    continue
-                if pred_scale == "identity":
-                    valid = (
-                        df_timeline_use[pred_col].notna() & np.isfinite(df_timeline_use[pred_col].values) &
-                        df_timeline_use[phase_col].notna() & (df_timeline_use[phase_col] > 0)
-                    )
-                    if pred_col == "zori_afford_ratio":
-                        valid = valid & (df_timeline_use[pred_col] > 0)
-                else:
-                    valid = (
-                        df_timeline_use[pred_col].notna() & (df_timeline_use[pred_col] > 0) &
-                        df_timeline_use[phase_col].notna() & (df_timeline_use[phase_col] > 0)
-                    )
-                x_orig = df_timeline_use.loc[valid, pred_col].values.astype(float)
-                y_orig = df_timeline_use.loc[valid, phase_col].values.astype(float)
-                if len(x_orig) < 10:
-                    continue
-                x_trans = x_orig if pred_scale == "identity" else np.log(x_orig)
-                use_log_y = False  # Days (y) always linear for timeline charts; predictor scale (x) unchanged (OMNI: consistent)
-                y_fit = np.log(y_orig) if use_log_y else y_orig
-                X = sm.add_constant(x_trans)
-                try:
-                    ols_fit = sm.OLS(y_fit, X).fit()
-                except Exception:
-                    continue
-                b0 = float(ols_fit.params[0])
-                b1 = float(ols_fit.params[1])
-                r2 = float(ols_fit.rsquared)
-                _append_timeline_r2_diagnostics_row(
-                    all_r2_results,
-                    f"Median {phase_label_map[phase_col]} Days vs {pred_label}",
-                    GEOGRAPHY_CITY,
-                    r2,
+            if "JURIS_NAME" in df_projects.columns and "JURIS_CLEAN" not in df_projects.columns:
+                df_projects["JURIS_CLEAN"] = df_projects["JURIS_NAME"].apply(juris_caps)
+            # Restrict to incorporated cities (and counties in df_final) so wait times match pipeline
+            incorporated_jurisdictions_timeline = set(df_final["JURISDICTION"].dropna().unique())
+            df_projects = df_projects[df_projects["JURIS_CLEAN"].isin(incorporated_jurisdictions_timeline)].copy()
+            print(f"  Projects with valid non-zero phase durations (incorporated only): {len(df_projects):,}")
+    
+            df_jy = aggregate_timeline_by_jurisdiction_year(df_projects, juris_col="JURIS_CLEAN", min_projects=1)
+            df_cities_timeline = None
+            wait_time_specs_timeline = ()
+            comp_series_timeline = ()
+            permit_years_timeline = []
+            if df_jy.empty:
+                print("  No jurisdiction-year timeline data. Skipping timeline aggregation.")
+            else:
+                print(f"  Jurisdiction-year cells: {len(df_jy):,} (no per-year minimum)")
+    
+            df_juris_timeline = timeline_jurisdiction_means(df_jy, juris_col="JURIS_CLEAN")
+            if not df_juris_timeline.empty:
+                df_final = df_final.merge(
+                    df_juris_timeline,
+                    left_on="JURISDICTION", right_on="JURIS_CLEAN", how="left"
                 )
-                if r2 < R2_THRESHOLD_TIMELINE_OLS_CHART:
-                    charts_skipped_low_r2.append((f"timeline_{phase_tag}_vs_{pred_col}", r2))
-                    print(f"  Skipping chart: OLS R² = {r2:.3f} < {R2_THRESHOLD_TIMELINE_OLS_CHART} for {phase_tag} vs {pred_col}")
-                    continue
-                use_hierarchical = use_log_y and (
-                    df_yearly_timeline_use is not None and yearly_y_col is not None
-                    and yearly_y_col in df_yearly_timeline_use.columns and pred_col in df_yearly_timeline_use.columns
-                )
-                intercept_samples, slope_samples, ci_method = _timeline_ci_samples(
-                    use_hierarchical, df_yearly_timeline_use, yearly_y_col, pred_col, permit_years_timeline,
-                    pred_scale, use_log_y, x_trans, y_fit, n_boot, phase_tag
-                )
-                x_min, x_max = float(np.nanmin(x_orig)), float(np.nanmax(x_orig))
-                x_max = max(x_max, x_min + 1.0)
-                if pred_scale == "log" and pred_col == "place_income":
-                    x_max = min(x_max, 500_000)
-                    x_min = max(x_min, 1.0)
-                if pred_scale == "identity" and x_min < 0:
-                    x_lim_left = min(x_min, 0) - 0.02 * (x_max - x_min)
-                else:
-                    x_lim_left = x_min
-                x_grid = np.linspace(x_lim_left, x_max, 100)
-                x_grid_trans = x_grid if pred_scale == "identity" else np.log(x_grid)
-                # Identity-scale predictors: scale to % for ZORI afford ratio (display only)
-                if pred_col == "zori_afford_ratio":
-                    x_orig_plot = x_orig * 100
-                    x_grid_plot = x_grid * 100
-                    x_lim_left_plot = x_lim_left * 100
-                    x_max_plot = x_max * 100
-                else:
-                    x_orig_plot = x_orig
-                    x_grid_plot = x_grid
-                    x_lim_left_plot = x_lim_left
-                    x_max_plot = x_max
-                if use_log_y:
-                    y_line = np.exp(b0 + b1 * x_grid_trans)
-                else:
-                    y_line = b0 + b1 * x_grid_trans
-                y_plot_max = float(np.nanmax(y_orig)) * 1.1
-                fig, ax = _fig_ax_square_plot()
-                if use_log_y:
-                    y_min = max(1.0, float(np.nanmin(y_orig[y_orig > 0])) * 0.5) if np.any(y_orig > 0) else 1.0
-                    ax.set_yscale("log")
-                    ax.set_ylim(bottom=y_min, top=y_plot_max)
-                    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:,.0f}"))
-                else:
-                    ax.set_ylim(bottom=0, top=y_plot_max)
-                    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:,.0f}"))
-                if pred_scale == "log":
-                    ax.set_xscale("log")
-                    ax.set_xlim(left=x_lim_left, right=x_max)
-                    if pred_col == "place_income":
-                        dollar_ticks_log = _log_spaced_dollar_ticks(x_lim_left, x_max, max_ticks=5)
-                        ticks_in_range = [t for t in dollar_ticks_log if dollar_ticks_log[0] <= t <= x_max]
-                        if len(ticks_in_range) < 2:
-                            ticks_in_range = [dollar_ticks_log[0], x_max] if x_max > dollar_ticks_log[0] else dollar_ticks_log[:2]
-                        if ticks_in_range and ticks_in_range[-1] < x_max:
-                            ticks_in_range = list(ticks_in_range) + [float(x_max)]
-                        _apply_log_axis_dollar_ticks(ax, ticks_in_range, dollar_ticks_log, x_max)
-                    else:
-                        ticks_in_range = dollar_ticks_log = None
-                if pred_scale == "identity":
-                    ax.set_xlim(left=x_lim_left_plot, right=x_max_plot)
-                ax.scatter(x_orig_plot, y_orig, color=point_color, alpha=0.6, s=40, edgecolors="none",
-                           label=f"Cities with ≥10 projects total\n(n={len(x_orig)})")
-                if "JURISDICTION" in df_timeline_use.columns:
-                    juris_names = df_timeline_use.loc[valid, "JURISDICTION"].values
-                    tl_anns = annotate_top_n_by_y(ax, x_orig_plot, y_orig, juris_names, n=3,
-                                                  label_cleanup=lambda s: str(s).replace(" COUNTY", ""))
-                    if tl_anns:
-                        _resolve_scatter_label_overlaps(ax, fig, tl_anns)
-                ols_label = "OLS\n(log-normal)" if use_log_y else "OLS"
-                ax.plot(x_grid_plot, y_line, color=line_color, linewidth=2, linestyle="-", label=ols_label)
-                if intercept_samples is not None:
-                    if use_log_y:
-                        y_samp = np.exp(intercept_samples[:, None] + slope_samples[:, None] * x_grid_trans[None, :])
-                    else:
-                        y_samp = intercept_samples[:, None] + slope_samples[:, None] * x_grid_trans[None, :]
-                    y_lo = np.percentile(y_samp, 2.5, axis=0)
-                    y_hi = np.percentile(y_samp, 97.5, axis=0)
-                    ci_label = CI_LABEL_CREDIBLE_SMC if ci_method == "bayesian" else CI_LABEL_STATIONARY_MC
-                    ax.fill_between(x_grid_plot, y_lo, y_hi, color=ci_color, alpha=0.3, label=ci_label)
-                r2_str = f"{r2:.2e}" if abs(r2) < 0.001 else f"{r2:.3f}"
-                ax.plot([], [], " ", label=f"R² = {r2_str}")
-                xlabel_base = pred_label if pred_scale == "identity" else f"{pred_label}, log scale"
-                if pred_scale == "identity":
-                    ax.set_xlabel(xlabel_base)
-                    if pred_label in (
-                        AFFORD_X_LABEL, ZORI_AFFORD_X_LABEL, PCT_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL,
-                    ):
-                        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.0f}%"))
-                    elif x_min < 0:
-                        ax.xaxis.set_major_locator(MultipleLocator(10))
-                        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.0f}%"))
-                    else:
-                        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.0f}%"))
-                else:
-                    ax.set_xlabel(xlabel_base)
-                ax.set_ylabel(f"Median {phase_label_map[phase_col]} Days" + (", log scale" if use_log_y else ""))
-                ax.set_title('')
-                leg = ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False)
-                if pred_scale == "log" and pred_col == "place_income":
-                    _apply_log_axis_dollar_ticks(ax, ticks_in_range, dollar_ticks_log, x_max)
-                pred_tag = (
-                    "income" if pred_col == "place_income"
-                    else ("zhvi" if pred_col == "zhvi_pct_change"
-                    else ("zori" if pred_col == "zori_pct_change"
-                    else ("zori_afford" if pred_col == "zori_afford_ratio"
-                    else ("pct_afford" if pred_col == "pct_afford"
-                    else ("zori_pct_afford" if pred_col == "zori_pct_afford" else "afford"))))))
-                out_path = timeline_dir / f"timeline_{phase_tag}_vs_{pred_tag}.png"
-                if pred_scale == "log" and pred_col == "place_income":
-                    fig.canvas.draw()
-                    _apply_log_axis_dollar_ticks(ax, ticks_in_range, dollar_ticks_log, x_max)
-                fig.savefig(out_path, dpi=150, bbox_inches="tight", bbox_extra_artists=[leg], facecolor="white")
-                plt.close(fig)
-                print(f"  Saved: {out_path.name}")
-
-        # Timeline two-part (all-cities; county in df_timeline_use retained in Step 11 output_cols).
-        if df_timeline_use is not None and permit_years_timeline and wait_time_specs_timeline and comp_series_timeline:
+                df_final = df_final.drop(columns=["JURIS_CLEAN"], errors="ignore")
+                print(f"  Merged timeline to df_final for {df_juris_timeline['JURIS_CLEAN'].nunique()} jurisdictions")
+    
+            # Build df_cities for timeline charts (two-part regressions run after fit_two_part_with_ci is defined)
+            cities_mask = (df_final["geography_type"] == "City") if "geography_type" in df_final.columns else pd.Series(True, index=df_final.index)
+            if "population" in df_final.columns:
+                cities_mask = cities_mask & df_final["population"].notna() & (df_final["population"] > 0)
+            df_cities_timeline = df_final.loc[cities_mask].copy()
+            if "n_projects_total" in df_cities_timeline.columns:
+                df_cities_timeline = df_cities_timeline[df_cities_timeline["n_projects_total"].notna() & (df_cities_timeline["n_projects_total"] >= 10)].copy()
+                print(f"  Cities with >= 10 projects total (timeline charts): {len(df_cities_timeline)}")
+            # Timeline charts: one spec per phase present in df_cities_timeline (OMNI: single list, no copy-paste).
+            wait_time_specs_timeline = [
+                ("median_days_ent_permit", "Entitlement to Permit", "ent_permit"),
+            ]
+            # Timeline two-part: Entitlement to Permit vs DB CO only (owner CO chart disabled)
+            comp_series_timeline = [
+                ("dr_units_DB_CO", "Deed Restricted DB CO", "dr_db_co", "DB_CO"),
+                ("total_net_permits", "Net Building Permits", "net_bp", "net_permits"),
+            ]
+            permit_years_timeline = [y for y in permit_years if f"DB_CO_{y}" in df_cities_timeline.columns or f"total_owner_CO_{y}" in df_cities_timeline.columns]
+            if not permit_years_timeline:
+                permit_years_timeline = sorted(set(int(c.split("_")[-1]) for c in df_cities_timeline.columns if c.startswith("DB_CO_") and c.split("_")[-1].isdigit())) or [2019, 2020, 2021, 2022, 2023]
+            timeline_dir = Path(__file__).resolve().parent
+            line_color = "#4472C4"
+            ci_color = "purple"
+            point_color = "#ED7D31"
+            setup_chart_style()
+            # OLS: income/ZHVI/afford (x) predicts log(wait time) (y). CI: hierarchical Bayes -> SMC -> bootstrap fallback.
+            timeline_outcomes = [
+                ("income_delta_pct_change", "% change in real median household income", "identity", lambda x: x),
+                ("population_delta_pct_change", "% change in place population", "identity", lambda x: x),
+                ("zhvi_pct_change", ZHVI_PCT_LABEL, "identity", lambda x: x),
+                ("zhvi_afford_ratio", AFFORD_X_LABEL, "identity", lambda x: x),
+                ("pct_afford", PCT_AFFORD_X_LABEL, "identity", lambda x: x),
+                ("zori_pct_change", ZORI_PCT_LABEL, "identity", lambda x: x),
+                ("zori_afford_ratio", ZORI_AFFORD_X_LABEL, "identity", lambda x: x),
+                ("zori_pct_afford", ZORI_PCT_AFFORD_X_LABEL, "identity", lambda x: x),
+            ]
+            n_boot = 10000
+            phase_to_yearly_y = {"median_days_ent_permit": "days_ent_permit", "median_days_permit_completion": "days_permit_completion", "median_days_ent_completion": "days_ent_completion"}
+            phase_label_map = {
+                "median_days_ent_permit": "Entitlement to Permit",
+                "median_days_permit_completion": "Permit to Completion",
+                "median_days_ent_completion": "Entitlement to Completion",
+            }
+            df_yearly_timeline = None
+            if not df_jy.empty and "JURIS_CLEAN" in df_jy.columns and "YEAR" in df_jy.columns:
+                if all(c in df_jy.columns for c in TIMELINE_PHASE_DAYS_REQUIRED_YEARLY):
+                    cols_cities = [
+                        "JURISDICTION", "county", "income_delta_pct_change", "income_delta_positive",
+                        "population_delta_pct_change",
+                        "zhvi_pct_change", "zhvi_afford_ratio", "pct_afford",
+                        "zori_pct_change", "zori_afford_ratio", "zori_pct_afford", "population",
+                    ]
+                    cols_cities = [c for c in cols_cities if c in df_cities_timeline.columns]
+                    if cols_cities and not df_jy.empty:
+                        df_yearly_timeline = df_jy.merge(
+                            df_cities_timeline[cols_cities],
+                            left_on="JURIS_CLEAN", right_on="JURISDICTION", how="inner"
+                        )
+                        if "JURIS_CLEAN" in df_yearly_timeline.columns:
+                            df_yearly_timeline = df_yearly_timeline.drop(columns=["JURIS_CLEAN"])
+                        if df_yearly_timeline.empty:
+                            df_yearly_timeline = None
+            df_timeline_use = df_cities_timeline
+            df_yearly_timeline_use = df_yearly_timeline
             for phase_col, phase_label, phase_tag in wait_time_specs_timeline:
                 if phase_col not in df_timeline_use.columns:
                     continue
-                for comp_col, comp_label, comp_tag, yearly_prefix in comp_series_timeline:
-                    if comp_col not in df_timeline_use.columns:
+                yearly_y_col = phase_to_yearly_y.get(phase_col)
+                for pred_col, pred_label, pred_scale, inv_fun in timeline_outcomes:
+                    if pred_col not in df_timeline_use.columns:
                         continue
-                    if not any(f"{yearly_prefix}_{y}" in df_timeline_use.columns for y in permit_years_timeline):
+                    if pred_scale == "identity":
+                        valid = (
+                            df_timeline_use[pred_col].notna() & np.isfinite(df_timeline_use[pred_col].values) &
+                            df_timeline_use[phase_col].notna() & (df_timeline_use[phase_col] > 0)
+                        )
+                        if pred_col == "zori_afford_ratio":
+                            valid = valid & (df_timeline_use[pred_col] > 0)
+                    else:
+                        valid = (
+                            df_timeline_use[pred_col].notna() & (df_timeline_use[pred_col] > 0) &
+                            df_timeline_use[phase_col].notna() & (df_timeline_use[phase_col] > 0)
+                        )
+                    x_orig = df_timeline_use.loc[valid, pred_col].values.astype(float)
+                    y_orig = df_timeline_use.loc[valid, phase_col].values.astype(float)
+                    if len(x_orig) < 10:
                         continue
-                    df_totals = df_timeline_use[["county", phase_col, "population", comp_col]].rename(columns={comp_col: "units"})
-                    df_yearly = pd.concat([
-                        df_timeline_use[["county", phase_col, "population"]].assign(year=y, units=df_timeline_use[f"{yearly_prefix}_{y}"])
-                        for y in permit_years_timeline if f"{yearly_prefix}_{y}" in df_timeline_use.columns
-                    ], ignore_index=True)
-                    if len(df_totals) < 10:
+                    x_trans = x_orig if pred_scale == "identity" else np.log(x_orig)
+                    use_log_y = False  # Days (y) always linear for timeline charts; predictor scale (x) unchanged (OMNI: consistent)
+                    y_fit = np.log(y_orig) if use_log_y else y_orig
+                    X = sm.add_constant(x_trans)
+                    try:
+                        ols_fit = sm.OLS(y_fit, X).fit()
+                    except Exception:
                         continue
-                    regression_results = fit_two_part_with_ci(
-                        df_totals, df_yearly, phase_col, "units", permit_years_timeline, log_x=True,
-                        skipped_low_r2=charts_skipped_low_r2, chart_id=f"timeline_{phase_tag}_{comp_tag}",
-                        r2_diagnostics=all_r2_results,
-                        r2_x_label=f"Median days ({phase_label})",
-                        r2_y_label=comp_label,
-                        r2_geography=GEOGRAPHY_CITY,
+                    b0 = float(ols_fit.params[0])
+                    b1 = float(ols_fit.params[1])
+                    r2 = float(ols_fit.rsquared)
+                    _append_timeline_r2_diagnostics_row(
+                        all_r2_results,
+                        f"Median {phase_label_map[phase_col]} Days vs {pred_label}",
+                        GEOGRAPHY_CITY,
+                        r2,
                     )
-                    if not regression_results:
+                    if r2 < R2_THRESHOLD_TIMELINE_OLS_CHART:
+                        charts_skipped_low_r2.append((f"timeline_{phase_tag}_vs_{pred_col}", r2))
+                        print(f"  Skipping chart: OLS R² = {r2:.3f} < {R2_THRESHOLD_TIMELINE_OLS_CHART} for {phase_tag} vs {pred_col}")
                         continue
-                    regression_results["income_label"] = f"Median days ({phase_label})"
-                    regression_results["x_axis_filter_note"] = "cities with ≥10 projects"
-                    _plot_income_chart(
-                        regression_results,
-                        timeline_dir / f"timeline_{phase_tag}_{comp_tag}.png",
-                        title_suffix=comp_label,
-                        acs_year_range="",
-                        apr_year_range=f"{min(permit_years_timeline)}-{max(permit_years_timeline)}",
-                        data_label="Cities",
+                    use_hierarchical = use_log_y and (
+                        df_yearly_timeline_use is not None and yearly_y_col is not None
+                        and yearly_y_col in df_yearly_timeline_use.columns and pred_col in df_yearly_timeline_use.columns
                     )
-                    print(f"  Saved: timeline_{phase_tag}_{comp_tag}.png")
+                    intercept_samples, slope_samples, ci_method = _timeline_ci_samples(
+                        use_hierarchical, df_yearly_timeline_use, yearly_y_col, pred_col, permit_years_timeline,
+                        pred_scale, use_log_y, x_trans, y_fit, n_boot, phase_tag
+                    )
+                    x_min, x_max = float(np.nanmin(x_orig)), float(np.nanmax(x_orig))
+                    x_max = max(x_max, x_min + 1.0)
+                    if pred_scale == "identity" and x_min < 0:
+                        x_lim_left = min(x_min, 0) - 0.02 * (x_max - x_min)
+                    else:
+                        x_lim_left = x_min
+                    x_grid = np.linspace(x_lim_left, x_max, 100)
+                    x_grid_trans = x_grid if pred_scale == "identity" else np.log(x_grid)
+                    # Identity-scale predictors: scale to % for ZORI afford ratio (display only)
+                    if pred_col == "zori_afford_ratio":
+                        x_orig_plot = x_orig * 100
+                        x_grid_plot = x_grid * 100
+                        x_lim_left_plot = x_lim_left * 100
+                        x_max_plot = x_max * 100
+                    else:
+                        x_orig_plot = x_orig
+                        x_grid_plot = x_grid
+                        x_lim_left_plot = x_lim_left
+                        x_max_plot = x_max
+                    if use_log_y:
+                        y_line = np.exp(b0 + b1 * x_grid_trans)
+                    else:
+                        y_line = b0 + b1 * x_grid_trans
+                    y_plot_max = float(np.nanmax(y_orig)) * 1.1
+                    fig, ax = _fig_ax_square_plot()
+                    if use_log_y:
+                        y_min = max(1.0, float(np.nanmin(y_orig[y_orig > 0])) * 0.5) if np.any(y_orig > 0) else 1.0
+                        ax.set_yscale("log")
+                        ax.set_ylim(bottom=y_min, top=y_plot_max)
+                        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:,.0f}"))
+                    else:
+                        ax.set_ylim(bottom=0, top=y_plot_max)
+                        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:,.0f}"))
+                    if pred_scale == "log":
+                        ax.set_xscale("log")
+                        ax.set_xlim(left=x_lim_left, right=x_max)
+                        ticks_in_range = dollar_ticks_log = None
+                    if pred_scale == "identity":
+                        ax.set_xlim(left=x_lim_left_plot, right=x_max_plot)
+                    ax.scatter(x_orig_plot, y_orig, color=point_color, alpha=0.6, s=40, edgecolors="none",
+                               label=f"Cities with ≥10 projects total\n(n={len(x_orig)})")
+                    if "JURISDICTION" in df_timeline_use.columns:
+                        juris_names = df_timeline_use.loc[valid, "JURISDICTION"].values
+                        tl_anns = annotate_top_n_by_y(ax, x_orig_plot, y_orig, juris_names, n=3,
+                                                      label_cleanup=lambda s: str(s).replace(" COUNTY", ""))
+                        if tl_anns:
+                            _resolve_scatter_label_overlaps(ax, fig, tl_anns)
+                    ols_label = "OLS\n(log-normal)" if use_log_y else "OLS"
+                    ax.plot(x_grid_plot, y_line, color=line_color, linewidth=2, linestyle="-", label=ols_label)
+                    if intercept_samples is not None:
+                        if use_log_y:
+                            y_samp = np.exp(intercept_samples[:, None] + slope_samples[:, None] * x_grid_trans[None, :])
+                        else:
+                            y_samp = intercept_samples[:, None] + slope_samples[:, None] * x_grid_trans[None, :]
+                        y_lo = np.percentile(y_samp, 2.5, axis=0)
+                        y_hi = np.percentile(y_samp, 97.5, axis=0)
+                        ci_label = CI_LABEL_CREDIBLE_SMC if ci_method == "bayesian" else CI_LABEL_STATIONARY_MC
+                        ax.fill_between(x_grid_plot, y_lo, y_hi, color=ci_color, alpha=0.3, label=ci_label)
+                    r2_str = f"{r2:.2e}" if abs(r2) < 0.001 else f"{r2:.3f}"
+                    ax.plot([], [], " ", label=f"R² = {r2_str}")
+                    xlabel_base = pred_label if pred_scale == "identity" else f"{pred_label}, log scale"
+                    if pred_scale == "identity":
+                        ax.set_xlabel(xlabel_base)
+                        if _x_axis_should_use_percent_ticks(pred_col, pred_label):
+                            if x_min < 0:
+                                ax.xaxis.set_major_locator(MultipleLocator(10))
+                            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.0f}%"))
+                        else:
+                            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.2f}"))
+                    else:
+                        ax.set_xlabel(xlabel_base)
+                    ax.set_ylabel(f"Median {phase_label_map[phase_col]} Days" + (", log scale" if use_log_y else ""))
+                    ax.set_title('')
+                    leg = ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False)
+                    pred_tag = (
+                        "income_delta" if pred_col == "income_delta_pct_change"
+                        else ("population_delta" if pred_col == "population_delta_pct_change"
+                        else ("zhvi" if pred_col == "zhvi_pct_change"
+                        else ("zori" if pred_col == "zori_pct_change"
+                        else ("zori_afford" if pred_col == "zori_afford_ratio"
+                        else ("pct_afford" if pred_col == "pct_afford"
+                        else ("zori_pct_afford" if pred_col == "zori_pct_afford" else "afford")))))))
+                    out_path = timeline_dir / f"timeline_{phase_tag}_vs_{pred_tag}.png"
+                    fig.savefig(out_path, dpi=150, bbox_inches="tight", bbox_extra_artists=[leg], facecolor="white")
+                    plt.close(fig)
+                    print(f"  Saved: {out_path.name}")
+    
+            # Timeline two-part (all-cities; county in df_timeline_use retained in Step 11 output_cols).
+            if df_timeline_use is not None and permit_years_timeline and wait_time_specs_timeline and comp_series_timeline:
+                for phase_col, phase_label, phase_tag in wait_time_specs_timeline:
+                    if phase_col not in df_timeline_use.columns:
+                        continue
+                    for comp_col, comp_label, comp_tag, yearly_prefix in comp_series_timeline:
+                        if comp_col not in df_timeline_use.columns:
+                            continue
+                        if not any(f"{yearly_prefix}_{y}" in df_timeline_use.columns for y in permit_years_timeline):
+                            continue
+                        df_totals = df_timeline_use[["county", phase_col, "population", comp_col]].rename(columns={comp_col: "units"})
+                        df_yearly = pd.concat([
+                            df_timeline_use[["county", phase_col, "population"]].assign(year=y, units=df_timeline_use[f"{yearly_prefix}_{y}"])
+                            for y in permit_years_timeline if f"{yearly_prefix}_{y}" in df_timeline_use.columns
+                        ], ignore_index=True)
+                        if len(df_totals) < 10:
+                            continue
+                        regression_results = fit_two_part_with_ci(
+                            df_totals, df_yearly, phase_col, "units", permit_years_timeline, log_x=True,
+                            skipped_low_r2=charts_skipped_low_r2, chart_id=f"timeline_{phase_tag}_{comp_tag}",
+                            r2_diagnostics=all_r2_results,
+                            r2_x_label=f"Median days ({phase_label})",
+                            r2_y_label=comp_label,
+                            r2_geography=GEOGRAPHY_CITY,
+                        )
+                        if not regression_results:
+                            continue
+                        regression_results["income_label"] = f"Median days ({phase_label})"
+                        regression_results["x_axis_filter_note"] = "cities with ≥10 projects"
+                        _plot_income_chart(
+                            regression_results,
+                            timeline_dir / f"timeline_{phase_tag}_{comp_tag}.png",
+                            title_suffix=comp_label,
+                            acs_year_range="",
+                            apr_year_range=f"{min(permit_years_timeline)}-{max(permit_years_timeline)}",
+                            data_label="Cities",
+                        )
+                        print(f"  Saved: timeline_{phase_tag}_{comp_tag}.png")
+    else:
+        print("\n" + "="*70)
+        print("CONSTRUCTION TIMELINE: skipped (ENABLE_CONSTRUCTION_TIMELINE=False).")
+        print("  APR entitlement / BP / CO dates are not treated as reliable for modeling.")
+        print("="*70)
+
 
     # =============================================================================
     # Step 12: Bayesian Linear Regression with Sequential Updating (Counties Only)
@@ -4469,10 +5465,11 @@ if __name__ == "__main__":
     # Run MLE two-part regressions: one loop over DR_TYPE × geography × category (OMNI: no repetition)
     # DR_TYPE specs: (prefix, title label); category specs: (suffix, label). db_owner excluded (insufficient data, models disperse).
     dr_specs = [
-        ('DB', 'Deed Restricted Density Bonus'),
-        ('PROJ_DB', 'Density Bonus'),
-        ('INC', 'Deed Restricted Non-Bonus Inclusionary'),
+        ('DB', 'Multifamily Deed Restricted Density Bonus'),
+        ('PROJ_DB', 'Multifamily Density Bonus'),
+        ('INC', 'Multifamily Deed Restricted Non-Bonus Inclusionary'),
         ('total_owner', 'For-Sale'),
+        ('mf_owner', 'Multifamily For-Sale'),
         ('TOTAL', 'Net Housing'),
         ('TOTAL_MF', 'Net Multifamily Housing'),
     ]
@@ -4480,6 +5477,11 @@ if __name__ == "__main__":
     cat_specs = [('CO', 'Completions'), ('BP', 'Building Permits')]
     # Labels for x-axis: income, ZHVI/ZORI % change, afford ratios, real dollar change / income
     x_var_labels = {
+        'income_delta_pct_change': '% change in real median household income (2014–2018 → 2020–2024 ACS, CPI-deflated)',
+        'population_delta_pct_change': (
+            '% change in place population (2014–2018 → 2020–2024 ACS, same geography)\n'
+            '100 × (pop₂₀₂₀₋₂₄ − pop₂₀₁₄₋₁₈) / pop₂₀₁₄₋₁₈'
+        ),
         'place_income': 'City Median Household Income',
         'zhvi_pct_change': ZHVI_PCT_LABEL,
         'zhvi_afford_ratio': AFFORD_X_LABEL,
@@ -4492,7 +5494,8 @@ if __name__ == "__main__":
 
     # City predictor specs: (x_col, file_tag, print_title, x_axis_filter_note, require_msa). One loop over specs then dr_specs then cat_specs.
     city_predictor_specs = [
-        ('place_income', 'income', 'log(place_income)', None, False),
+        ('income_delta_pct_change', 'income_delta', '% change in real median household income', None, False),
+        ('population_delta_pct_change', 'population_delta', '% change in place population', None, False),
         ('zhvi_pct_change', 'zhvi', 'ZHVI % change', None, False),
         ('zhvi_afford_ratio', 'afford', 'affordability ratio', 'Metro Regions only', True),
         ('pct_afford', 'pct_afford', 'ZHVI real $ change / income', 'Metro Regions only', True),
@@ -4500,10 +5503,30 @@ if __name__ == "__main__":
         ('zori_afford_ratio', 'zori_afford', 'ZORI rent/income ratio', 'Metro Regions only', True),
         ('zori_pct_afford', 'zori_pct_afford', 'ZORI annualized real $ change / income', 'Metro Regions only', True),
     ]
-    # Dynamic sets for city MFH sub-variants (Task 4)
-    la_even_zips = {z for z in df_apr_all.loc[df_apr_all['JURIS_CLEAN'].str.upper() == 'LOS ANGELES', 'zipcode'].dropna().astype(str).unique() if z[-1] in '02468'} if 'zipcode' in df_apr_all.columns else set()
-    vowel_cities = {j for j in df_final.loc[df_final['geography_type'] == 'City', 'JURISDICTION'].dropna().unique() if j[0].upper() in VOWELS}
-    city_subvariants = CITY_MFH_SUBVARIANTS + [(vowel_cities, '_city_cons', 'excluding cities beginning with a vowel')]
+    # Dynamic sets for city MFH sub-variants (hash holdout ~20%)
+    hash_exclude_cities = {
+        j
+        for j in df_final.loc[df_final['geography_type'] == 'City', 'JURISDICTION'].dropna().unique()
+        if hash(j) % HOLDOUT_MODULUS == 0
+    }
+    xsf_city_mask = (
+        (df_final['geography_type'] == 'City')
+        & ~df_final['JURISDICTION'].str.upper().isin({c.upper() for c in CITY_XSF_EXCLUDE})
+    )
+    hash_exclude_xsf_cities = {
+        j
+        for j in df_final.loc[xsf_city_mask, 'JURISDICTION'].dropna().unique()
+        if hash(j) % HOLDOUT_MODULUS == 0
+    }
+    city_subvariants = [
+        (CITY_XSF_EXCLUDE, '_xsf', 'excl. SF'),
+        (hash_exclude_cities, '_city_hash', '- # 20%'),
+        (
+            CITY_XSF_EXCLUDE | hash_exclude_xsf_cities,
+            '_xsf_city_hash',
+            'excl. SF - # 20%',
+        ),
+    ]
     for x_col, file_tag, print_title, x_axis_filter_note, require_msa in city_predictor_specs:
         if x_col not in df_final.columns:
             continue
@@ -4519,7 +5542,7 @@ if __name__ == "__main__":
         if len(df_geo) < 10:
             continue
         for dr_type, type_label in dr_specs:
-            variants = [(None, '', None)] + city_subvariants if dr_type == 'TOTAL_MF' else [(None, '', None)]
+            variants = [(None, '', None)] + city_subvariants if dr_type in ('TOTAL_MF', 'mf_owner') else [(None, '', None)]
             dr_cols = [c for c in df_final.columns if c.startswith(f'{dr_type}_')]
             dr_years = sorted(set(int(c.split('_')[-1]) for c in dr_cols if c.split('_')[-1].isdigit()))
             print("\n" + "="*70)
@@ -4532,9 +5555,10 @@ if __name__ == "__main__":
                 df_var = df_geo if exclude is None else df_geo[~df_geo['JURISDICTION'].str.upper().isin({c.upper() for c in exclude})].copy()
                 if len(df_var) < 10:
                     continue
-                filter_note = f"{x_axis_filter_note}; {var_label}" if (x_axis_filter_note and var_label) else (var_label or x_axis_filter_note)
+                filter_note = x_axis_filter_note
+                geo_label_run = f'Cities {var_label}' if var_label else 'Cities'
                 print(f"\n  --- {cat_label} ({dr_type}_{cat_suffix}){var_suffix or ''} ---")
-                run_one_regression(df_var, dr_type, type_label, 'Cities', x_col, file_tag + (var_suffix or ''),
+                run_one_regression(df_var, dr_type, type_label, geo_label_run, x_col, file_tag + (var_suffix or ''),
                                   cat_suffix, cat_label, dr_years, output_dir, x_var_labels, charts_skipped_low_r2,
                                   label_col='JURISDICTION', x_axis_filter_note=filter_note,
                                   r2_diagnostics=all_r2_results, r2_geography=_geo_label(GEOGRAPHY_CITY, var_label))
@@ -4555,14 +5579,16 @@ if __name__ == "__main__":
     # Rate-on-rate: x = all-housing completions (net of demolitions); axis labels say "Net"
     # DB_CO_total = DR (income-tier), PROJ_DB_CO_total = project total
     rate_on_rate_specs = [
-        ('TOTAL_MF_CO', 'DB_CO', 'Net Multifamily Completions', 'Deed Restricted Density Bonus Completions', 'net_mf_co_to_dr_db_co'),
-        ('TOTAL_MF_CO', 'PROJ_DB_CO', 'Net Multifamily Completions', 'Density Bonus Completions', 'net_mf_co_to_db_co'),
+        ('TOTAL_MF_CO', 'DB_CO', 'Net Multifamily Completions', 'Multifamily Deed Restricted Density Bonus Completions', 'net_mf_co_to_dr_db_co'),
+        ('TOTAL_MF_CO', 'PROJ_DB_CO', 'Net Multifamily Completions', 'Multifamily Density Bonus Completions', 'net_mf_co_to_db_co'),
         ('TOTAL_MF_CO', 'total_owner_CO', 'Net Multifamily Completions', 'Owner Completions', 'net_mf_co_to_owner_co'),
-        ('TOTAL_MF_CO', 'VLOW_LOW_CO', 'Net Multifamily Completions', '(Very low + Low) Income Completions', 'net_mf_co_to_vlow_low_co'),
+        ('TOTAL_MF_CO', 'mf_owner_CO', 'Net Multifamily Completions', 'Multifamily Owner Completions', 'net_mf_co_to_mf_owner_co'),
+        ('TOTAL_MF_CO', 'VLOW_LOW_CO', 'Net Multifamily Completions', 'Multifamily (Very low + Low) Income Completions', 'net_mf_co_to_vlow_low_co'),
         ('TOTAL_MF_CO', 'MOD_CO', 'Net Multifamily Completions', MODERATE_INCOME_COMPLETIONS_LABEL, 'net_mf_co_to_mod_co'),
-        ('TOTAL_MF_BP', 'DB_BP', 'Net Multifamily Building Permits', 'Deed Restricted Density Bonus Permits', 'net_mf_bp_to_dr_db_bp'),
-        ('TOTAL_MF_BP', 'PROJ_DB_BP', 'Net Multifamily Building Permits', 'Density Bonus Permits', 'net_mf_bp_to_db_bp'),
+        ('TOTAL_MF_BP', 'DB_BP', 'Net Multifamily Building Permits', 'Multifamily Deed Restricted Density Bonus Permits', 'net_mf_bp_to_dr_db_bp'),
+        ('TOTAL_MF_BP', 'PROJ_DB_BP', 'Net Multifamily Building Permits', 'Multifamily Density Bonus Permits', 'net_mf_bp_to_db_bp'),
         ('TOTAL_MF_BP', 'total_owner_BP', 'Net Multifamily Building Permits', 'Owner Permits', 'net_mf_bp_to_owner_bp'),
+        ('TOTAL_MF_BP', 'mf_owner_BP', 'Net Multifamily Building Permits', 'Multifamily Owner Permits', 'net_mf_bp_to_mf_owner_bp'),
     ]
     city_ror_variants = [(None, '', None)] + city_subvariants
 
@@ -4593,8 +5619,8 @@ if __name__ == "__main__":
             geography_ror = _geo_label(GEOGRAPHY_CITY, ror_label)
             reg_ror = f"{y_label} (per 1000 pop) vs {x_label} (per 1000 pop)"
             x_range_ror = np.linspace(x_pred.min(), x_pred.max(), 100)
+            ols_r2_line = _ols_r2_positive_subset_match_export(None, mle_result['x'], mle_result['y_rate'], None)
             if mle_result['mcfadden_r2'] < R2_THRESHOLD_TWOPART_MCFADDEN_CHART:
-                ols_r2_line = _ols_r2_positive_subset_match_export(None, mle_result['x'], mle_result['y_rate'], None)
                 _append_two_part_r2_diagnostics_row(
                     all_r2_results, reg_ror, geography_ror, mle_result, None,
                     mle_result['x'], mle_result['y_rate'], x_range_ror, None, None,
@@ -4605,15 +5631,25 @@ if __name__ == "__main__":
                     f"skipping CI and chart for {ror_file_tag}; OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_line)}"
                 )
                 continue
-            ols_r2_line = _ols_r2_positive_subset_match_export(None, mle_result['x'], mle_result['y_rate'], None)
+            if not np.isfinite(ols_r2_line) or ols_r2_line < R2_OLS_POSITIVE_THRESHOLD:
+                _append_two_part_r2_diagnostics_row(
+                    all_r2_results, reg_ror, geography_ror, mle_result, None,
+                    mle_result['x'], mle_result['y_rate'], x_range_ror, None, None,
+                )
+                charts_skipped_low_r2.append((ror_file_tag, ols_r2_line))
+                print(
+                    f"    OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_line)} < {R2_OLS_POSITIVE_THRESHOLD}, "
+                    f"skipping CI and chart for {ror_file_tag}; McFadden's R² = {mle_result['mcfadden_r2']:.3f}"
+                )
+                continue
             print(
                 f"    Two-step MLE: slope(positive part)={mle_result['slope_mle']:.4f}, "
                 f"McFadden R²={mle_result['mcfadden_r2']:.4f}, OLS R² (y>0)={_fmt_ols_r2(ols_r2_line)}"
             )
             print(f"    N total={mle_result['n_total']}, N positive={mle_result['n_pos']}, N zero={mle_result['n_zero']}")
-            ci_result = ci_two_part(x_pred, y_rate_v, x_range=x_range_ror)
-            mle_y_ror = mle_result['predict'](x_range_ror)
-            ci_lo, ci_hi, ci_m, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(ci_result, x_range_ror, mle_y=mle_y_ror, mle_result=mle_result)
+            ci_result = ci_two_part(mle_result, x_pred, y_rate_v)
+            boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(ci_result, x_range_ror)
+            ci_m = 'bayesian' if bayes_mean is not None else None
             ols_r2_ror = _append_two_part_r2_diagnostics_row(
                 all_r2_results, reg_ror, geography_ror, mle_result, None,
                 mle_result['x'], mle_result['y_rate'], x_range_ror, bayes_mean, ci_m,
@@ -4621,16 +5657,16 @@ if __name__ == "__main__":
             output_path = Path(__file__).resolve().parent / f'{ror_file_tag}.png'
             city_labels_ror = (df_ror.loc[valid, 'JURISDICTION'].values
                                if 'JURISDICTION' in df_ror.columns else None)
-            x_label_chart = f'{x_label} (per 1000 pop)\n{ror_label}' if ror_label else f'{x_label} (per 1000 pop)'
+            x_label_chart = f'{x_label} (per 1000 pop)'
+            data_label_ror = f'Cities {ror_label}' if ror_label else 'Cities'
             plot_two_part_chart(
                 x_scatter=mle_result['x'], y_scatter=mle_result['y_rate'],
                 x_line=x_range_ror, mle_y=mle_result['predict'](x_range_ror),
                 output_path=output_path,
                 x_label=x_label_chart, y_label=f'{y_label} (per 1000 pop)',
-                data_label='Cities', apr_year_range='',
+                data_label=data_label_ror, apr_year_range='',
                 r2=mle_result['mcfadden_r2'], ols_r2=ols_r2_ror,
-                ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_m,
-                freq_ci_lo=freq_ci_lo, freq_ci_hi=freq_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
+                boot_ci_lo=boot_ci_lo, boot_ci_hi=boot_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
                 bayes_mean=bayes_mean,
                 labels=city_labels_ror)
 
@@ -4654,6 +5690,7 @@ if __name__ == "__main__":
     df_apr_zip = df_apr_db_inc[valid_zip_mask].copy()
     print(f"  APR rows with valid CA ZIP: {len(df_apr_zip):,} / {len(df_apr_db_inc):,}")
     
+    df_zip_for_pca = None
     if len(df_apr_zip) > 0:
         # Efficient aggregation (OMNI: vectorized masks, single merge)
         db_mask = df_apr_zip['DR_TYPE_CLEAN'] == 'DB'
@@ -4664,6 +5701,8 @@ if __name__ == "__main__":
         owner_zip_slice = None
         owner_net_zip_co = None
         owner_net_zip_bp = None
+        mf_owner_net_zip_co = None
+        mf_owner_net_zip_bp = None
         if "is_owner" in df_apr_all.columns and "zipcode" in df_apr_all.columns:
             _z = df_apr_all["zipcode"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(5)
             _zok = df_apr_all["is_owner"] & (_z.str.len() == 5)
@@ -4678,6 +5717,15 @@ if __name__ == "__main__":
                 owner_net_zip_bp = _sub.groupby("zipcode")["units_BP"].sum().reset_index()
                 owner_net_zip_bp.columns = ["zipcode", "total_owner_BP"]
                 owner_zip_slice = _sub  # reuse for yearly aggregation below
+            _zmf = df_apr_all["zipcode"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(5)
+            _mf_ok = df_apr_all["is_owner"] & mf_mask_all & (_zmf.str.len() == 5)
+            if _mf_ok.any():
+                _smf = df_apr_all.loc[_mf_ok, ["units_CO", "units_BP"]].copy()
+                _smf["zipcode"] = _zmf[_mf_ok].values
+                mf_owner_net_zip_co = _smf.groupby("zipcode")["units_CO"].sum().reset_index()
+                mf_owner_net_zip_co.columns = ["zipcode", "mf_owner_CO"]
+                mf_owner_net_zip_bp = _smf.groupby("zipcode")["units_BP"].sum().reset_index()
+                mf_owner_net_zip_bp.columns = ["zipcode", "mf_owner_BP"]
 
         # Aggregate each category by zipcode: DR (income-tier) and project-total
         # Helper: groupby sum with column rename
@@ -4692,16 +5740,21 @@ if __name__ == "__main__":
             _zip_agg(db_mask, 'units_CO', 'dr_db_CO'),
             _zip_agg(db_mask, 'proj_units_CO', 'total_db_CO'),
             (owner_net_zip_co if owner_net_zip_co is not None else _zip_agg(owner_mask, 'units_CO', 'total_owner_CO')),
+            (mf_owner_net_zip_co if mf_owner_net_zip_co is not None else None),
             _zip_agg(db_mask & owner_mask, 'units_CO', 'total_db_owner_CO'),
             _zip_agg(None, 'units_VLOW_LOW_CO', 'vlow_low_CO'),
             _zip_agg(None, 'units_MOD_CO', 'mod_CO'),
         ]
+        zip_agg_parts = [p for p in zip_agg_parts if p is not None]
         all_zips = pd.DataFrame({'zipcode': df_apr_zip['zipcode'].unique()})
         df_zip = all_zips
         for agg_part in zip_agg_parts:
             df_zip = df_zip.merge(agg_part, on='zipcode', how='left')
-        for col in ['total_CO', 'dr_db_CO', 'total_db_CO', 'total_owner_CO', 'total_db_owner_CO', 'vlow_low_CO', 'mod_CO']:
-            df_zip[col] = df_zip[col].fillna(0).astype(int)
+        for col in ['total_CO', 'dr_db_CO', 'total_db_CO', 'total_owner_CO', 'mf_owner_CO', 'total_db_owner_CO', 'vlow_low_CO', 'mod_CO']:
+            if col in df_zip.columns:
+                df_zip[col] = df_zip[col].fillna(0).astype(int)
+            elif col == 'mf_owner_CO':
+                df_zip['mf_owner_CO'] = 0
         # Net all-housing completions (CO minus demolitions) by ZIP from df_apr_all; same concept as city TOTAL_CO
         if "zipcode" in df_apr_all.columns and "units_CO" in df_apr_all.columns:
             z_norm = df_apr_all["zipcode"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(5)
@@ -4757,14 +5810,20 @@ if __name__ == "__main__":
                 _zip_agg(db_mask, 'proj_units_BP', 'total_db_BP'),
                 (owner_net_zip_bp if owner_net_zip_bp is not None else _zip_agg(owner_mask, 'units_BP', 'total_owner_BP')),
             ]
+            if mf_owner_net_zip_bp is not None:
+                bp_agg_parts.append(mf_owner_net_zip_bp)
             for agg_part in bp_agg_parts:
                 df_zip = df_zip.merge(agg_part, on="zipcode", how="left")
-            for c in ["dr_db_BP", "total_db_BP", "total_owner_BP"]:
-                df_zip[c] = df_zip[c].fillna(0).astype(int)
+            for c in ["dr_db_BP", "total_db_BP", "total_owner_BP", "mf_owner_BP"]:
+                if c in df_zip.columns:
+                    df_zip[c] = df_zip[c].fillna(0).astype(int)
+                elif c == "mf_owner_BP":
+                    df_zip["mf_owner_BP"] = 0
         else:
             df_zip["dr_db_BP"] = 0
             df_zip["total_db_BP"] = 0
             df_zip["total_owner_BP"] = 0
+            df_zip["mf_owner_BP"] = 0
         print(f"  ZIPs with data: {len(df_zip)}")
         print(f"  ZIPs with total_CO > 0: {(df_zip['total_CO'] > 0).sum()}")
         print(f"  ZIPs with dr_db_CO > 0: {(df_zip['dr_db_CO'] > 0).sum()}")
@@ -4783,7 +5842,6 @@ if __name__ == "__main__":
             # Join ACS income to ZIP aggregates (ZIP ≈ ZCTA for most cases)
             df_zip = df_zip.merge(df_acs_zcta, left_on='zipcode', right_on='zcta', how='left')
             df_zip = df_zip.drop(columns=['zcta'], errors='ignore')
-            df_zip["median_income"] = _acs_income_to_real_2024(df_zip["median_income"].values, _acs_ifac)
             n_income = df_zip['median_income'].notna().sum()
             print(f"  ZIPs with ACS income: {n_income}")
             if n_income < 20:
@@ -4798,6 +5856,8 @@ if __name__ == "__main__":
         ).reset_index()
         zip_cnty.columns = ['zipcode', 'cnty_clean']
         zip_cnty['county'] = zip_cnty['cnty_clean'].map(ca_county_name_to_fips)
+        _zc_zip = zip_cnty['zipcode'].astype(str).str.replace(r'\D', '', regex=True).str.zfill(5)
+        sf_zips_for_xsf = set(_zc_zip[zip_cnty['cnty_clean'] == 'SAN FRANCISCO'].values)
         df_zip = df_zip.merge(zip_cnty[['zipcode', 'county']], on='zipcode', how='left')
         if df_county is not None and 'county' in df_county.columns and 'county_income' in df_county.columns:
             df_zip = df_zip.merge(
@@ -4916,6 +5976,8 @@ if __name__ == "__main__":
             # Owner net by (zipcode, year) from all-housing extract when TENURE available (reuse owner_zip_slice)
             owner_zy_co = None
             owner_zy_bp = None
+            mf_owner_zy_co = None
+            mf_owner_zy_bp = None
             if owner_zip_slice is not None and "YEAR" in owner_zip_slice.columns:
                 _os = owner_zip_slice.copy()
                 _os["year"] = pd.to_numeric(_os["YEAR"], errors="coerce")
@@ -4923,6 +5985,17 @@ if __name__ == "__main__":
                 owner_zy_co.columns = ["zipcode", "year", "total_owner_CO"]
                 owner_zy_bp = _os.groupby(["zipcode", "year"])["units_BP"].sum().reset_index()
                 owner_zy_bp.columns = ["zipcode", "year", "total_owner_BP"]
+            if "is_owner" in df_apr_all.columns and "zipcode" in df_apr_all.columns and "YEAR" in df_apr_all.columns:
+                _zmf = df_apr_all["zipcode"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(5)
+                _mf_ok = df_apr_all["is_owner"] & mf_mask_all & (_zmf.str.len() == 5)
+                if _mf_ok.any():
+                    _smf = df_apr_all.loc[_mf_ok, ["units_CO", "units_BP", "YEAR"]].copy()
+                    _smf["zipcode"] = _zmf[_mf_ok].values
+                    _smf["year"] = pd.to_numeric(_smf["YEAR"], errors="coerce")
+                    mf_owner_zy_co = _smf.groupby(["zipcode", "year"])["units_CO"].sum().reset_index()
+                    mf_owner_zy_co.columns = ["zipcode", "year", "mf_owner_CO"]
+                    mf_owner_zy_bp = _smf.groupby(["zipcode", "year"])["units_BP"].sum().reset_index()
+                    mf_owner_zy_bp.columns = ["zipcode", "year", "mf_owner_BP"]
             zy_parts = [
                 _zy_agg(None, "units_CO", "total_CO"),
                 _zy_agg(db_m, "units_CO", "dr_db_CO"),
@@ -4935,6 +6008,11 @@ if __name__ == "__main__":
             zip_yearly = zy_parts[0]
             for zy_part in zy_parts[1:]:
                 zip_yearly = zip_yearly.merge(zy_part, on=["zipcode", "year"], how="left")
+            if mf_owner_zy_co is not None:
+                zip_yearly = zip_yearly.merge(mf_owner_zy_co, on=["zipcode", "year"], how="left")
+                zip_yearly["mf_owner_CO"] = zip_yearly["mf_owner_CO"].fillna(0).astype(int)
+            else:
+                zip_yearly["mf_owner_CO"] = 0
             for c in ["total_CO", "dr_db_CO", "total_db_CO", "total_owner_CO", "total_db_owner_CO", "vlow_low_CO", "mod_CO"]:
                 if c in zip_yearly.columns:
                     zip_yearly[c] = zip_yearly[c].fillna(0).astype(int)
@@ -4963,6 +6041,32 @@ if __name__ == "__main__":
                 zip_yearly["net_BP"] = zip_yearly["net_BP"].fillna(0).astype(int)
             else:
                 zip_yearly["net_BP"] = 0
+            # Net MF (5+ UNIT_CAT) CO/BP by (zipcode, year): same mask as df_zip net_MF_* (~5504), not is_owner mf_owner_zy_*.
+            # Per-ZIP sum over years matches df_zip when YEAR is non-null for all MF rows in df_apr_all.
+            if (
+                "zipcode" in df_apr_all.columns
+                and "YEAR" in df_apr_all.columns
+                and "units_CO" in df_apr_all.columns
+                and "units_BP" in df_apr_all.columns
+            ):
+                z_norm_mf = df_apr_all["zipcode"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(5)
+                z_valid_mf = z_norm_mf.str.len() == 5
+                combined_mf = mf_mask_all & z_valid_mf
+                if combined_mf.any():
+                    sub_mf = df_apr_all.loc[combined_mf, ["units_CO", "units_BP", "YEAR"]].copy()
+                    sub_mf["zipcode"] = z_norm_mf[combined_mf].values
+                    sub_mf["year"] = pd.to_numeric(sub_mf["YEAR"], errors="coerce")
+                    net_mf_y = sub_mf.groupby(["zipcode", "year"])[["units_CO", "units_BP"]].sum().reset_index()
+                    net_mf_y.columns = ["zipcode", "year", "net_MF_CO", "net_MF_BP"]
+                    zip_yearly = zip_yearly.merge(net_mf_y, on=["zipcode", "year"], how="left")
+                    zip_yearly["net_MF_CO"] = zip_yearly["net_MF_CO"].fillna(0).astype(int)
+                    zip_yearly["net_MF_BP"] = zip_yearly["net_MF_BP"].fillna(0).astype(int)
+                else:
+                    zip_yearly["net_MF_CO"] = 0
+                    zip_yearly["net_MF_BP"] = 0
+            else:
+                zip_yearly["net_MF_CO"] = 0
+                zip_yearly["net_MF_BP"] = 0
             # BP by category by year (DR + project-total + owner) from df_apr_zip or owner net from df_apr_all
             if "units_BP" in df_apr_zip.columns and "YEAR" in df_apr_zip.columns:
                 bp_zy_parts = [
@@ -4972,12 +6076,18 @@ if __name__ == "__main__":
                 ]
                 for zy_part in bp_zy_parts:
                     zip_yearly = zip_yearly.merge(zy_part, on=["zipcode", "year"], how="left")
+                if mf_owner_zy_bp is not None:
+                    zip_yearly = zip_yearly.merge(mf_owner_zy_bp, on=["zipcode", "year"], how="left")
+                    zip_yearly["mf_owner_BP"] = zip_yearly["mf_owner_BP"].fillna(0).astype(int)
+                else:
+                    zip_yearly["mf_owner_BP"] = 0
                 for c in ["dr_db_BP", "total_db_BP", "total_owner_BP"]:
                     zip_yearly[c] = zip_yearly[c].fillna(0).astype(int)
             else:
                 zip_yearly["dr_db_BP"] = 0
                 zip_yearly["total_db_BP"] = 0
                 zip_yearly["total_owner_BP"] = 0
+                zip_yearly["mf_owner_BP"] = 0
             zip_cnty_norm = zip_cnty[["zipcode", "county"]].copy()
             zip_cnty_norm["zipcode"] = zip_cnty_norm["zipcode"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(5)
             zip_yearly = zip_yearly.merge(zip_cnty_norm, on="zipcode", how="left")
@@ -5001,16 +6111,17 @@ if __name__ == "__main__":
             ('net_BP', 'Net Building Permits'),
             ('net_MF_CO', 'Net Multifamily Completions'),
             ('net_MF_BP', 'Net Multifamily Building Permits'),
-            ('dr_db_CO', 'Deed Restricted Density Bonus Completions'),
-            ('total_db_CO', 'Density Bonus Completions'),
+            ('dr_db_CO', 'Multifamily Deed Restricted Density Bonus Completions'),
+            ('total_db_CO', 'Multifamily Density Bonus Completions'),
             ('total_owner_CO', 'Owner Completions'),
-            ('vlow_low_CO', '(Very low + Low) Income Completions'),
+            ('mf_owner_CO', 'Multifamily Owner Completions'),
+            ('vlow_low_CO', 'Multifamily (Very low + Low) Income Completions'),
             ('mod_CO', MODERATE_INCOME_COMPLETIONS_LABEL),
         ]
         # (x_col, x_tag, x_axis_label, use_log_x, x_tick_dollar, require_msa) — one loop, no branch by predictor type
         # For ZIP ref-income predictors, enforce Metro Regions only (msa_income required), matching city policy.
         zip_predictor_specs = [
-            ('median_income', 'income', "ZIP Median household income (ACS 2019-2023), log scale", True, True, False),
+            ('median_income', 'income', "ZIP Median household income (ACS 2020-2024), log scale", True, True, False),
             ('zhvi_pct_change', 'zhvi', ZHVI_PCT_LABEL, False, False, False),
             ('zhvi_afford_ratio', 'afford', AFFORD_X_LABEL_ZIP, False, False, True),
             ('pct_afford', 'pct_afford', PCT_AFFORD_X_LABEL_ZIP, False, False, True),
@@ -5026,29 +6137,41 @@ if __name__ == "__main__":
             'zori_afford_ratio': ZORI_AFFORD_X_LABEL_ZIP,
             'zori_pct_afford': ZORI_PCT_AFFORD_X_LABEL_ZIP,
         }
+        df_zip_for_pca = df_zip.copy()
         
         # ZIP regressions: two-part rate (per 1000 pop), same as city. Population from ACS ZCTA.
         if 'population' not in df_zip.columns or (df_zip['population'].notna() & (df_zip['population'] > 0)).sum() < 20:
             print("  WARNING: Insufficient ZIP population (ACS ZCTA); skipping ZIP rate regressions.")
         else:
             print("  ZIP rate regressions: CI band = Hierarchical Bayes (year + county) when ZIP-year data available; else pooled two-part.")
-            all_odd_zips = {z for z in df_zip['zipcode'].astype(str) if z[-1] in '13579'}
+            # Holdout uses str ZIPs → hash() is CPython string hashing (subset stable within a run; can differ across processes unless PYTHONHASHSEED is fixed). For reproducible holdout across runs, hash numeric codes instead: drop .astype(str) in the comprehensions below when zipcode is integer-like.
+            hash_exclude_zips = {
+                z for z in df_zip['zipcode'].astype(str) if hash(z) % HOLDOUT_MODULUS == 0
+            }
+            non_sf_zips = set(df_zip['zipcode'].astype(str).str.zfill(5)) - sf_zips_for_xsf
+            hash_exclude_xsf_zips = {z for z in non_sf_zips if hash(z) % HOLDOUT_MODULUS == 0}
             zip_mfh_subvariants = [
                 (None, '', None),
-                (ZIP_XSF_EXCLUDE, '_xsf', f"excluding Zip Codes {', '.join(sorted(ZIP_XSF_EXCLUDE))}"),
-                (la_even_zips, '_xla', 'excluding even-numbered City of Los Angeles zip codes'),
-                (all_odd_zips, '_zip_odd', 'excluding odd-numbered zip codes'),
+                (sf_zips_for_xsf, '_xsf', 'excl. SF Co.'),
+                (hash_exclude_zips, '_zip_hash', '- # 20%'),
+                (
+                    sf_zips_for_xsf | hash_exclude_xsf_zips,
+                    '_xsf_zip_hash',
+                    'excl. SF Co. - # 20%',
+                ),
             ]
             # Rate-on-rate at ZIP: outer loop over zip_mfh_subvariants; net MF CO/BP per 1000 → DB CO / Owner CO per 1000
             zip_rate_on_rate_specs = [
-                ('net_MF_CO', 'dr_db_CO', 'Net Multifamily Completions', 'Deed Restricted Density Bonus Completions', 'net_mf_co_to_dr_db_co'),
-                ('net_MF_CO', 'total_db_CO', 'Net Multifamily Completions', 'Density Bonus Completions', 'net_mf_co_to_db_co'),
+                ('net_MF_CO', 'dr_db_CO', 'Net Multifamily Completions', 'Multifamily Deed Restricted Density Bonus Completions', 'net_mf_co_to_dr_db_co'),
+                ('net_MF_CO', 'total_db_CO', 'Net Multifamily Completions', 'Multifamily Density Bonus Completions', 'net_mf_co_to_db_co'),
                 ('net_MF_CO', 'total_owner_CO', 'Net Multifamily Completions', 'Owner Completions', 'net_mf_co_to_owner_co'),
-                ('net_MF_CO', 'vlow_low_CO', 'Net Multifamily Completions', '(Very low + Low) Income Completions', 'net_mf_co_to_vlow_low_co'),
+                ('net_MF_CO', 'mf_owner_CO', 'Net Multifamily Completions', 'Multifamily Owner Completions', 'net_mf_co_to_mf_owner_co'),
+                ('net_MF_CO', 'vlow_low_CO', 'Net Multifamily Completions', 'Multifamily (Very low + Low) Income Completions', 'net_mf_co_to_vlow_low_co'),
                 ('net_MF_CO', 'mod_CO', 'Net Multifamily Completions', MODERATE_INCOME_COMPLETIONS_LABEL, 'net_mf_co_to_mod_co'),
-                ('net_MF_BP', 'dr_db_BP', 'Net Multifamily Building Permits', 'Deed Restricted Density Bonus Permits', 'net_mf_bp_to_dr_db_bp'),
-                ('net_MF_BP', 'total_db_BP', 'Net Multifamily Building Permits', 'Density Bonus Permits', 'net_mf_bp_to_db_bp'),
+                ('net_MF_BP', 'dr_db_BP', 'Net Multifamily Building Permits', 'Multifamily Deed Restricted Density Bonus Permits', 'net_mf_bp_to_dr_db_bp'),
+                ('net_MF_BP', 'total_db_BP', 'Net Multifamily Building Permits', 'Multifamily Density Bonus Permits', 'net_mf_bp_to_db_bp'),
                 ('net_MF_BP', 'total_owner_BP', 'Net Multifamily Building Permits', 'Owner Permits', 'net_mf_bp_to_owner_bp'),
+                ('net_MF_BP', 'mf_owner_BP', 'Net Multifamily Building Permits', 'Multifamily Owner Permits', 'net_mf_bp_to_mf_owner_bp'),
             ]
             for exclude_zips, suffix, exclude_label in zip_mfh_subvariants:
                 df_use = df_zip if exclude_zips is None else df_zip[~df_zip['zipcode'].astype(str).isin({str(z) for z in exclude_zips})].copy()
@@ -5074,8 +6197,8 @@ if __name__ == "__main__":
                     geography_zip = _geo_label(GEOGRAPHY_ZIP, exclude_label)
                     reg_zip_ror = f"{y_label} (per 1000 pop) vs {x_label} (per 1000 pop)"
                     x_range_ror = np.linspace(x_pred.min(), x_pred.max(), 100)
+                    ols_r2_line = _ols_r2_positive_subset_match_export(None, mle_result['x'], mle_result['y_rate'], None)
                     if mle_result['mcfadden_r2'] < R2_THRESHOLD_TWOPART_MCFADDEN_CHART:
-                        ols_r2_line = _ols_r2_positive_subset_match_export(None, mle_result['x'], mle_result['y_rate'], None)
                         _append_two_part_r2_diagnostics_row(
                             all_r2_results, reg_zip_ror, geography_zip, mle_result, None,
                             mle_result['x'], mle_result['y_rate'], x_range_ror, None, None,
@@ -5086,7 +6209,17 @@ if __name__ == "__main__":
                             f"skipping CI and chart; OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_line)}"
                         )
                         continue
-                    ols_r2_line = _ols_r2_positive_subset_match_export(None, mle_result['x'], mle_result['y_rate'], None)
+                    if not np.isfinite(ols_r2_line) or ols_r2_line < R2_OLS_POSITIVE_THRESHOLD:
+                        _append_two_part_r2_diagnostics_row(
+                            all_r2_results, reg_zip_ror, geography_zip, mle_result, None,
+                            mle_result['x'], mle_result['y_rate'], x_range_ror, None, None,
+                        )
+                        charts_skipped_low_r2.append((f"zip_{file_tag}{suffix}", ols_r2_line))
+                        print(
+                            f"      OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_line)} < {R2_OLS_POSITIVE_THRESHOLD}, "
+                            f"skipping CI and chart; McFadden's R² = {mle_result['mcfadden_r2']:.3f}"
+                        )
+                        continue
                     print(
                         f"      Two-step MLE: slope={mle_result['slope_mle']:.4f}, "
                         f"McFadden R²={mle_result['mcfadden_r2']:.4f}, OLS R² (y>0)={_fmt_ols_r2(ols_r2_line)}, n={mle_result['n_total']}"
@@ -5098,11 +6231,16 @@ if __name__ == "__main__":
                         zip_x_pred_totals=x_pred, zip_y_rate_totals=y_rate_v,
                         zip_df_yearly_long=df_zip_yearly_long, zip_use_zips=use_zips,
                         zip_df_totals_valid=df_use[valid], zip_x_is_rate=True,
-                    ) if mle_result['mcfadden_r2'] >= R2_THRESHOLD_HIERARCHICAL else None
+                    )
                     if ci_result is None:
-                        ci_result = ci_two_part(x_pred, y_rate_v, x_range=x_range_ror)
-                    mle_y_ror = mle_result['predict'](x_range_ror)
-                    ci_lo, ci_hi, ci_m, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(ci_result, x_range_ror, mle_y=mle_y_ror, mle_result=mle_result)
+                        ci_result = ci_two_part(mle_result, x_pred, y_rate_v)
+                    else:
+                        ci_result = {
+                            **{k: mle_result[k] for k in ('alpha_mle', 'beta_mle', 'intercept_mle', 'slope_mle')},
+                            **ci_result,
+                        }
+                    boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(ci_result, x_range_ror)
+                    ci_m = 'bayesian' if bayes_mean is not None else None
                     ols_r2_zip_ror = _append_two_part_r2_diagnostics_row(
                         all_r2_results, reg_zip_ror, geography_zip, mle_result, None,
                         mle_result['x'], mle_result['y_rate'], x_range_ror, bayes_mean, ci_m,
@@ -5111,27 +6249,32 @@ if __name__ == "__main__":
                     ror_valid = np.isfinite(x_pred) & np.isfinite(y_rate_v) & (y_rate_v >= 0)
                     zip_labels_ror = (df_use.loc[valid, 'zipcode'].values[ror_valid] if 'zipcode' in df_use.columns
                                       else np.array([f'ZIP_{i}' for i in np.where(ror_valid)[0]]))
-                    x_label_full = f'{x_label} (per 1000 pop)\n{exclude_label}' if exclude_label else f'{x_label} (per 1000 pop)'
+                    x_label_full = f'{x_label} (per 1000 pop)'
+                    data_label_zip_ror = f'ZIP Codes {exclude_label}' if exclude_label else 'ZIP Codes'
                     plot_two_part_chart(
                         x_scatter=mle_result['x'], y_scatter=mle_result['y_rate'],
                         x_line=x_range_ror, mle_y=mle_result['predict'](x_range_ror),
                         output_path=output_path,
                         x_label=x_label_full, y_label=f'{y_label} (per 1000 pop)',
-                        data_label='ZIP Codes', apr_year_range='',
+                        data_label=data_label_zip_ror, apr_year_range='',
                         r2=mle_result['mcfadden_r2'], ols_r2=ols_r2_zip_ror,
-                        ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_m,
-                        freq_ci_lo=freq_ci_lo, freq_ci_hi=freq_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
+                        boot_ci_lo=boot_ci_lo, boot_ci_hi=boot_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
                         bayes_mean=bayes_mean,
                         labels=zip_labels_ror, also_annotate_second_max_x=True)
-            # Outcome×predictor at ZIP: MFH outcomes get all 4 variants; non-MFH get baseline only
+            # Outcome×predictor at ZIP: MFH outcomes get zip_mfh_subvariants (baseline, _xsf, _zip_hash, _xsf_zip_hash); non-MFH get baseline only
             for y_col, y_label in zip_outcomes:
                 variants = zip_mfh_subvariants if 'MF' in y_col else [(None, '', None)]
                 for exclude_zips, suffix, exclude_label in variants:
                     df_use = df_zip if exclude_zips is None else df_zip[~df_zip['zipcode'].astype(str).isin({str(z) for z in exclude_zips})].copy()
                     if len(df_use) < 20:
                         continue
+                    zip_pred_nonnull = {
+                        xc: int(df_use[xc].notna().sum())
+                        for xc, *_ in zip_predictor_specs
+                        if xc in df_use.columns
+                    }
                     for x_col, x_tag, x_axis_label, use_log_x, x_tick_dollar, require_msa in zip_predictor_specs:
-                        if x_col not in df_use.columns or df_use[x_col].notna().sum() < 20:
+                        if x_col not in df_use.columns or zip_pred_nonnull.get(x_col, 0) < 20:
                             print(f"\n  Skipping {y_label} vs {x_col}{suffix or ''}: insufficient predictor data")
                             continue
                         pred_ok = (df_use[x_col].notna() & np.isfinite(df_use[x_col].values)) if not use_log_x else (df_use[x_col].notna() & (df_use[x_col] > 0))
@@ -5142,96 +6285,34 @@ if __name__ == "__main__":
                         if len(df_v) < 20:
                             print(f"\n  Skipping {y_label} vs {x_col}{suffix or ''}: insufficient ZIPs with population")
                             continue
-                        use_zips = set(df_v['zipcode'].astype(str).str.zfill(5))
-                        x_pred = df_v[x_col].values.astype(float) if not use_log_x else np.log(df_v[x_col].values)
-                        y_rate = (df_v[y_col].values.astype(float) / df_v['population'].values) * 1000.0
-                        print(f"\n  --- {y_label} vs {'raw ' + x_col if not use_log_x else 'log(' + x_col + ')'}{suffix or ''} ---")
-                        mle_result = mle_two_part(x_pred, y_rate)
-                        if mle_result is None:
-                            print(f"      Insufficient data for two-step MLE")
-                            continue
-                        geography_zip = _geo_label(GEOGRAPHY_ZIP, exclude_label)
-                        reg_zip_out = f"{y_label} (per 1000 pop) vs {x_axis_label}"
-                        x_range_ror = np.linspace(x_pred.min(), x_pred.max(), 100)
-                        x_disp_ols = np.exp(mle_result['x']) if use_log_x else mle_result['x']
-                        x_for_ols = x_disp_ols if use_log_x else None
-                        if mle_result['mcfadden_r2'] < R2_THRESHOLD_TWOPART_MCFADDEN_CHART:
-                            ols_r2_line = _ols_r2_positive_subset_match_export(
-                                x_col, mle_result['x'], mle_result['y_rate'], x_for_ols,
-                            )
-                            _append_two_part_r2_diagnostics_row(
-                                all_r2_results, reg_zip_out, geography_zip, mle_result, x_col,
-                                mle_result['x'], mle_result['y_rate'], x_range_ror, None, None,
-                                x_data_for_ols=x_disp_ols,
-                            )
-                            charts_skipped_low_r2.append((f"zip_{y_col.replace('total_', '')}_{x_tag}{suffix or ''}", mle_result['mcfadden_r2']))
-                            print(
-                                f"      McFadden's R² = {mle_result['mcfadden_r2']:.3f} < {R2_THRESHOLD_TWOPART_MCFADDEN_CHART}, "
-                                f"skipping CI and chart; OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_line)}"
-                            )
-                            continue
-                        ols_r2_line = _ols_r2_positive_subset_match_export(
-                            x_col, mle_result['x'], mle_result['y_rate'], x_for_ols,
+                        _zip_outcome_predictor_fit_ci_and_charts(
+                            df_v,
+                            y_col,
+                            y_label,
+                            x_col,
+                            x_tag,
+                            x_axis_label,
+                            use_log_x,
+                            x_tick_dollar,
+                            require_msa,
+                            suffix,
+                            exclude_label,
+                            df_zip_yearly_long,
+                            all_r2_results,
+                            charts_skipped_low_r2,
+                            Path(__file__).resolve().parent,
                         )
-                        print(
-                            f"      Two-step MLE: slope={mle_result['slope_mle']:.4f}, "
-                            f"McFadden R²={mle_result['mcfadden_r2']:.4f}, OLS R² (y>0)={_fmt_ols_r2(ols_r2_line)}, n={mle_result['n_total']}"
-                        )
-                        pred_filter = (lambda zy_df: (zy_df[x_col].notna() & np.isfinite(zy_df[x_col].values))
-                                       if not use_log_x else (zy_df[x_col].notna() & (zy_df[x_col] > 0)))
-                        ci_result = (
-                            fit_two_part_with_ci(
-                                None, None, x_col, y_col, None,
-                                log_x=use_log_x, y_is_rate=True,
-                                x_varies_by_year=False,
-                                zip_x_pred_totals=df_v[x_col].values.astype(float),
-                                zip_y_rate_totals=y_rate,
-                                zip_df_yearly_long=df_zip_yearly_long, zip_use_zips=use_zips,
-                                zip_x_is_rate=False, zip_pred_filter_fn=pred_filter,
-                                zip_df_totals_valid=df_v,
-                            )
-                            if mle_result['mcfadden_r2'] >= R2_THRESHOLD_HIERARCHICAL
-                            else None
-                        )
-                        if ci_result is None:
-                            ci_result = ci_two_part(x_pred, y_rate, x_range=x_range_ror)
-                        mle_y_ror = mle_result['predict'](x_range_ror)
-                        ci_lo, ci_hi, ci_m, freq_ci_lo, freq_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(ci_result, x_range_ror, mle_y=mle_y_ror, mle_result=mle_result)
-                        ols_r2_zip_out = _append_two_part_r2_diagnostics_row(
-                            all_r2_results, reg_zip_out, geography_zip, mle_result, x_col,
-                            mle_result['x'], mle_result['y_rate'], x_range_ror, bayes_mean, ci_m,
-                            x_data_for_ols=x_disp_ols,
-                        )
-                        file_tag = f'{y_col.replace("total_", "")}_{x_tag}{suffix}'
-                        output_path = Path(__file__).resolve().parent / f'zip_{file_tag}.png'
-                        out_valid = np.isfinite(x_pred) & np.isfinite(y_rate) & (y_rate >= 0)
-                        zip_labels = (df_v['zipcode'].values[out_valid] if 'zipcode' in df_v.columns
-                                      else np.array([f'ZIP_{i}' for i in np.where(out_valid)[0]]))
-                        x_scatter_display = x_disp_ols
-                        x_line_display = np.exp(x_range_ror) if use_log_x else x_range_ror
-                        filter_note = "Metro Regions only" if require_msa else None
-                        if exclude_label and filter_note:
-                            x_label_full = f'{x_axis_label}\n{filter_note}; {exclude_label}'
-                        elif exclude_label:
-                            x_label_full = f'{x_axis_label}\n{exclude_label}'
-                        elif filter_note:
-                            x_label_full = f'{x_axis_label}\n{filter_note}'
-                        else:
-                            x_label_full = x_axis_label
-                        plot_two_part_chart(
-                            x_scatter=x_scatter_display, y_scatter=mle_result['y_rate'],
-                            x_line=x_line_display, mle_y=mle_result['predict'](x_range_ror),
-                            output_path=output_path,
-                            x_label=x_label_full, y_label=f'{y_label} (per 1000 pop)',
-                            data_label='ZIP Codes', apr_year_range='',
-                            r2=mle_result['mcfadden_r2'], ols_r2=ols_r2_zip_out,
-                            ci_lo=ci_lo, ci_hi=ci_hi, ci_method=ci_m,
-                            freq_ci_lo=freq_ci_lo, freq_ci_hi=freq_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
-                            bayes_mean=bayes_mean,
-                            labels=zip_labels, use_log_x=use_log_x, x_tick_dollar=x_tick_dollar,
-                            also_annotate_second_max_x=True)
     else:
         print("  No APR rows with valid CA ZIP codes; skipping ZIP-level analysis")
+
+    print("\n" + "="*70)
+    print(
+        "PCA EV1 + OLS: affordability ~ EV1 composite "
+        "(MF CO rates per 1k + income & population % change; CITY/ZIP; pct_afford, zori_pct_afford)"
+    )
+    print("="*70)
+    df_city_for_pca = df_final[df_final["geography_type"] == "City"].copy()
+    run_pca_ev1_affordability(df_city_for_pca, df_zip_for_pca, Path(__file__).resolve().parent)
 
     # R² diagnostics: table (descending) and CSV with Regression = "Y vs X", Geography separate
     if all_r2_results:
@@ -5255,7 +6336,11 @@ if __name__ == "__main__":
         print(f"  Wrote: {r2_csv_path.name}")
     if charts_skipped_low_r2:
         print("\n" + "="*70)
-        print(f"Charts not produced (threshold {R2_THRESHOLD}: timeline scatter uses OLS R², two-part uses McFadden's R²)")
+        print(
+            f"Charts not produced (threshold {R2_THRESHOLD}: "
+            f"timeline scatter uses OLS R² when ENABLE_CONSTRUCTION_TIMELINE; "
+            f"two-part uses McFadden's R²)"
+        )
         print("="*70)
         for chart_id, r2 in charts_skipped_low_r2:
             print(f"  {chart_id}: R² = {r2:.4f}")

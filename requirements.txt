@@ -8,3 +8,4 @@ pymc>=5.0
 statsmodels>=0.14
 arch>=6.0
 firthmodels>=0.3
+tqdm>=4.65

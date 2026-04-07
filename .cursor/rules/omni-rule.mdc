@@ -10,6 +10,7 @@ alwaysApply: true
 - **Efficiency**: Prefer O(1) where it matters. Loops: compute in the loop; **mutate once after** (accumulate results, then apply in one step). Do not repeatedly mutate shared state (e.g. adding DataFrame columns one-by-one).
 - **Accumulate then apply**: When building mutations in a loop, read from the accumulator for later steps—not from the original structure until the mutation has been applied.
 - **Repetition**: Same operation on multiple variables → loop, function, or vectorized op. No copy-paste blocks that differ only by name.
+- **No hedge language (plans/reviews)**: Use deterministic directives. Hedge terms (`maybe`, `might`, `could`, `if needed`, `unless conflict`, `consider`) are forbidden unless direct verification is impossible without user intervention. In that case, explicitly state what cannot be verified, why user intervention is required, and the exact user action needed; then provide the deterministic next step after that action.
 - **Imports**: Global. No dead code.
 - **Defensive code**: Only where the condition is possible given actual data flow.
 - **Verification**: After each change, check rules and intermediate state; fix violations before finishing.
