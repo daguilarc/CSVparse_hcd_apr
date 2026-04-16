@@ -6,7 +6,7 @@ alwaysApply: true
 # OMNI Rule
 
 - **Data flow**: Map what enters, transforms, and exits. Reuse structures; avoid throwaway intermediates.
-- **Nesting**: Max 3 levels. Extract helpers or use early returns.
+- **Nesting**: Max **4** levels of nested control flow (`if` / `for` / `while` / `try` stacking). Reduce depth with early returns, guard clauses, or extracted helpers. **Exceeding 4 levels is not allowed**—add a helper (including a **one-time** helper used only at that call site) to cap depth; use reusable helpers when the same pattern appears twice or more.
 - **Efficiency**: Prefer O(1) where it matters. Loops: compute in the loop; **mutate once after** (accumulate results, then apply in one step). Do not repeatedly mutate shared state (e.g. adding DataFrame columns one-by-one).
 - **Accumulate then apply**: When building mutations in a loop, read from the accumulator for later steps—not from the original structure until the mutation has been applied.
 - **Repetition**: Same operation on multiple variables → loop, function, or vectorized op. No copy-paste blocks that differ only by name.

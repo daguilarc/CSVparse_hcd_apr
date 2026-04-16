@@ -15,18 +15,23 @@ import unicodedata
 import os
 from pathlib import Path
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FixedLocator, FuncFormatter, MaxNLocator, MultipleLocator, NullFormatter, NullLocator, ScalarFormatter
 from scipy.special import expit
 from scipy import stats as scipy_stats
 import pymc as pm
 import statsmodels.api as sm
+from statsmodels.discrete.count_model import ZeroInflatedNegativeBinomialP, ZeroInflatedPoisson
 from statsmodels.tools.sm_exceptions import ConvergenceWarning, PerfectSeparationWarning
 from arch.bootstrap import StationaryBootstrap
 from firthmodels import FirthLogisticRegression
 from tqdm import tqdm
 from sklearn.decomposition import PCA
 
+# Skim: run order is main() (banner # --- Section: main() ---), not top-to-bottom. APR repair: # PARSEFILTER. NHGIS/cache: section below.
+# Two-part / hierarchical / MLE: follow # --- Section --- banners. Data joins and prints: main() only.
+# --- Section: Chart labels & PREDICTOR_META ---
 # X-axis label for Zillow Home Value Index % change
 ZHVI_PCT_LABEL = "Zillow Home Value Index % change (Jan 2018 – Dec 2024, Real 2024 Dollars)"
 # X-axis label for affordability ratio (Dec 2024 ZHVI / MSA median household income)
@@ -55,35 +60,189 @@ HOLDOUT_MODULUS = 5
 # Geography strings for R² diagnostics (single source; used in table/CSV)
 GEOGRAPHY_CITY = "City"
 GEOGRAPHY_ZIP = "ZIP codes"
-# % change predictors: x may be negative; use finite check in totals + city geo_mask (not x > 0)
-X_COL_PCT_CHANGE_PREDICTORS = ('zhvi_pct_change', 'zori_pct_change')
-# Dollar-change / income predictors: same panel-time structure as long-window % change; allow negative x on linear scale
-X_COL_AFFORD_DELTA_PREDICTORS = ('pct_afford', 'zori_pct_afford')
-# % change in real median household income / place population; omit stratum RE when this is the scalar x (collinearity policy)
-X_COL_INCOME_DELTA_PREDICTORS = frozenset({'income_delta_pct_change'})
-X_COL_POP_DELTA_PREDICTORS = frozenset({'population_delta_pct_change'})
-X_COL_TWO_PART_LINEAR_X = (
-    frozenset(X_COL_PCT_CHANGE_PREDICTORS)
-    | frozenset(X_COL_AFFORD_DELTA_PREDICTORS)
-    | X_COL_INCOME_DELTA_PREDICTORS
-    | X_COL_POP_DELTA_PREDICTORS
+# Canonical predictor metadata: single source for labels, print titles, transform and tick semantics.
+PREDICTOR_META = {
+    "income_delta_pct_change": {
+        "display_label": "% change in real 2024-dollar median household income (ACS 2014-2018 to 2020-2024)",
+        "print_title": "% change in real 2024-dollar median household income (ACS 2014-2018 to 2020-2024)",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": True,
+        "requires_msa": False,
+        "fit_mask_kind": "finite",
+        "geo_applicability": "both",
+        "positive_ols_companion": False,
+    },
+    "population_delta_pct_change": {
+        "display_label": (
+            "% change in place population (2014-2018 to 2020-2024 ACS, same geography)\n"
+            "100 x (pop_2020-24 - pop_2014-18) / pop_2014-18"
+        ),
+        "print_title": "% change in place population",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": True,
+        "requires_msa": False,
+        "fit_mask_kind": "finite",
+        "geo_applicability": "both",
+        "positive_ols_companion": False,
+    },
+    "zhvi_pct_change": {
+        "display_label": ZHVI_PCT_LABEL,
+        "print_title": "ZHVI % change",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": True,
+        "requires_msa": False,
+        "fit_mask_kind": "finite",
+        "geo_applicability": "both",
+        "positive_ols_companion": True,
+    },
+    "zhvi_afford_ratio": {
+        "display_label": AFFORD_X_LABEL,
+        "print_title": "affordability ratio",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": False,
+        "requires_msa": True,
+        "fit_mask_kind": "positive",
+        "geo_applicability": "both",
+        "positive_ols_companion": False,
+    },
+    "pct_afford": {
+        "display_label": PCT_AFFORD_X_LABEL,
+        "print_title": "ZHVI real $ change / income",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": True,
+        "requires_msa": True,
+        "fit_mask_kind": "finite",
+        "geo_applicability": "both",
+        "positive_ols_companion": False,
+    },
+    "zori_pct_change": {
+        "display_label": ZORI_PCT_LABEL,
+        "print_title": "ZORI % change",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": True,
+        "requires_msa": False,
+        "fit_mask_kind": "finite",
+        "geo_applicability": "both",
+        "positive_ols_companion": True,
+    },
+    "zori_afford_ratio": {
+        "display_label": ZORI_AFFORD_X_LABEL,
+        "print_title": "ZORI rent/income ratio",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": False,
+        "requires_msa": True,
+        "fit_mask_kind": "positive",
+        "geo_applicability": "both",
+        "positive_ols_companion": False,
+    },
+    "zori_pct_afford": {
+        "display_label": ZORI_PCT_AFFORD_X_LABEL,
+        "print_title": "ZORI annualized real $ change / income",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": True,
+        "requires_msa": True,
+        "fit_mask_kind": "finite",
+        "geo_applicability": "both",
+        "positive_ols_companion": False,
+    },
+    "median_income": {
+        "display_label": "ZIP Median household income (ACS 2020-2024), log scale",
+        "print_title": "ZIP median household income",
+        "tick_kind": "dollar",
+        "is_log_x": True,
+        "allow_negative_x": False,
+        "requires_msa": False,
+        "fit_mask_kind": "positive",
+        "geo_applicability": "zip",
+        "positive_ols_companion": False,
+    },
+}
+
+
+# --- Section: Predictor accessors & X_COL_* derivation ---
+def _predictor_meta(x_col):
+    if x_col not in PREDICTOR_META:
+        raise KeyError(f"Missing predictor metadata for '{x_col}'")
+    return PREDICTOR_META[x_col]
+
+
+def _has_predictor_meta(x_col):
+    return x_col in PREDICTOR_META
+
+
+def _predictor_tick_kind(x_col):
+    return _predictor_meta(x_col)["tick_kind"]
+
+
+def _predictor_is_log_x(x_col):
+    return bool(_predictor_meta(x_col)["is_log_x"])
+
+
+def _predictor_allow_negative_x(x_col):
+    return bool(_predictor_meta(x_col)["allow_negative_x"])
+
+
+def _predictor_requires_msa(x_col):
+    return bool(_predictor_meta(x_col)["requires_msa"])
+
+
+def _predictor_fit_mask_kind(x_col):
+    return _predictor_meta(x_col)["fit_mask_kind"]
+
+
+def _predictor_display_label(x_col):
+    return _predictor_meta(x_col)["display_label"]
+
+
+def _predictor_print_title(x_col):
+    return _predictor_meta(x_col)["print_title"]
+
+
+def _predictor_positive_ols_companion(x_col):
+    return bool(_predictor_meta(x_col).get("positive_ols_companion", False))
+
+
+# Backward-compatibility sets, derived from canonical metadata.
+X_COL_PCT_CHANGE_PREDICTORS = tuple(
+    x_col for x_col, meta in PREDICTOR_META.items()
+    if meta.get("positive_ols_companion")
 )
-X_COL_PERCENT_TICK_PREDICTORS = frozenset(X_COL_TWO_PART_LINEAR_X)
-# Predictors whose x embeds MSA-level ref_income as denominator; county RE confounds with population slope
-X_COL_MSA_INCOME_PREDICTORS = frozenset({
-    'zhvi_afford_ratio', 'pct_afford', 'zori_afford_ratio', 'zori_pct_afford',
-})
+X_COL_AFFORD_DELTA_PREDICTORS = tuple(
+    x_col for x_col, meta in PREDICTOR_META.items()
+    if (not meta["is_log_x"]) and meta["allow_negative_x"] and "afford" in x_col
+)
+X_COL_INCOME_DELTA_PREDICTORS = frozenset({"income_delta_pct_change"})
+X_COL_POP_DELTA_PREDICTORS = frozenset({"population_delta_pct_change"})
+X_COL_TWO_PART_LINEAR_X = frozenset(
+    x_col for x_col, meta in PREDICTOR_META.items()
+    if (not meta["is_log_x"]) and meta["allow_negative_x"]
+)
+X_COL_PERCENT_TICK_PREDICTORS = frozenset(
+    x_col for x_col, meta in PREDICTOR_META.items()
+    if meta["tick_kind"] == "percent"
+)
+X_COL_MSA_INCOME_PREDICTORS = frozenset(
+    x_col for x_col, meta in PREDICTOR_META.items()
+    if meta["requires_msa"]
+)
 # Moderate-income completions sum DR + NDR moderate CO columns; single label for charts / rate-on-rate
 MODERATE_INCOME_COMPLETIONS_LABEL = "Multifamily Moderate Income Completions (DR + NDR)"
 
 
+# --- Section: Hierarchy policy, R² helpers, date checks ---
 def _x_axis_should_use_percent_ticks(x_col=None, x_label=None):
     """Single source of truth for percent x-axis formatting across chart paths."""
-    if x_col is not None and x_col in X_COL_PERCENT_TICK_PREDICTORS:
+    if x_col is not None and _has_predictor_meta(x_col) and _predictor_tick_kind(x_col) == "percent":
         return True
-    return x_label in (
-        AFFORD_X_LABEL, ZORI_AFFORD_X_LABEL, PCT_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL,
-    )
+    return False
 
 
 def _hierarchy_stratum_column(df, x_col):
@@ -219,6 +378,7 @@ def check_date_year_mismatch(row, year_col, date_col, count_col):
     return int(date_year_str) != row_year
 
 
+# --- Section: APR CSV ingest (PARSEFILTER) ---
 # PARSEFILTER: config and single row function (omni: one apply returning tuple)
 _APR_DATE_CHECK_CONFIG = [
     ('BP_ISSUE_DT1', 'NO_BUILDING_PERMITS', 'ISS_DATE mismatch'),
@@ -544,6 +704,7 @@ def load_a2_csv(filepath, usecols=None):
     return df_clean
 
 
+# --- Section: Timeline config, NHGIS paths, suppression codes ---
 # Timeline phase day columns (OMNI: single list reused in build_timeline_projects, aggregate, means, long, charts)
 TIMELINE_PHASE_DAYS = ["days_ent_permit", "days_permit_completion", "days_ent_completion"]
 # Yearly timeline uses the same phase set (alias avoids duplicate literals; OMNI Tier 2)
@@ -551,7 +712,6 @@ TIMELINE_PHASE_DAYS_REQUIRED_YEARLY = TIMELINE_PHASE_DAYS
 # Step 11b (construction timeline charts / merges): off by default. APR entitlement / BP / CO date
 # fields are still not considered reliable for modeling (parse coverage, duplicates, year-from-CO, etc.).
 ENABLE_CONSTRUCTION_TIMELINE = False
-
 
 # Configuration
 NHGIS_API_BASE = "https://api.ipums.org"
@@ -569,6 +729,7 @@ IPUMS_API_KEY = os.environ.get("IPUMS_API_KEY", "").strip()
 SUPPRESSION_CODES = [-666666666, -999999999, -888888888, -555555555]
 
 
+# --- Section: NHGIS / geocode / CPI / Zillow / ACS ZCTA ---
 def nhgis_api(method, endpoint, json_data=None):
     """Make authenticated NHGIS API request."""
     headers = {"Authorization": IPUMS_API_KEY}
@@ -1326,6 +1487,7 @@ def load_acs_zcta_income(cache_path, api_key=None):
     return df
 
 
+# --- Section: Two-part hurdle, CI, charts ---
 # Two-part hurdle rate model: shared by city and ZIP (population from place/county or ZCTA).
 # Part 1: P(Y>0|x)=expit(α+βx). Part 2: Y|Y>0,x ~ N(γ+δx, σ²). E[Y|x]=P(Y>0|x)×(γ+δx).
 # CI: positive-part stationary bootstrap (+ MLE psi) matches fit_two_part_with_ci; hierarchical Bayes when yearly data supports it.
@@ -1601,6 +1763,266 @@ def _append_timeline_r2_diagnostics_row(r2_list, regression_label, geography, ol
     ))
 
 
+def _append_zip_zinb_r2_diagnostics_row(r2_list, regression_label, geography, pseudo_r2, slope_log1p):
+    """Append one ZIP/ZINB row to r2_diagnostics schema (7 columns); hurdle/PPM unused -> NaN."""
+    r2_list.append((
+        regression_label,
+        geography,
+        float(pseudo_r2),
+        np.nan,
+        float(slope_log1p),
+        np.nan,
+        np.nan,
+    ))
+
+
+def _affordable_dr_only_colnames(tier_cols):
+    """Income-tier columns: VLOW/LOW/MOD *_DR only (excludes *_NDR, ABOVE_MOD, EXTR_LOW)."""
+    return [c for c in tier_cols if "_DR" in c and "_NDR" not in c]
+
+
+def _poisson_result_pseudo_r2(fit_result):
+    """McFadden-style pseudo R² from deviance ratio, else from llf/llnull.
+
+    Applies to statsmodels discrete MLE results that expose deviance/null_deviance
+    or llf/llnull (Poisson, ZIP, ZINB, and similar).
+    """
+    deviance = float(getattr(fit_result, "deviance", np.nan))
+    null_deviance = float(getattr(fit_result, "null_deviance", np.nan))
+    if np.isfinite(deviance) and np.isfinite(null_deviance) and null_deviance > 0:
+        return float(1.0 - (deviance / null_deviance))
+    llf = float(getattr(fit_result, "llf", np.nan))
+    llnull = float(getattr(fit_result, "llnull", np.nan))
+    if np.isfinite(llf) and np.isfinite(llnull) and llnull != 0:
+        return float(1.0 - (llf / llnull))
+    return np.nan
+
+
+def _fit_zip_or_zinb(endog, exog):
+    """Constant inflation; try ZIP first, then ZINB once (simpler count part before overdispersed NB)."""
+    exog_infl = np.ones((len(endog), 1), dtype=np.float64)
+    for model_cls, tag in (
+        (ZeroInflatedPoisson, "ZIP"),
+        (ZeroInflatedNegativeBinomialP, "ZINB"),
+    ):
+        try:
+            model = model_cls(endog, exog, exog_infl=exog_infl)
+            fit_result = model.fit(disp=0, maxiter=300)
+        except Exception as exc:
+            print(f"  ERROR: {tag} fit failed: {exc}")
+            continue
+        if hasattr(fit_result, "converged") and not bool(fit_result.converged):
+            print(f"  ERROR: {tag} fit did not converge.")
+            continue
+        return fit_result, tag
+    return None, None
+
+
+def _zip_zinb_count_part_linear_params(fit_result):
+    """Count block: inflation excluded; for ZINB, index 2 in the slice is NB alpha (not reported as slope)."""
+    mdl = fit_result.model
+    k0 = int(mdl.k_inflate)
+    k1 = int(mdl.k_exog)
+    p = np.asarray(fit_result.params, dtype=np.float64)
+    bse = np.asarray(getattr(fit_result, "bse", np.full(p.shape, np.nan)), dtype=np.float64)
+    pvalues = np.asarray(getattr(fit_result, "pvalues", np.full(p.shape, np.nan)), dtype=np.float64)
+    if p.size < k0 + k1:
+        return None
+    sl = slice(k0, k0 + k1)
+    return p[sl], bse[sl], pvalues[sl]
+
+
+def _plot_poisson_db_vs_total_phase(
+    x_vals, y_vals, fit_result, phase_tag, output_path, pseudo_r2, model_tag,
+    scatter_label="MF 5+ projects",
+    xlabel=None,
+    ylabel=None,
+    title=None,
+):
+    """Scatter + marginal mean line (ZIP or ZINB) for one phase (no CI bands)."""
+    x_arr = np.asarray(x_vals, dtype=np.float64)
+    y_arr = np.asarray(y_vals, dtype=np.float64)
+    x_min = float(np.nanmin(x_arr))
+    x_max = float(np.nanmax(x_arr))
+    if not np.isfinite(x_min) or not np.isfinite(x_max):
+        print(f"  ERROR: Skipping {phase_tag} chart due to non-finite x range.")
+        return
+    if x_max <= x_min:
+        x_line = np.array([x_min, x_min + 1.0], dtype=np.float64)
+    else:
+        x_line = np.linspace(x_min, x_max, 100)
+    exog_line = sm.add_constant(np.log1p(x_line), has_constant="add")
+    exog_infl_line = np.ones((len(x_line), 1), dtype=np.float64)
+    y_line = np.asarray(fit_result.predict(exog_line, exog_infl=exog_infl_line), dtype=np.float64)
+
+    setup_chart_style()
+    fig, ax = _fig_ax_square_plot()
+    scatter_suffix = f"n={len(x_arr)}"
+    scatter_handle = ax.scatter(
+        x_arr, y_arr, color="#ED7D31", alpha=0.6, s=40, edgecolors="none",
+        label=f"{scatter_label}\n({scatter_suffix})",
+    )
+    line_handle, = ax.plot(x_line, y_line, color="#1d4ed8", linewidth=2, label=f"{model_tag} marginal mean")
+    r2_text = f"Pseudo R² = {pseudo_r2:.3f}" if np.isfinite(pseudo_r2) else "Pseudo R² = n/a"
+    r2_handle, = ax.plot([], [], " ", label=r2_text)
+
+    if xlabel is None:
+        xlabel = f"Multifamily (5+) stage total units ({phase_tag})"
+    if ylabel is None:
+        ylabel = f"Affordable _DR tier units ({phase_tag})"
+    if title is None:
+        title = f"{model_tag}: affordable _DR vs stage total ({phase_tag})"
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xlim(0.0, float(np.nanmax(x_line)))
+    y_max = float(max(np.nanmax(y_arr), 1.0))
+    ax.set_ylim(0, y_max * 1.05)
+    ax.legend(handles=[scatter_handle, line_handle, r2_handle], loc="center left", bbox_to_anchor=(1.02, 0.5))
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def run_poisson_db_vs_total_units(df_apr_db_inc, output_dir, all_r2_results, co_cols, bp_cols, ent_cols):
+    """Run ZIP/ZINB fits: affordable _DR-only y vs log1p(proj phase total); DB, INC, and DB+for-sale variants; append to all_r2_results."""
+    required_base = {"DR_TYPE_CLEAN"}
+    missing_base = sorted(required_base - set(df_apr_db_inc.columns))
+    if missing_base:
+        print(f"  ERROR: Skipping ZIP/ZINB block; missing columns: {missing_base}")
+        return
+
+    dr_co = _affordable_dr_only_colnames(co_cols)
+    dr_bp = _affordable_dr_only_colnames(bp_cols)
+    dr_ent = _affordable_dr_only_colnames(ent_cols)
+    tier_by_phase = {"CO": dr_co, "BP": dr_bp, "ENT": dr_ent}
+
+    phase_specs = [
+        ("ENT", "proj_units_ENT", "ENT"),
+        ("BP", "proj_units_BP", "BP"),
+        ("CO", "proj_units_CO", "CO"),
+    ]
+
+    variant_defs = [
+        (
+            "DB",
+            lambda d: d["DR_TYPE_CLEAN"] == "DB",
+            "poisson_db_units_vs_total",
+            "APR MF 5+ DB",
+            {
+                "scatter_label": "DB MF 5+",
+                "policy": "DB",
+                "xlabel_tpl": "Multifamily (5+) stage total units ({phase})",
+                "ylabel_tpl": "DB affordable _DR tier units ({phase})",
+            },
+        ),
+        (
+            "INC",
+            lambda d: d["DR_TYPE_CLEAN"] == "INC",
+            "poisson_inc_units_vs_total",
+            "APR MF 5+ INC",
+            {
+                "scatter_label": "INC MF 5+",
+                "policy": "INC",
+                "xlabel_tpl": "Multifamily (5+) stage total units ({phase})",
+                "ylabel_tpl": "INC affordable _DR tier units ({phase})",
+            },
+        ),
+        (
+            "DB_owner",
+            lambda d: (d["DR_TYPE_CLEAN"] == "DB") & d["is_owner"],
+            "poisson_db_units_vs_total_owner",
+            "APR MF 5+ DB for-sale",
+            {
+                "scatter_label": "DB MF 5+ for-sale",
+                "policy": "DB",
+                "xlabel_tpl": "Net Multifamily Owner-Occupant ({phase})",
+                "ylabel_tpl": "DB affordable _DR tier units ({phase})",
+            },
+        ),
+    ]
+
+    if "is_owner" not in df_apr_db_inc.columns:
+        print("  ERROR: Skipping DB+owner ZIP/ZINB variant; is_owner missing.")
+        variant_defs = [v for v in variant_defs if v[0] != "DB_owner"]
+
+    n_appended = 0
+    for variant_key, mask_fn, file_stem, geography, vkw in variant_defs:
+        sub = df_apr_db_inc.loc[mask_fn(df_apr_db_inc)]
+        if len(sub) == 0:
+            print(f"  ERROR: Skipping ZIP/ZINB variant {variant_key}; no rows after mask.")
+            continue
+
+        for phase_tag, x_col, tier_key in phase_specs:
+            tier_cols = [c for c in tier_by_phase[tier_key] if c in sub.columns]
+            if not tier_cols:
+                print(f"  ERROR: Skipping {variant_key} {phase_tag}; no affordable _DR tier columns present.")
+                continue
+            if x_col not in sub.columns:
+                print(f"  ERROR: Skipping {variant_key} {phase_tag}; missing {x_col}.")
+                continue
+
+            x_series = pd.to_numeric(sub[x_col], errors="coerce")
+            y_series = sub[tier_cols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+            valid = (
+                x_series.notna()
+                & y_series.notna()
+                & np.isfinite(np.asarray(x_series.values, dtype=np.float64))
+                & np.isfinite(np.asarray(y_series.values, dtype=np.float64))
+                & (np.asarray(y_series.values, dtype=np.float64) >= 0)
+                & (np.asarray(x_series.values, dtype=np.float64) >= 0)
+            )
+            n_valid = int(valid.sum())
+            if n_valid < 20:
+                print(
+                    f"  ERROR: Skipping {variant_key} {phase_tag} ZIP/ZINB fit; n={n_valid} after valid mask (<20)."
+                )
+                continue
+
+            x_use = np.asarray(x_series[valid].values, dtype=np.float64)
+            y_use = np.asarray(y_series[valid].values, dtype=np.float64)
+            exog = sm.add_constant(np.log1p(x_use), has_constant="add")
+            endog = np.asarray(y_use, dtype=np.float64)
+            fit_result, model_tag = _fit_zip_or_zinb(endog, exog)
+            if fit_result is None:
+                print(f"  ERROR: Skipping {variant_key} {phase_tag}; ZIP and ZINB both failed.")
+                continue
+            lin = _zip_zinb_count_part_linear_params(fit_result)
+            if lin is None:
+                print(f"  ERROR: Skipping {variant_key} {phase_tag}; unexpected parameter layout.")
+                continue
+            params_lin, bse_lin, pvalues_lin = lin
+            if params_lin.size < 2:
+                print(
+                    f"  ERROR: Skipping {variant_key} {phase_tag}; count-part parameter length {params_lin.size}."
+                )
+                continue
+            slope_log1p = float(params_lin[1])
+            pseudo_r2 = _poisson_result_pseudo_r2(fit_result)
+            out_png = output_dir / f"{file_stem}_{phase_tag}.png"
+            ph = phase_tag
+            xlabel = vkw["xlabel_tpl"].format(phase=ph)
+            ylabel = vkw["ylabel_tpl"].format(phase=ph)
+            title = f"{model_tag}: {vkw['policy']} affordable _DR vs stage total ({ph}) [{variant_key}]"
+            _plot_poisson_db_vs_total_phase(
+                x_use, y_use, fit_result, phase_tag, out_png, pseudo_r2, model_tag,
+                scatter_label=vkw["scatter_label"],
+                xlabel=xlabel,
+                ylabel=ylabel,
+                title=title,
+            )
+            reg_lbl = (
+                f"ZIP/ZINB: {vkw['policy']} affordable-DR ~ log1p(stage total) ({phase_tag}) [{model_tag}] [{variant_key}]"
+            )
+            _append_zip_zinb_r2_diagnostics_row(all_r2_results, reg_lbl, geography, pseudo_r2, slope_log1p)
+            n_appended += 1
+            print(f"  Saved: {out_png.name}")
+
+    if n_appended:
+        print(f"  ZIP/ZINB: appended {n_appended} rows to r2 diagnostics (no standalone Poisson CSV).")
+    else:
+        print("  ERROR: No ZIP/ZINB phase fits completed; nothing appended to r2 diagnostics.")
+
+
 def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
                         x_label, y_label, data_label='Cities', apr_year_range='2018-2024',
                         r2=0.0, ols_r2=None,
@@ -1682,7 +2104,13 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
             ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune="lower"))
         ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:,.0f}'))
-        fig.savefig(output_path, dpi=150, bbox_inches='tight', bbox_extra_artists=[leg], facecolor='white')
+        fig.savefig(
+            output_path,
+            dpi=150,
+            bbox_inches='tight',
+            bbox_extra_artists=[leg],
+            facecolor='white',
+        )
         plt.close(fig)
         print(f"    Saved: {output_path}")
         return
@@ -1753,7 +2181,13 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
         ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
         ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune="lower"))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:,.0f}'))
-    fig.savefig(output_path, dpi=150, bbox_inches='tight', bbox_extra_artists=[leg], facecolor='white')
+    fig.savefig(
+        output_path,
+        dpi=150,
+        bbox_inches='tight',
+        bbox_extra_artists=[leg],
+        facecolor='white',
+    )
     plt.close(fig)
     print(f"    Saved: {output_path}")
 
@@ -1778,6 +2212,7 @@ def _plot_zip_outcome_two_part_and_optional_positive_ols(
     zip_labels,
     use_log_x,
     x_tick_dollar,
+    x_tick_percent,
     x_col,
     positive_line_y,
     positive_ols_r2,
@@ -1803,6 +2238,7 @@ def _plot_zip_outcome_two_part_and_optional_positive_ols(
         labels=zip_labels,
         use_log_x=use_log_x,
         x_tick_dollar=x_tick_dollar,
+        x_tick_percent=x_tick_percent,
         also_annotate_second_max_x=True,
     )
     if x_col not in X_COL_PCT_CHANGE_PREDICTORS:
@@ -1828,6 +2264,7 @@ def _plot_zip_outcome_two_part_and_optional_positive_ols(
         labels=zip_labels,
         use_log_x=use_log_x,
         x_tick_dollar=x_tick_dollar,
+        x_tick_percent=x_tick_percent,
         also_annotate_second_max_x=True,
         positive_ols_simple=True,
         x_col_for_ols=x_col,
@@ -1966,6 +2403,7 @@ def _zip_outcome_predictor_fit_ci_and_charts(
         zip_labels,
         use_log_x,
         x_tick_dollar,
+        _x_axis_should_use_percent_ticks(x_col, x_axis_label),
         x_col,
         positive_line_y,
         r2_mle_line_zip,
@@ -2150,6 +2588,7 @@ def ci_two_part(mle_result, x_arr, y_rate_arr):
     return _pooled_two_part_stationary_ci(mle_result, x_arr, y_rate_arr)
 
 
+# --- Section: APR dates, construction timeline, ZHVI/ZORI jurisdiction ---
 def parse_apr_date(val):
     """Parse APR date string to datetime. Returns pd.NaT if invalid.
     Supports YYYY-MM-DD and MM/DD/YYYY. OMNI: single place for date parsing."""
@@ -2469,6 +2908,7 @@ def permit_rate(df, permit_years, permit_cols, rate_cols):
     return df
 
 
+# --- Section: EV1 PCA ---
 # EV1 PCA: category-specific net MF CO completions (per 1k pop) + income/population % change only.
 # Excludes BP streams, project-total (PROJ_/total_db) columns, and standalone demolition rates.
 _EV1_PCA_CITY_CO_COUNT_COLS = (
@@ -2858,38 +3298,43 @@ def _plot_ev1_ols_chart(
     print(f"  Saved: {output_path.name}")
 
 
-def run_pca_ev1_affordability(df_city, df_zip, output_dir):
-    """PCA on standardized EV1 inputs (MF CO rates per 1k + income/population % change); OLS affordability ~ EV1."""
-    specs = [
-        ("city", df_city, "pct_afford", "ZHVI", "pca_ev1_pie_city_pct_afford.png", "pca_ev1_ols_city_pct_afford.png"),
-        ("city", df_city, "zori_pct_afford", "ZORI", "pca_ev1_pie_city_zori_pct_afford.png", "pca_ev1_ols_city_zori_pct_afford.png"),
-        ("zip", df_zip, "pct_afford", "ZHVI", "pca_ev1_pie_zip_pct_afford.png", "pca_ev1_ols_zip_pct_afford.png"),
-        ("zip", df_zip, "zori_pct_afford", "ZORI", "pca_ev1_pie_zip_zori_pct_afford.png", "pca_ev1_ols_zip_zori_pct_afford.png"),
-    ]
-    y_labels = {
-        "pct_afford": "Percent affordability change",
-        "zori_pct_afford": "ZORI affordability change",
-    }
-    ols_rows = []
-    for geo_tag, df_geo, predictor_col, zillow_family, pie_name, ols_name in specs:
+class PcaEv1Runner:
+    """Orchestrates EV1 PCA/OLS specs while preserving output contracts."""
+
+    def __init__(self, output_dir):
+        self.output_dir = output_dir
+        self.y_labels = {
+            "pct_afford": "Percent affordability change",
+            "zori_pct_afford": "ZORI affordability change",
+        }
+
+    def build_specs(self, df_city, df_zip):
+        return [
+            ("city", df_city, "pct_afford", "ZHVI", "pca_ev1_pie_city_pct_afford.png", "pca_ev1_ols_city_pct_afford.png"),
+            ("city", df_city, "zori_pct_afford", "ZORI", "pca_ev1_pie_city_zori_pct_afford.png", "pca_ev1_ols_city_zori_pct_afford.png"),
+            ("zip", df_zip, "pct_afford", "ZHVI", "pca_ev1_pie_zip_pct_afford.png", "pca_ev1_ols_zip_pct_afford.png"),
+            ("zip", df_zip, "zori_pct_afford", "ZORI", "pca_ev1_pie_zip_zori_pct_afford.png", "pca_ev1_ols_zip_zori_pct_afford.png"),
+        ]
+
+    def run_spec(self, geo_tag, df_geo, predictor_col, zillow_family, pie_name, ols_name):
         if df_geo is None or len(df_geo) == 0:
             print(f"  Skipping {geo_tag}:{predictor_col} (no data)")
-            continue
+            return None
         label_col = "JURISDICTION" if geo_tag == "city" else "zipcode"
         if label_col not in df_geo.columns:
             print(f"  Skipping {geo_tag}:{predictor_col} (missing {label_col} for chart labels)")
-            continue
+            return None
         df_w = df_geo.copy()
         n_rows_before_ev1 = int(len(df_w))
         try:
             feature_cols = _ev1_pca_attach_feature_columns(df_w, geo_tag)
         except ValueError as e:
             print(f"  Skipping {geo_tag}:{predictor_col} ({e})")
-            continue
+            return None
         n_co_rates = len(_ev1_pca_co_count_cols(geo_tag))
         if len(feature_cols) != n_co_rates + len(EV1_PCA_DELTA_COLS):
             print(f"  Skipping {geo_tag}:{predictor_col} (unexpected EV1 feature column count)")
-            continue
+            return None
         try:
             (
                 affordability_vals,
@@ -2904,7 +3349,7 @@ def run_pca_ev1_affordability(df_city, df_zip, output_dir):
             )
         except ValueError as e:
             print(f"  Skipping {geo_tag}:{predictor_col} ({e})")
-            continue
+            return None
         n_dropped_nonfinite = n_rows_before_ev1 - n_after_finite
         print(
             f"  EV1 PCA rows: {n_after_finite}/{n_rows_before_ev1} finite "
@@ -2919,10 +3364,10 @@ def run_pca_ev1_affordability(df_city, df_zip, output_dir):
         pie_title = (
             f"EV1 Composition ({geo_tag.upper()} - {predictor_col}; {zillow_family})\n{pie_line2}"
         )
-        _plot_ev1_composition_pie(composition, output_dir / pie_name, pie_title)
+        _plot_ev1_composition_pie(composition, self.output_dir / pie_name, pie_title)
         data_label = "Cities" if geo_tag == "city" else "ZIP codes"
         ols_title = (
-            f"{geo_tag.upper()}: {y_labels.get(predictor_col, predictor_col)} vs EV1 "
+            f"{geo_tag.upper()}: {self.y_labels.get(predictor_col, predictor_col)} vs EV1 "
             f"(MF CO + demographics; {zillow_family})"
         )
         try:
@@ -2931,13 +3376,13 @@ def run_pca_ev1_affordability(df_city, df_zip, output_dir):
             )
         except ValueError as e:
             print(f"  Skipping {geo_tag}:{predictor_col} OLS/CI ({e})")
-            continue
+            return None
         _plot_ev1_ols_chart(
             ev1_scores,
             affordability_vals,
-            output_dir / ols_name,
+            self.output_dir / ols_name,
             ols_title,
-            y_labels.get(predictor_col, predictor_col),
+            self.y_labels.get(predictor_col, predictor_col),
             ols_xlabel,
             x_line,
             y_line,
@@ -2961,24 +3406,40 @@ def run_pca_ev1_affordability(df_city, df_zip, output_dir):
         ols_row["ev1_definition_version"] = "ev1_co_net_mf_plus_acs_deltas_2026"
         ols_row["pca_feature_set"] = "|".join(composition["feature"].astype(str).tolist())
         ols_row["ev1_variance_explained_pct"] = ev1_var_explained_pct
-        ols_rows.append(ols_row)
-    if ols_rows:
-        print(
-            f"  EV1 PCA diagnostics rows written: {len(ols_rows)} "
-            "(expect up to 4 when city and ZIP both have full columns and all strata succeed)"
-        )
-    if not ols_rows:
-        print("  PCA/EV1/OLS: no strata produced output")
-        return None
-    df_diag = pd.DataFrame(ols_rows)
-    out_csv = output_dir / "pca_ev1_ols_diagnostics.csv"
-    df_diag.to_csv(out_csv, index=False)
-    print("\nPCA EV1 OLS diagnostics:")
-    print(df_diag.to_string(index=False))
-    print(f"  Wrote: {out_csv.name}")
-    return df_diag
+        return ols_row
+
+    def emit_outputs(self, ols_rows):
+        if ols_rows:
+            print(
+                f"  EV1 PCA diagnostics rows written: {len(ols_rows)} "
+                "(expect up to 4 when city and ZIP both have full columns and all strata succeed)"
+            )
+        if not ols_rows:
+            print("  PCA/EV1/OLS: no strata produced output")
+            return None
+        df_diag = pd.DataFrame(ols_rows)
+        out_csv = self.output_dir / "pca_ev1_ols_diagnostics.csv"
+        df_diag.to_csv(out_csv, index=False)
+        print("\nPCA EV1 OLS diagnostics:")
+        print(df_diag.to_string(index=False))
+        print(f"  Wrote: {out_csv.name}")
+        return df_diag
+
+    def run_all(self, df_city, df_zip):
+        ols_rows = []
+        for geo_tag, df_geo, predictor_col, zillow_family, pie_name, ols_name in self.build_specs(df_city, df_zip):
+            ols_row = self.run_spec(geo_tag, df_geo, predictor_col, zillow_family, pie_name, ols_name)
+            if ols_row is not None:
+                ols_rows.append(ols_row)
+        return self.emit_outputs(ols_rows)
 
 
+def run_pca_ev1_affordability(df_city, df_zip, output_dir):
+    """PCA on standardized EV1 inputs (MF CO rates per 1k + income/population % change); OLS affordability ~ EV1."""
+    return PcaEv1Runner(output_dir).run_all(df_city, df_zip)
+
+
+# --- Section: Permits aggregate, MLE two-part, hierarchical Bayes, regressions ---
 def agg_permits(df_hcd, row_filter, permit_years, value_col="units_BP", prefix="net_permits", group_col="JURIS_CLEAN"):
     """Aggregate permit/CO/demolition counts by group_col and year, returning dataframe ready for merge.
     
@@ -3486,9 +3947,11 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
             **({k: hi[k] for k in ('alpha_samples', 'beta_samples') if hi.get(k) is not None}),
         }
     pop_col = 'population'
-    allow_negative_x = x_col in X_COL_TWO_PART_LINEAR_X
-    if x_col in ('zhvi_afford_ratio', 'zori_afford_ratio'):
-        log_x = False
+    if _has_predictor_meta(x_col):
+        allow_negative_x = _predictor_allow_negative_x(x_col)
+        log_x = _predictor_is_log_x(x_col)
+    else:
+        allow_negative_x = x_col in X_COL_TWO_PART_LINEAR_X
     if allow_negative_x:
         valid_totals = (
             df_totals[x_col].notna() & np.isfinite(df_totals[x_col].values) &
@@ -3807,18 +4270,18 @@ def run_one_regression(df_geo, dr_type, type_label, geo_label, x_col, file_tag, 
     )
     regression_results = fit_two_part_with_ci(
         df_totals, df_yearly, x_col, 'units', years,
-        log_x=x_col not in X_COL_TWO_PART_LINEAR_X,
+        log_x=_predictor_is_log_x(x_col),
         skipped_low_r2=skipped_low_r2, chart_id=chart_id if skipped_low_r2 is not None else None,
         county_col='county', label_col=label_col,
         x_varies_by_year=False,
         r2_diagnostics=r2_diagnostics,
-        r2_x_label=x_var_labels.get(x_col, x_col) if r2_diagnostics is not None else None,
+        r2_x_label=_predictor_display_label(x_col) if r2_diagnostics is not None else None,
         r2_y_label=title_suffix if r2_diagnostics is not None else None,
         r2_geography=r2_geography,
     )
     if not regression_results:
         return
-    regression_results['income_label'] = x_var_labels.get(x_col, x_col)
+    regression_results['income_label'] = _predictor_display_label(x_col)
     if x_axis_filter_note is not None:
         regression_results['x_axis_filter_note'] = x_axis_filter_note
     _plot_income_chart(
@@ -3828,8 +4291,9 @@ def run_one_regression(df_geo, dr_type, type_label, geo_label, x_col, file_tag, 
         acs_year_range='2020-2024',
         apr_year_range=f'{min(years)}-{max(years)}',
         data_label=geo_label,
+        x_col_for_ols=x_col,
     )
-    if x_col in X_COL_PCT_CHANGE_PREDICTORS:
+    if _predictor_positive_ols_companion(x_col):
         _plot_income_chart(
             regression_results,
             output_dir / f'{file_prefix}_{cat_suffix.lower()}_{file_tag}_positive_ols.png',
@@ -3842,10 +4306,63 @@ def run_one_regression(df_geo, dr_type, type_label, geo_label, x_col, file_tag, 
         )
 
 
-if __name__ == "__main__":
-    charts_skipped_low_r2 = []
-    all_r2_results = []
-    # Step 1: Load relationship files (place-county and county-CBSA)
+# --- Section: XSF mask & pipeline stages before main() ---
+def _to_upper_set(values):
+    """Normalize a string collection to uppercase set once for reuse."""
+    return {str(v).upper() for v in values}
+
+
+def _exclude_by_upper(series, excluded_upper):
+    """Return boolean keep-mask for case-insensitive exclusions."""
+    if not excluded_upper:
+        return np.ones(len(series), dtype=bool)
+    return ~series.astype(str).str.upper().isin(excluded_upper)
+
+
+@dataclass(frozen=True)
+class CityXsfMaskContext:
+    """Reusable city/XSF mask artifacts for consistent variant filtering."""
+
+    is_city: pd.Series
+    juris_upper: pd.Series
+    xsf_exclude_upper: frozenset
+    is_xsf_excluded_city: pd.Series
+    is_city_non_xsf: pd.Series
+
+
+def _build_city_xsf_mask_context(df, city_xsf_exclude):
+    is_city = (df["geography_type"] == "City")
+    juris_upper = df["JURISDICTION"].astype(str).str.upper()
+    xsf_exclude_upper = frozenset(_to_upper_set(city_xsf_exclude))
+    is_xsf_excluded_city = is_city & juris_upper.isin(xsf_exclude_upper)
+    is_city_non_xsf = is_city & (~is_xsf_excluded_city)
+    return CityXsfMaskContext(
+        is_city=is_city,
+        juris_upper=juris_upper,
+        xsf_exclude_upper=xsf_exclude_upper,
+        is_xsf_excluded_city=is_xsf_excluded_city,
+        is_city_non_xsf=is_city_non_xsf,
+    )
+
+
+def _exclude_by_str(series, excluded_values):
+    """Return boolean keep-mask using string membership exclusions."""
+    if not excluded_values:
+        return np.ones(len(series), dtype=bool)
+    excluded_str = {str(v) for v in excluded_values}
+    return ~series.astype(str).isin(excluded_str)
+
+
+def _ensure_ipums_api_key():
+    """Return a usable IPUMS API key, prompting once if needed."""
+    global IPUMS_API_KEY
+    if not IPUMS_API_KEY:
+        IPUMS_API_KEY = input("Enter your IPUMS API Key: ").strip()
+    return IPUMS_API_KEY
+
+
+def _stage1_load_relationship_artifacts():
+    """Load or download place/county and county/CBSA relationship artifacts."""
     gazetteer_path = Path(__file__).resolve().parent / "place_county_relationship.csv"
     if (file_exists := gazetteer_path.exists()):
         df_rel = pd.read_csv(gazetteer_path, dtype=str)
@@ -3862,7 +4379,10 @@ if __name__ == "__main__":
     if needs_download:
         if not file_exists:
             print("Downloading Census place-county relationship file...")
-        resp = requests.get("https://www2.census.gov/geo/docs/reference/codes2020/national_place_by_county2020.txt", timeout=30)
+        resp = requests.get(
+            "https://www2.census.gov/geo/docs/reference/codes2020/national_place_by_county2020.txt",
+            timeout=30,
+        )
         resp.raise_for_status()
         df_rel = pd.read_csv(io.StringIO(resp.text), sep="|", dtype=str)
         if "TYPE" not in df_rel.columns:
@@ -3878,18 +4398,25 @@ if __name__ == "__main__":
     county_cbsa_path = Path(__file__).resolve().parent / "county_cbsa_relationship.csv"
     if not county_cbsa_path.exists():
         print("Downloading county-to-CBSA relationship file...")
-        resp = requests.get("https://data.nber.org/cbsa-csa-fips-county-crosswalk/2023/cbsa2fipsxw_2023.csv", timeout=30)
+        resp = requests.get(
+            "https://data.nber.org/cbsa-csa-fips-county-crosswalk/2023/cbsa2fipsxw_2023.csv",
+            timeout=30,
+        )
         resp.raise_for_status()
         df_county_cbsa = pd.read_csv(io.StringIO(resp.text), encoding="latin-1", low_memory=False)
-        if ("fipscountycode" not in df_county_cbsa.columns or 
-            "cbsacode" not in df_county_cbsa.columns or 
-            "fipsstatecode" not in df_county_cbsa.columns):
+        if (
+            "fipscountycode" not in df_county_cbsa.columns
+            or "cbsacode" not in df_county_cbsa.columns
+            or "fipsstatecode" not in df_county_cbsa.columns
+        ):
             raise ValueError(f"County-CBSA file missing required columns. Found: {df_county_cbsa.columns.tolist()}")
-        df_county_cbsa = (df_county_cbsa[df_county_cbsa["fipsstatecode"].astype(str).str.zfill(2) == "06"]
-                          .assign(COUNTYA=lambda x: x["fipscountycode"].astype(str).str.zfill(3))
-                          [["COUNTYA", "cbsacode"]]
-                          .drop_duplicates(subset=["COUNTYA"], keep="first")
-                          .copy())
+        df_county_cbsa = (
+            df_county_cbsa[df_county_cbsa["fipsstatecode"].astype(str).str.zfill(2) == "06"]
+            .assign(COUNTYA=lambda x: x["fipscountycode"].astype(str).str.zfill(3))
+            [["COUNTYA", "cbsacode"]]
+            .drop_duplicates(subset=["COUNTYA"], keep="first")
+            .copy()
+        )
         df_county_cbsa["CBSAA"] = normalize_cbsaa(df_county_cbsa["cbsacode"])
         df_county_cbsa = df_county_cbsa[["COUNTYA", "CBSAA"]].copy()
         df_county_cbsa.to_csv(county_cbsa_path, index=False)
@@ -3901,11 +4428,13 @@ if __name__ == "__main__":
                 f"County-CBSA relationship file missing required columns. "
                 f"Found: {df_county_cbsa.columns.tolist()}, Expected: ['COUNTYA', 'CBSAA']"
             )
-        # CBSAA already normalized when saved to cache (line 130) - no need to normalize again
 
     ca_county_name_to_fips = _load_ca_county_name_to_fips(Path(__file__).resolve().parent)
+    return df_rel, df_county_cbsa, ca_county_name_to_fips
 
-    # Step 2: Load NHGIS data (cache or API)
+
+def _stage2_load_acs_data():
+    """Load ACS place/county/MSA frames from cache or NHGIS API."""
     df_place, df_county, df_msa = None, None, None
     data_from_api = False
     if CACHE_PATH.exists():
@@ -3917,83 +4446,103 @@ if __name__ == "__main__":
             df_county = pd.DataFrame(cache["county"])
             df_msa = pd.DataFrame(cache["msa"])
 
-    if df_place is None:
-        data_from_api = True
-        print("Cache expired or missing, fetching from NHGIS API...")
-        if not IPUMS_API_KEY:
-            IPUMS_API_KEY = input("Enter your IPUMS API Key: ").strip()
+    if df_place is not None:
+        return df_place, df_county, df_msa, data_from_api
 
-        extract_num = nhgis_api("POST", "/extracts?collection=nhgis&version=2", {
-            "datasets": {NHGIS_DATASET: {
-                "dataTables": NHGIS_TABLES,
-                "geogLevels": ["place", "county", "cbsa"],
-                "breakdownValues": ["bs32.ge00"]
-            }},
+    data_from_api = True
+    print("Cache expired or missing, fetching from NHGIS API...")
+    key = _ensure_ipums_api_key()
+    extract_num = nhgis_api(
+        "POST",
+        "/extracts?collection=nhgis&version=2",
+        {
+            "datasets": {
+                NHGIS_DATASET: {
+                    "dataTables": NHGIS_TABLES,
+                    "geogLevels": ["place", "county", "cbsa"],
+                    "breakdownValues": ["bs32.ge00"],
+                }
+            },
             "dataFormat": "csv_header",
-            "breakdownAndDataTypeLayout": "single_file"
-        })["number"]
-        print(f"Extract #{extract_num} submitted, waiting for completion...")
-        status = _nhgis_wait_extract(extract_num, timeout_minutes=60, show_bar=True)
+            "breakdownAndDataTypeLayout": "single_file",
+        },
+    )["number"]
+    print(f"Extract #{extract_num} submitted, waiting for completion...")
+    status = _nhgis_wait_extract(extract_num, timeout_minutes=60, show_bar=True)
 
-        download_links = status.get("downloadLinks", {})
-        if "tableData" not in download_links:
-            raise RuntimeError(f"Extract completed but no download link available: {status}")
+    download_links = status.get("downloadLinks", {})
+    if "tableData" not in download_links:
+        raise RuntimeError(f"Extract completed but no download link available: {status}")
 
-        print("Downloading extract...")
-        download_resp = requests.get(download_links["tableData"]["url"], headers={"Authorization": IPUMS_API_KEY})
-        download_resp.raise_for_status()
-        with zipfile.ZipFile(io.BytesIO(download_resp.content)) as zf:
-            csv_files = [name for name in zf.namelist() if name.endswith(".csv")]
-            for name in csv_files:
-                name_lower = name.lower()
-                if "place" in name_lower:
-                    df_place = pd.read_csv(zf.open(name), encoding="latin-1", low_memory=False)
-                elif "county" in name_lower and "cbsa" not in name_lower:
-                    df_county = pd.read_csv(zf.open(name), encoding="latin-1", low_memory=False)
-                elif "cbsa" in name_lower:
-                    df_msa = pd.read_csv(zf.open(name), encoding="latin-1", low_memory=False)
-            # Filter MSA CBSAA after loading to reduce nesting
-            if df_msa is not None and "CBSAA" in df_msa.columns:
-                cbsaa_col = df_msa["CBSAA"]
-                df_msa = df_msa[cbsaa_col.astype(str).str.isdigit() | cbsaa_col.isna()].copy()
+    print("Downloading extract...")
+    download_resp = requests.get(download_links["tableData"]["url"], headers={"Authorization": key})
+    download_resp.raise_for_status()
+    with zipfile.ZipFile(io.BytesIO(download_resp.content)) as zf:
+        csv_files = [name for name in zf.namelist() if name.endswith(".csv")]
+        for name in csv_files:
+            name_lower = name.lower()
+            if "place" in name_lower:
+                df_place = pd.read_csv(zf.open(name), encoding="latin-1", low_memory=False)
+            elif "county" in name_lower and "cbsa" not in name_lower:
+                df_county = pd.read_csv(zf.open(name), encoding="latin-1", low_memory=False)
+            elif "cbsa" in name_lower:
+                df_msa = pd.read_csv(zf.open(name), encoding="latin-1", low_memory=False)
+        if df_msa is not None and "CBSAA" in df_msa.columns:
+            cbsaa_col = df_msa["CBSAA"]
+            df_msa = df_msa[cbsaa_col.astype(str).str.isdigit() | cbsaa_col.isna()].copy()
 
-        # Filter to California only (STATEA = "06")
-        if df_place is not None and "STATEA" in df_place.columns:
-            df_place = df_place[df_place["STATEA"] == "06"].copy()
-        if df_county is not None and "STATEA" in df_county.columns:
-            df_county = df_county[df_county["STATEA"] == "06"].copy()
+    if df_place is not None and "STATEA" in df_place.columns:
+        df_place = df_place[df_place["STATEA"] == "06"].copy()
+    if df_county is not None and "STATEA" in df_county.columns:
+        df_county = df_county[df_county["STATEA"] == "06"].copy()
+    return df_place, df_county, df_msa, data_from_api
+
+
+def _stage2b_attach_place_income_2018(df_place):
+    """Attach cached or fetched 2018 place income frame to place data."""
+    if df_place is None or "PLACEA" not in df_place.columns:
+        return df_place
+    df_place = df_place.copy()
+    df_place["PLACEA"] = df_place["PLACEA"].astype(str).str.zfill(5)
+    mhi_18 = None
+    need_18 = True
+    if CACHE_PATH_2018_PLACE.exists():
+        try:
+            with open(CACHE_PATH_2018_PLACE) as f:
+                c18 = json.load(f)
+            dt = datetime.fromisoformat(c18.get("cached_at", "1970-01-01"))
+            if datetime.now() - dt < timedelta(days=CACHE_MAX_AGE_DAYS):
+                mhi_18 = pd.DataFrame(c18["data"])
+                need_18 = False
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass
+    if need_18:
+        _ensure_ipums_api_key()
+        print("Fetching 2014–2018 ACS place MHI (NHGIS)...")
+        mhi_18 = _fetch_place_mhi_2018_nhgis()
+        with open(CACHE_PATH_2018_PLACE, "w") as f:
+            json.dump({"cached_at": datetime.now().isoformat(), "data": mhi_18.to_dict(orient="list")}, f)
+        print(f"Cached to {CACHE_PATH_2018_PLACE}")
+    if mhi_18 is not None and len(mhi_18) > 0:
+        return df_place.merge(mhi_18, on="PLACEA", how="left")
+    if "place_income_2018" not in df_place.columns:
+        df_place["place_income_2018"] = np.nan
+    return df_place
+
+
+# --- Section: main() ---
+def main():
+    """Run the script orchestration pipeline."""
+    charts_skipped_low_r2 = []
+    all_r2_results = []
+    # Step 1: Load relationship files (place-county and county-CBSA)
+    df_rel, df_county_cbsa, ca_county_name_to_fips = _stage1_load_relationship_artifacts()
+
+    # Step 2: Load NHGIS data (cache or API)
+    df_place, df_county, df_msa, data_from_api = _stage2_load_acs_data()
 
     # Step 2b: 2014–2018 place MHI (B19013) for income delta — cache or NHGIS, merge onto df_place
-    if df_place is not None and "PLACEA" in df_place.columns:
-        df_place = df_place.copy()
-        df_place["PLACEA"] = df_place["PLACEA"].astype(str).str.zfill(5)
-        mhi_18 = None
-        need_18 = True
-        if CACHE_PATH_2018_PLACE.exists():
-            try:
-                with open(CACHE_PATH_2018_PLACE) as f:
-                    c18 = json.load(f)
-                dt = datetime.fromisoformat(c18.get("cached_at", "1970-01-01"))
-                if datetime.now() - dt < timedelta(days=CACHE_MAX_AGE_DAYS):
-                    mhi_18 = pd.DataFrame(c18["data"])
-                    need_18 = False
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-                pass
-        if need_18:
-            if not IPUMS_API_KEY:
-                IPUMS_API_KEY = input("Enter your IPUMS API Key: ").strip()
-            print("Fetching 2014–2018 ACS place MHI (NHGIS)...")
-            mhi_18 = _fetch_place_mhi_2018_nhgis()
-            with open(CACHE_PATH_2018_PLACE, "w") as f:
-                json.dump(
-                    {"cached_at": datetime.now().isoformat(), "data": mhi_18.to_dict(orient="list")},
-                    f,
-                )
-            print(f"Cached to {CACHE_PATH_2018_PLACE}")
-        if mhi_18 is not None and len(mhi_18) > 0:
-            df_place = df_place.merge(mhi_18, on="PLACEA", how="left")
-        elif "place_income_2018" not in df_place.columns:
-            df_place["place_income_2018"] = np.nan
+    df_place = _stage2b_attach_place_income_2018(df_place)
 
     # Step 3: Link places to counties using relationship file
     # Always merge PLACE_TYPE if available, even if COUNTYA already exists (needed for filtering incorporated cities)
@@ -4787,6 +5336,9 @@ if __name__ == "__main__":
     # Define years for analysis
     permit_years = [2018, 2019, 2020, 2021, 2022, 2023, 2024]
     df_apr_db_inc = df_apr_db_inc[df_apr_db_inc["YEAR"].isin(permit_years)]
+    run_poisson_db_vs_total_units(
+        df_apr_db_inc, Path(__file__).resolve().parent, all_r2_results, co_cols, bp_cols, ent_cols,
+    )
 
     # Step 9: Aggregate units by jurisdiction, DR_TYPE, YEAR, and category (CO/BP/ENT)
     print("\nAggregating density bonus/inclusionary units by jurisdiction, year, and category...")
@@ -5148,6 +5700,8 @@ if __name__ == "__main__":
         for cat in ["CO", "BP"]:
             output_cols += [f"{prefix}_{cat}_{y}" for y in permit_years]
             output_cols.append(f"{prefix}_{cat}_total")
+    # Preserve city EV1 income-tier totals for downstream PCA contract.
+    output_cols += ["VLOW_LOW_CO_total", "MOD_CO_total"]
 
     # Only keep columns that exist in df_final
     # Sort by geography_type (City first, County second), then alphabetically by JURISDICTION
@@ -5157,16 +5711,6 @@ if __name__ == "__main__":
     print("\nSample output:")
     sample_cols = ["JURISDICTION", "geography_type", "dr_units_DB_CO", "total_units_DB_CO", "dr_units_DB_BP", "total_units_DB_BP", "dr_units_DB"]
     print(df_final[[c for c in sample_cols if c in df_final.columns]].head(10))
-
-    # Buddha Tier 1 harness: real df_final + APR; exit before timeline charts / MCMC (set ACS_V2_HARNESS_TIER1=1)
-    if os.environ.get("ACS_V2_HARNESS_TIER1", "").strip().lower() in ("1", "true", "yes"):
-        from harness_buddha_tier1_impl import run_full_pipeline_tier1_checks
-        run_full_pipeline_tier1_checks(
-            df_final=df_final,
-            df_apr_master=df_apr_master,
-            permit_years=permit_years,
-        )
-        raise SystemExit(0)
 
     if ENABLE_CONSTRUCTION_TIMELINE:
         # =============================================================================
@@ -5235,15 +5779,19 @@ if __name__ == "__main__":
             point_color = "#ED7D31"
             setup_chart_style()
             # OLS: income/ZHVI/afford (x) predicts log(wait time) (y). CI: hierarchical Bayes -> SMC -> bootstrap fallback.
+            timeline_predictors = (
+                "income_delta_pct_change",
+                "population_delta_pct_change",
+                "zhvi_pct_change",
+                "zhvi_afford_ratio",
+                "pct_afford",
+                "zori_pct_change",
+                "zori_afford_ratio",
+                "zori_pct_afford",
+            )
             timeline_outcomes = [
-                ("income_delta_pct_change", "% change in real median household income", "identity", lambda x: x),
-                ("population_delta_pct_change", "% change in place population", "identity", lambda x: x),
-                ("zhvi_pct_change", ZHVI_PCT_LABEL, "identity", lambda x: x),
-                ("zhvi_afford_ratio", AFFORD_X_LABEL, "identity", lambda x: x),
-                ("pct_afford", PCT_AFFORD_X_LABEL, "identity", lambda x: x),
-                ("zori_pct_change", ZORI_PCT_LABEL, "identity", lambda x: x),
-                ("zori_afford_ratio", ZORI_AFFORD_X_LABEL, "identity", lambda x: x),
-                ("zori_pct_afford", ZORI_PCT_AFFORD_X_LABEL, "identity", lambda x: x),
+                (pred_col, _predictor_display_label(pred_col), "identity", lambda x: x)
+                for pred_col in timeline_predictors
             ]
             n_boot = 10000
             phase_to_yearly_y = {"median_days_ent_permit": "days_ent_permit", "median_days_permit_completion": "days_permit_completion", "median_days_ent_completion": "days_ent_completion"}
@@ -5408,7 +5956,13 @@ if __name__ == "__main__":
                         else ("pct_afford" if pred_col == "pct_afford"
                         else ("zori_pct_afford" if pred_col == "zori_pct_afford" else "afford")))))))
                     out_path = timeline_dir / f"timeline_{phase_tag}_vs_{pred_tag}.png"
-                    fig.savefig(out_path, dpi=150, bbox_inches="tight", bbox_extra_artists=[leg], facecolor="white")
+                    fig.savefig(
+                        out_path,
+                        dpi=150,
+                        bbox_inches="tight",
+                        bbox_extra_artists=[leg],
+                        facecolor="white",
+                    )
                     plt.close(fig)
                     print(f"  Saved: {out_path.name}")
     
@@ -5475,44 +6029,59 @@ if __name__ == "__main__":
     ]
     # Cities only (counties removed per user request); city predictor loop uses city_predictor_specs below
     cat_specs = [('CO', 'Completions'), ('BP', 'Building Permits')]
-    # Labels for x-axis: income, ZHVI/ZORI % change, afford ratios, real dollar change / income
+    # Labels from canonical predictor metadata; no duplicated predictor literals.
     x_var_labels = {
-        'income_delta_pct_change': '% change in real median household income (2014–2018 → 2020–2024 ACS, CPI-deflated)',
-        'population_delta_pct_change': (
-            '% change in place population (2014–2018 → 2020–2024 ACS, same geography)\n'
-            '100 × (pop₂₀₂₀₋₂₄ − pop₂₀₁₄₋₁₈) / pop₂₀₁₄₋₁₈'
-        ),
-        'place_income': 'City Median Household Income',
-        'zhvi_pct_change': ZHVI_PCT_LABEL,
-        'zhvi_afford_ratio': AFFORD_X_LABEL,
-        'pct_afford': PCT_AFFORD_X_LABEL,
-        'zori_pct_change': ZORI_PCT_LABEL,
-        'zori_afford_ratio': ZORI_AFFORD_X_LABEL,
-        'zori_pct_afford': ZORI_PCT_AFFORD_X_LABEL,
+        x_col: meta["display_label"]
+        for x_col, meta in PREDICTOR_META.items()
+        if meta["geo_applicability"] in ("city", "both")
     }
+    x_var_labels["place_income"] = "City Median Household Income"
     output_dir = Path(__file__).resolve().parent
 
-    # City predictor specs: (x_col, file_tag, print_title, x_axis_filter_note, require_msa). One loop over specs then dr_specs then cat_specs.
+    # City predictor specs from canonical metadata: (x_col, file_tag, print_title, x_axis_filter_note, require_msa)
+    city_file_tag = {
+        "income_delta_pct_change": "income_delta",
+        "population_delta_pct_change": "population_delta",
+        "zhvi_pct_change": "zhvi",
+        "zhvi_afford_ratio": "afford",
+        "pct_afford": "pct_afford",
+        "zori_pct_change": "zori",
+        "zori_afford_ratio": "zori_afford",
+        "zori_pct_afford": "zori_pct_afford",
+    }
     city_predictor_specs = [
-        ('income_delta_pct_change', 'income_delta', '% change in real median household income', None, False),
-        ('population_delta_pct_change', 'population_delta', '% change in place population', None, False),
-        ('zhvi_pct_change', 'zhvi', 'ZHVI % change', None, False),
-        ('zhvi_afford_ratio', 'afford', 'affordability ratio', 'Metro Regions only', True),
-        ('pct_afford', 'pct_afford', 'ZHVI real $ change / income', 'Metro Regions only', True),
-        ('zori_pct_change', 'zori', 'ZORI % change', None, False),
-        ('zori_afford_ratio', 'zori_afford', 'ZORI rent/income ratio', 'Metro Regions only', True),
-        ('zori_pct_afford', 'zori_pct_afford', 'ZORI annualized real $ change / income', 'Metro Regions only', True),
+        (
+            x_col,
+            city_file_tag[x_col],
+            _predictor_print_title(x_col),
+            "Metro Regions only" if _predictor_requires_msa(x_col) else None,
+            _predictor_requires_msa(x_col),
+        )
+        for x_col in city_file_tag
     ]
+    # Precompute context for city-level repeated filtering.
+    city_xsf_ctx = _build_city_xsf_mask_context(df_final, CITY_XSF_EXCLUDE)
+    city_base_mask = city_xsf_ctx.is_city
+    city_fit_masks = {}
+    for x_col, *_ in city_predictor_specs:
+        if x_col not in df_final.columns:
+            continue
+        fit_mask_kind = _predictor_fit_mask_kind(x_col)
+        if fit_mask_kind == "finite":
+            city_fit_masks[x_col] = (
+                df_final[x_col].notna()
+                & np.isfinite(np.asarray(df_final[x_col].values, dtype=np.float64))
+            )
+        else:
+            city_fit_masks[x_col] = df_final[x_col].notna() & (df_final[x_col] > 0)
+
     # Dynamic sets for city MFH sub-variants (hash holdout ~20%)
     hash_exclude_cities = {
         j
-        for j in df_final.loc[df_final['geography_type'] == 'City', 'JURISDICTION'].dropna().unique()
+        for j in df_final.loc[city_base_mask, 'JURISDICTION'].dropna().unique()
         if hash(j) % HOLDOUT_MODULUS == 0
     }
-    xsf_city_mask = (
-        (df_final['geography_type'] == 'City')
-        & ~df_final['JURISDICTION'].str.upper().isin({c.upper() for c in CITY_XSF_EXCLUDE})
-    )
+    xsf_city_mask = city_xsf_ctx.is_city_non_xsf
     hash_exclude_xsf_cities = {
         j
         for j in df_final.loc[xsf_city_mask, 'JURISDICTION'].dropna().unique()
@@ -5530,14 +6099,10 @@ if __name__ == "__main__":
     for x_col, file_tag, print_title, x_axis_filter_note, require_msa in city_predictor_specs:
         if x_col not in df_final.columns:
             continue
-        base = (df_final['geography_type'] == 'City')
-        if x_col in X_COL_TWO_PART_LINEAR_X:
-            valid_x = df_final[x_col].notna() & np.isfinite(np.asarray(df_final[x_col].values, dtype=np.float64))
-        else:
-            valid_x = df_final[x_col].notna() & (df_final[x_col] > 0)
+        valid_x = city_fit_masks[x_col]
         if require_msa:
             valid_x = valid_x & df_final['msa_income'].notna()
-        geo_mask = base & valid_x
+        geo_mask = city_base_mask & valid_x
         df_geo = df_final[geo_mask].copy()
         if len(df_geo) < 10:
             continue
@@ -5552,7 +6117,11 @@ if __name__ == "__main__":
             print(f"  SAN FRANCISCO included: {'SAN FRANCISCO' in df_geo['JURISDICTION'].values}")
             print(f"  {dr_type} data for years: {dr_years}")
             for (cat_suffix, cat_label), (exclude, var_suffix, var_label) in product(cat_specs, variants):
-                df_var = df_geo if exclude is None else df_geo[~df_geo['JURISDICTION'].str.upper().isin({c.upper() for c in exclude})].copy()
+                if exclude is None:
+                    df_var = df_geo
+                else:
+                    exclude_upper = _to_upper_set(exclude)
+                    df_var = df_geo[_exclude_by_upper(df_geo['JURISDICTION'], exclude_upper)].copy()
                 if len(df_var) < 10:
                     continue
                 filter_note = x_axis_filter_note
@@ -5593,7 +6162,11 @@ if __name__ == "__main__":
     city_ror_variants = [(None, '', None)] + city_subvariants
 
     for exclude_cities, ror_suffix, ror_label in city_ror_variants:
-        df_ror = df_cities if not exclude_cities else df_cities[~df_cities['JURISDICTION'].str.upper().isin({c.upper() for c in exclude_cities})].copy()
+        if not exclude_cities:
+            df_ror = df_cities
+        else:
+            exclude_upper = _to_upper_set(exclude_cities)
+            df_ror = df_cities[_exclude_by_upper(df_cities['JURISDICTION'], exclude_upper)].copy()
         if len(df_ror) < 10:
             continue
         for x_prefix, y_prefix, x_label, y_label, file_tag in rate_on_rate_specs:
@@ -5878,6 +6451,44 @@ if __name__ == "__main__":
         else:
             df_zip['msa_income'] = np.nan
             df_zip['ref_income'] = df_zip['county_income']
+        # EV1 ZIP delta predictors: use available baseline/current ZIP columns; emit diagnostics.
+        zip_income_now_col = "median_income" if "median_income" in df_zip.columns else None
+        zip_income_base_col = next(
+            (c for c in ("median_income_2018", "income_2018", "place_income_2018") if c in df_zip.columns),
+            None,
+        )
+        if zip_income_now_col is not None and zip_income_base_col is not None:
+            zip_income_now = pd.to_numeric(df_zip[zip_income_now_col], errors="coerce").to_numpy(dtype=np.float64)
+            zip_income_base = pd.to_numeric(df_zip[zip_income_base_col], errors="coerce").to_numpy(dtype=np.float64)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                df_zip["income_delta_pct_change"] = np.where(
+                    np.isfinite(zip_income_now) & np.isfinite(zip_income_base) & (zip_income_base > 0),
+                    100.0 * (zip_income_now - zip_income_base) / zip_income_base,
+                    np.nan,
+                )
+        else:
+            df_zip["income_delta_pct_change"] = np.nan
+        zip_pop_now_col = "population" if "population" in df_zip.columns else None
+        zip_pop_base_col = next(
+            (c for c in ("population_2018", "place_population_2018") if c in df_zip.columns),
+            None,
+        )
+        if zip_pop_now_col is not None and zip_pop_base_col is not None:
+            zip_pop_now = pd.to_numeric(df_zip[zip_pop_now_col], errors="coerce").to_numpy(dtype=np.float64)
+            zip_pop_base = pd.to_numeric(df_zip[zip_pop_base_col], errors="coerce").to_numpy(dtype=np.float64)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                df_zip["population_delta_pct_change"] = np.where(
+                    np.isfinite(zip_pop_now) & np.isfinite(zip_pop_base) & (zip_pop_base > 0),
+                    100.0 * (zip_pop_now - zip_pop_base) / zip_pop_base,
+                    np.nan,
+                )
+        else:
+            df_zip["population_delta_pct_change"] = np.nan
+        print(
+            "  ZIP EV1 deltas: "
+            f"income non-null={(df_zip['income_delta_pct_change'].notna()).sum()}, "
+            f"population non-null={(df_zip['population_delta_pct_change'].notna()).sum()}"
+        )
         # Load ZHVI by ZIP
         zhvi_zip_path = Path(__file__).resolve().parent / "Zip_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv"
         if zhvi_zip_path.exists():
@@ -6118,25 +6729,36 @@ if __name__ == "__main__":
             ('vlow_low_CO', 'Multifamily (Very low + Low) Income Completions'),
             ('mod_CO', MODERATE_INCOME_COMPLETIONS_LABEL),
         ]
-        # (x_col, x_tag, x_axis_label, use_log_x, x_tick_dollar, require_msa) — one loop, no branch by predictor type
-        # For ZIP ref-income predictors, enforce Metro Regions only (msa_income required), matching city policy.
-        zip_predictor_specs = [
-            ('median_income', 'income', "ZIP Median household income (ACS 2020-2024), log scale", True, True, False),
-            ('zhvi_pct_change', 'zhvi', ZHVI_PCT_LABEL, False, False, False),
-            ('zhvi_afford_ratio', 'afford', AFFORD_X_LABEL_ZIP, False, False, True),
-            ('pct_afford', 'pct_afford', PCT_AFFORD_X_LABEL_ZIP, False, False, True),
-            ('zori_pct_change', 'zori', ZORI_PCT_LABEL, False, False, False),
-            ('zori_afford_ratio', 'zori_afford', ZORI_AFFORD_X_LABEL_ZIP, False, False, True),
-            ('zori_pct_afford', 'zori_pct_afford', ZORI_PCT_AFFORD_X_LABEL_ZIP, False, False, True),
-        ]
-        zip_x_var_labels = {
-            **x_var_labels,
-            'zhvi_afford_ratio': AFFORD_X_LABEL_ZIP,
-            'pct_afford': PCT_AFFORD_X_LABEL_ZIP,
-            'zori_pct_change': ZORI_PCT_LABEL,
-            'zori_afford_ratio': ZORI_AFFORD_X_LABEL_ZIP,
-            'zori_pct_afford': ZORI_PCT_AFFORD_X_LABEL_ZIP,
+        # (x_col, x_tag, x_axis_label, use_log_x, x_tick_dollar, require_msa) from canonical metadata.
+        zip_x_tag = {
+            "median_income": "income",
+            "zhvi_pct_change": "zhvi",
+            "zhvi_afford_ratio": "afford",
+            "pct_afford": "pct_afford",
+            "zori_pct_change": "zori",
+            "zori_afford_ratio": "zori_afford",
+            "zori_pct_afford": "zori_pct_afford",
         }
+        zip_label_override = {
+            "zhvi_afford_ratio": AFFORD_X_LABEL_ZIP,
+            "pct_afford": PCT_AFFORD_X_LABEL_ZIP,
+            "zori_afford_ratio": ZORI_AFFORD_X_LABEL_ZIP,
+            "zori_pct_afford": ZORI_PCT_AFFORD_X_LABEL_ZIP,
+        }
+        zip_predictor_specs = [
+            (
+                x_col,
+                zip_x_tag[x_col],
+                zip_label_override.get(x_col, _predictor_display_label(x_col)),
+                _predictor_is_log_x(x_col),
+                _predictor_tick_kind(x_col) == "dollar",
+                _predictor_requires_msa(x_col),
+            )
+            for x_col in zip_x_tag
+        ]
+        zip_x_var_labels = {**x_var_labels}
+        for x_col in zip_x_tag:
+            zip_x_var_labels[x_col] = zip_label_override.get(x_col, _predictor_display_label(x_col))
         df_zip_for_pca = df_zip.copy()
         
         # ZIP regressions: two-part rate (per 1000 pop), same as city. Population from ACS ZCTA.
@@ -6144,11 +6766,13 @@ if __name__ == "__main__":
             print("  WARNING: Insufficient ZIP population (ACS ZCTA); skipping ZIP rate regressions.")
         else:
             print("  ZIP rate regressions: CI band = Hierarchical Bayes (year + county) when ZIP-year data available; else pooled two-part.")
+            zip_str = df_zip['zipcode'].astype(str)
             # Holdout uses str ZIPs → hash() is CPython string hashing (subset stable within a run; can differ across processes unless PYTHONHASHSEED is fixed). For reproducible holdout across runs, hash numeric codes instead: drop .astype(str) in the comprehensions below when zipcode is integer-like.
             hash_exclude_zips = {
-                z for z in df_zip['zipcode'].astype(str) if hash(z) % HOLDOUT_MODULUS == 0
+                z for z in zip_str if hash(z) % HOLDOUT_MODULUS == 0
             }
-            non_sf_zips = set(df_zip['zipcode'].astype(str).str.zfill(5)) - sf_zips_for_xsf
+            zip_str_zfill = zip_str.str.zfill(5)
+            non_sf_zips = set(zip_str_zfill) - sf_zips_for_xsf
             hash_exclude_xsf_zips = {z for z in non_sf_zips if hash(z) % HOLDOUT_MODULUS == 0}
             zip_mfh_subvariants = [
                 (None, '', None),
@@ -6174,7 +6798,10 @@ if __name__ == "__main__":
                 ('net_MF_BP', 'mf_owner_BP', 'Net Multifamily Building Permits', 'Multifamily Owner Permits', 'net_mf_bp_to_mf_owner_bp'),
             ]
             for exclude_zips, suffix, exclude_label in zip_mfh_subvariants:
-                df_use = df_zip if exclude_zips is None else df_zip[~df_zip['zipcode'].astype(str).isin({str(z) for z in exclude_zips})].copy()
+                if exclude_zips is None:
+                    df_use = df_zip
+                else:
+                    df_use = df_zip[_exclude_by_str(df_zip['zipcode'], exclude_zips)].copy()
                 if len(df_use) < 20:
                     continue
                 use_zips = set(df_use['zipcode'].astype(str).str.zfill(5))
@@ -6265,7 +6892,10 @@ if __name__ == "__main__":
             for y_col, y_label in zip_outcomes:
                 variants = zip_mfh_subvariants if 'MF' in y_col else [(None, '', None)]
                 for exclude_zips, suffix, exclude_label in variants:
-                    df_use = df_zip if exclude_zips is None else df_zip[~df_zip['zipcode'].astype(str).isin({str(z) for z in exclude_zips})].copy()
+                    if exclude_zips is None:
+                        df_use = df_zip
+                    else:
+                        df_use = df_zip[_exclude_by_str(df_zip['zipcode'], exclude_zips)].copy()
                     if len(df_use) < 20:
                         continue
                     zip_pred_nonnull = {
@@ -6312,6 +6942,19 @@ if __name__ == "__main__":
     )
     print("="*70)
     df_city_for_pca = df_final[df_final["geography_type"] == "City"].copy()
+    # City EV1 totals fallback: derive from yearly columns when present.
+    city_vlow_year_cols = [f"VLOW_LOW_CO_{y}" for y in permit_years if f"VLOW_LOW_CO_{y}" in df_city_for_pca.columns]
+    city_mod_year_cols = [f"MOD_CO_{y}" for y in permit_years if f"MOD_CO_{y}" in df_city_for_pca.columns]
+    if "VLOW_LOW_CO_total" not in df_city_for_pca.columns and city_vlow_year_cols:
+        df_city_for_pca["VLOW_LOW_CO_total"] = df_city_for_pca[city_vlow_year_cols].sum(axis=1).values
+    if "MOD_CO_total" not in df_city_for_pca.columns and city_mod_year_cols:
+        df_city_for_pca["MOD_CO_total"] = df_city_for_pca[city_mod_year_cols].sum(axis=1).values
+    city_required = list(_EV1_PCA_CITY_CO_COUNT_COLS) + list(EV1_PCA_DELTA_COLS) + ["population"]
+    zip_required = list(_EV1_PCA_ZIP_CO_COUNT_COLS) + list(EV1_PCA_DELTA_COLS) + ["population"]
+    city_missing = [c for c in city_required if c not in df_city_for_pca.columns]
+    zip_missing = [c for c in zip_required if df_zip_for_pca is None or c not in df_zip_for_pca.columns]
+    print(f"  EV1 preflight city missing: {city_missing if city_missing else 'none'}")
+    print(f"  EV1 preflight zip missing: {zip_missing if zip_missing else 'none'}")
     run_pca_ev1_affordability(df_city_for_pca, df_zip_for_pca, Path(__file__).resolve().parent)
 
     # R² diagnostics: table (descending) and CSV with Regression = "Y vs X", Geography separate
@@ -6347,6 +6990,7 @@ if __name__ == "__main__":
         print("="*70)
     print("\nAnalysis complete.")
 
-"""MIT License
+# ../LICENSE
 
-Creative Commons CC-BY-SA 4.0 2026 Diego Aguilar-Canabal"""
+if __name__ == "__main__":
+    main()
