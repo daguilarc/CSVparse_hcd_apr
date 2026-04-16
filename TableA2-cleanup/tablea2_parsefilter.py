@@ -5,6 +5,12 @@ Uses a two-pass raw-text structural repair before pandas parsing:
 1. Fix malformed opener pattern that starts ambiguous quoted fields
 2. Fix orphaned closer pattern at start of subsequent lines
 
+Upstream, stray ASCII double quotes in affordability narrative text (Excel Table A2
+column A2_18_Affordable / APR fields such as NO_FA_DR, NOTES) combined with naive CSV
+export can break record boundaries. This pipeline mitigates that with structural repair
+plus optional stripping of a trailing quote on known HCD/ABAG boilerplate strings after
+parse. Rows skipped by on_bad_lines are not recovered here.
+
 Then applies date-year validation, deduplication, and targeted repair diagnostics.
 
 Outputs:
@@ -163,6 +169,37 @@ def _subset_rows_by_line_hits(df, ranges, line_hits):
     return df.loc[keep].copy()
 
 
+_AFFORDABILITY_BOILERPLATE_PREFIX = re.compile(
+    r"^\s*(Used HCD Affordability Calculator|ABAG ADU Affordability Study)",
+    re.IGNORECASE,
+)
+
+
+def _strip_affordability_trailing_quotes(df):
+    """Strip one trailing ASCII \" from known HCD/ABAG boilerplate in text columns.
+
+    Returns the number of cell values modified (not row count).
+    """
+    cols = [c for c in ("NO_FA_DR", "NOTES", "FIN_ASSIST_NAME") if c in df.columns]
+    if not cols:
+        return 0
+    n_cells = 0
+    for col in cols:
+        ser = df[col]
+        s = ser.astype(str)
+        is_na = ser.isna()
+        match_prefix = s.str.match(_AFFORDABILITY_BOILERPLATE_PREFIX, na=False) & ~is_na
+        stripped = s.str.rstrip()
+        ends_quote = stripped.str.endswith('"')
+        to_fix = match_prefix & ends_quote & ~is_na
+        if not to_fix.any():
+            continue
+        newvals = stripped[to_fix].str.slice(0, -1).str.rstrip()
+        df.loc[to_fix, col] = newvals.values
+        n_cells += int(to_fix.sum())
+    return n_cells
+
+
 def _repair_column_shift_rows(df):
     """Fix rows where NOTES text is shifted into NO_FA_DR; returns repaired row count."""
     shifted_cols = [
@@ -281,35 +318,12 @@ def _classify_truncated_rows(df_clean, truncated_df):
 
     return pd.DataFrame(matched_records), pd.DataFrame(unmatched_records)
 
-
-# Step 1: Read + structurally repair + parse with skip policy
-print(f"Loading: {apr_path}")
-raw_csv = apr_path.read_text(encoding="utf-8", errors="replace")
-fixed_csv, n_openers, n_closers, touched_lines = _repair_quote_corruption(raw_csv)
-closer_pattern = re.compile(r"^([A-Z][A-Z ]*?)\"\"\"([,\n\r])")
-closer_lines = {line_no for line_no, line in enumerate(raw_csv.splitlines(), start=1) if closer_pattern.match(line)}
-df_before_parse, before_ranges = _parse_csv_with_line_ranges(raw_csv)
-df_after_parse, after_ranges = _parse_csv_with_line_ranges(fixed_csv)
-df = pd.read_csv(io.StringIO(fixed_csv), low_memory=False, on_bad_lines="skip")
-column_shift_repaired = _repair_column_shift_rows(df)
-truncated_rows = _extract_truncated_closer_rows(fixed_csv, closer_lines)
-affected_before = _subset_rows_by_line_hits(df_before_parse, before_ranges, touched_lines)
-affected_after = _subset_rows_by_line_hits(df_after_parse, after_ranges, touched_lines)
-affected_before.to_csv(before_fix_path, index=False)
-affected_after.to_csv(after_fix_path, index=False)
-print(f"Quote repair replacements: openers={n_openers:,}, closers={n_closers:,}")
-print(f"Quote-fix diagnostics exported: {before_fix_path.name} ({len(affected_before):,} rows), {after_fix_path.name} ({len(affected_after):,} rows)")
-print(f"Rows loaded: {len(df):,}, Columns: {len(df.columns)}")
-if column_shift_repaired:
-    print(f"Column-shift repair: fixed {column_shift_repaired:,} rows")
-
-# Step 2: Date-year validation
-# One row pass: check all three permit types (ISS_DATE, ENT_DATE, CO_DATE)
 _DATE_CHECK_CONFIG = [
     ('BP_ISSUE_DT1', 'NO_BUILDING_PERMITS', "ISS_DATE mismatch"),
     ('ENT_APPROVE_DT1', 'NO_ENTITLEMENTS', "ENT_DATE mismatch"),
     ('CO_ISSUE_DT1', 'NO_OTHER_FORMS_OF_READINESS', "CO_DATE mismatch"),
 ]
+
 
 def _row_date_mismatches(row):
     """Return (iss_mismatch, ent_mismatch, co_mismatch) for one row."""
@@ -318,107 +332,138 @@ def _row_date_mismatches(row):
         for date_col, count_col, _ in _DATE_CHECK_CONFIG
     )
 
-# Single pass: row-wise tuple of (iss, ent, co) mismatch; unpack once into columns (omni: no repeated apply)
-_mismatch_tuples = df.apply(_row_date_mismatches, axis=1)
-_mismatch_df = pd.DataFrame(_mismatch_tuples.tolist(), index=df.index)
-iss_mismatch = _mismatch_df[0]
-ent_mismatch = _mismatch_df[1]
-co_mismatch = _mismatch_df[2]
 
-# Combine: drop if ANY date mismatches
-any_mismatch = iss_mismatch | ent_mismatch | co_mismatch
-df_after_mismatch = df[~any_mismatch].copy()
-df_dropped_mismatch = df[any_mismatch].copy()
+def main():
+    # Step 1: Read + structurally repair + parse with skip policy
+    print(f"Loading: {apr_path}")
+    raw_csv = apr_path.read_text(encoding="utf-8", errors="replace")
+    fixed_csv, n_openers, n_closers, touched_lines = _repair_quote_corruption(raw_csv)
+    closer_pattern = re.compile(r"^([A-Z][A-Z ]*?)\"\"\"([,\n\r])")
+    closer_lines = {line_no for line_no, line in enumerate(raw_csv.splitlines(), start=1) if closer_pattern.match(line)}
+    df_before_parse, before_ranges = _parse_csv_with_line_ranges(raw_csv)
+    df_after_parse, after_ranges = _parse_csv_with_line_ranges(fixed_csv)
+    df = pd.read_csv(io.StringIO(fixed_csv), low_memory=False, on_bad_lines="skip")
+    affordability_quote_cells_fixed = _strip_affordability_trailing_quotes(df)
+    column_shift_repaired = _repair_column_shift_rows(df)
+    truncated_rows = _extract_truncated_closer_rows(fixed_csv, closer_lines)
+    affected_before = _subset_rows_by_line_hits(df_before_parse, before_ranges, touched_lines)
+    affected_after = _subset_rows_by_line_hits(df_after_parse, after_ranges, touched_lines)
+    affected_before.to_csv(before_fix_path, index=False)
+    affected_after.to_csv(after_fix_path, index=False)
+    print(f"Quote repair replacements: openers={n_openers:,}, closers={n_closers:,}")
+    print(f"Quote-fix diagnostics exported: {before_fix_path.name} ({len(affected_before):,} rows), {after_fix_path.name} ({len(affected_after):,} rows)")
+    print(f"Rows loaded: {len(df):,}, Columns: {len(df.columns)}")
+    if affordability_quote_cells_fixed:
+        print(f"Affordability trailing-quote strip: {affordability_quote_cells_fixed:,} cells")
+    if column_shift_repaired:
+        print(f"Column-shift repair: fixed {column_shift_repaired:,} rows")
 
-# Assign mismatch reason once: first matching type (ISS, then ENT, then CO) from tuple array (omni: one pass)
-_dropped_arr = np.array(_mismatch_tuples[any_mismatch].tolist())
-first_true_idx = np.argmax(_dropped_arr.astype(int), axis=1)
-_reasons = pd.Series(
-    [_DATE_CHECK_CONFIG[i][2] for i in first_true_idx],
-    index=df_dropped_mismatch.index,
-)
-df_dropped_mismatch = df_dropped_mismatch.assign(mismatch_reason=_reasons)
+    # Step 2: Date-year validation
+    # Single pass: row-wise tuple of (iss, ent, co) mismatch; unpack once into columns (omni: no repeated apply)
+    _mismatch_tuples = df.apply(_row_date_mismatches, axis=1)
+    _mismatch_df = pd.DataFrame(_mismatch_tuples.tolist(), index=df.index)
+    iss_mismatch = _mismatch_df[0]
+    ent_mismatch = _mismatch_df[1]
+    co_mismatch = _mismatch_df[2]
 
-# Step 3: Filter to valid years (2018-2024 = APR data range) (omni: one numeric series, no add/drop column)
-VALID_YEARS = [2018, 2019, 2020, 2021, 2022, 2023, 2024]
-year_numeric = pd.to_numeric(df_after_mismatch['YEAR'], errors='coerce')
-invalid_year_mask = ~year_numeric.isin(VALID_YEARS)
-df_dropped_year = df_after_mismatch[invalid_year_mask].copy()
-df_dropped_year['mismatch_reason'] = 'Invalid YEAR'
-df_clean = df_after_mismatch[~invalid_year_mask].copy()
+    # Combine: drop if ANY date mismatches
+    any_mismatch = iss_mismatch | ent_mismatch | co_mismatch
+    df_after_mismatch = df[~any_mismatch].copy()
+    df_dropped_mismatch = df[any_mismatch].copy()
 
-# Deduplicate: same project (jurisdiction, county, year, location, counts) can appear multiple times
-df_clean, n_dedup = _deduplicate_apr(df_clean)
-if n_dedup > 0:
-    pct_dedup = 100 * n_dedup / (len(df_clean) + n_dedup)
-    print(f"APR deduplication: removed {n_dedup:,} duplicate rows ({pct_dedup:.1f}% of pre-dedup total)")
+    # Assign mismatch reason once: first matching type (ISS, then ENT, then CO) from tuple array (omni: one pass)
+    _dropped_arr = np.array(_mismatch_tuples[any_mismatch].tolist())
+    first_true_idx = np.argmax(_dropped_arr.astype(int), axis=1)
+    _reasons = pd.Series(
+        [_DATE_CHECK_CONFIG[i][2] for i in first_true_idx],
+        index=df_dropped_mismatch.index,
+    )
+    df_dropped_mismatch = df_dropped_mismatch.assign(mismatch_reason=_reasons)
 
-matched_truncated, unmatched_truncated = _classify_truncated_rows(df_clean, truncated_rows)
+    # Step 3: Filter to valid years (2018-2024 = APR data range) (omni: one numeric series, no add/drop column)
+    VALID_YEARS = [2018, 2019, 2020, 2021, 2022, 2023, 2024]
+    year_numeric = pd.to_numeric(df_after_mismatch['YEAR'], errors='coerce')
+    invalid_year_mask = ~year_numeric.isin(VALID_YEARS)
+    df_dropped_year = df_after_mismatch[invalid_year_mask].copy()
+    df_dropped_year['mismatch_reason'] = 'Invalid YEAR'
+    df_clean = df_after_mismatch[~invalid_year_mask].copy()
 
-# Combine all dropped rows
-df_dropped = pd.concat([df_dropped_mismatch, df_dropped_year], ignore_index=True)
+    # Deduplicate: same project (jurisdiction, county, year, location, counts) can appear multiple times
+    df_clean, n_dedup = _deduplicate_apr(df_clean)
+    if n_dedup > 0:
+        pct_dedup = 100 * n_dedup / (len(df_clean) + n_dedup)
+        print(f"APR deduplication: removed {n_dedup:,} duplicate rows ({pct_dedup:.1f}% of pre-dedup total)")
 
-# Counts (omni: one sum over mismatch columns, then unpack)
-_mismatch_counts = _mismatch_df.sum()
-iss_count, ent_count, co_count = int(_mismatch_counts[0]), int(_mismatch_counts[1]), int(_mismatch_counts[2])
-invalid_year_count = len(df_dropped_year)
-total_dropped = len(df_dropped)
-total_kept = len(df_clean)
-total_rows = len(df)
+    matched_truncated, unmatched_truncated = _classify_truncated_rows(df_clean, truncated_rows)
 
-# Results (omni: pct scale once, then use in all lines)
-_pct = 100.0 / total_rows if total_rows else 0.0
-print(f"\n{'='*70}")
-print(f"PARSEFILTER ROW CLEANING RESULTS")
-print(f"{'='*70}")
-print(f"Total rows loaded:                {total_rows:>10,}")
-print(f"")
-print(f"  Rows kept:                      {total_kept:>10,} ({total_kept*_pct:>5.1f}%)")
-print(f"  ─────────────────────────────────────────────")
-print(f"  Rows dropped (date mismatch):   {len(df_dropped_mismatch):>10,} ({len(df_dropped_mismatch)*_pct:>5.1f}%)")
-print(f"        ISS_DATE mismatch:        {iss_count:>10,}")
-print(f"        ENT_DATE mismatch:        {ent_count:>10,}")
-print(f"        CO_DATE mismatch:         {co_count:>10,}")
-print(f"  Rows dropped (invalid YEAR):    {invalid_year_count:>10,} ({invalid_year_count*_pct:>5.1f}%)")
-print(f"  ─────────────────────────────────────────────")
-print(f"  Total dropped:                  {total_dropped:>10,} ({total_dropped*_pct:>5.1f}%)")
-print(f"{'='*70}")
+    # Combine all dropped rows
+    df_dropped = pd.concat([df_dropped_mismatch, df_dropped_year], ignore_index=True)
 
-# Export
-df_clean.to_csv(cleaned_path, index=False)
-matched_truncated.to_csv(matched_truncated_path, index=False)
-unmatched_truncated.to_csv(unmatched_truncated_path, index=False)
-print(f"\nOUTPUT FILES:")
-print(f"  Cleaned data: {cleaned_path}")
-print(f"  Recovery summary: {recovery_summary_path}")
-print(f"  Matched truncated: {matched_truncated_path} ({len(matched_truncated):,})")
-print(f"  Unmatched truncated: {unmatched_truncated_path} ({len(unmatched_truncated):,})")
+    # Counts (omni: one sum over mismatch columns, then unpack)
+    _mismatch_counts = _mismatch_df.sum()
+    iss_count, ent_count, co_count = int(_mismatch_counts[0]), int(_mismatch_counts[1]), int(_mismatch_counts[2])
+    invalid_year_count = len(df_dropped_year)
+    total_dropped = len(df_dropped)
+    total_kept = len(df_clean)
+    total_rows = len(df)
 
-if len(df_dropped) > 0:
-    df_dropped.to_csv(malformed_path, index=False)
-    print(f"  Dropped rows: {malformed_path}")
-    print(f"    ({len(df_dropped):,} total)")
+    # Results (omni: pct scale once, then use in all lines)
+    _pct = 100.0 / total_rows if total_rows else 0.0
+    print(f"\n{'='*70}")
+    print(f"PARSEFILTER ROW CLEANING RESULTS")
+    print(f"{'='*70}")
+    print(f"Total rows loaded:                {total_rows:>10,}")
+    print(f"")
+    print(f"  Rows kept:                      {total_kept:>10,} ({total_kept*_pct:>5.1f}%)")
+    print(f"  ─────────────────────────────────────────────")
+    print(f"  Rows dropped (date mismatch):   {len(df_dropped_mismatch):>10,} ({len(df_dropped_mismatch)*_pct:>5.1f}%)")
+    print(f"        ISS_DATE mismatch:        {iss_count:>10,}")
+    print(f"        ENT_DATE mismatch:        {ent_count:>10,}")
+    print(f"        CO_DATE mismatch:         {co_count:>10,}")
+    print(f"  Rows dropped (invalid YEAR):    {invalid_year_count:>10,} ({invalid_year_count*_pct:>5.1f}%)")
+    print(f"  ─────────────────────────────────────────────")
+    print(f"  Total dropped:                  {total_dropped:>10,} ({total_dropped*_pct:>5.1f}%)")
+    print(f"{'='*70}")
 
-pd.DataFrame(
-    [
-        ("rows_parsed_before_fix", len(df_before_parse)),
-        ("rows_parsed_after_fix", len(df_after_parse)),
-        ("rows_loaded_main_pipeline", len(df)),
-        ("net_row_delta_after_minus_before", len(df_after_parse) - len(df_before_parse)),
-        ("affected_rows_before_fix", len(affected_before)),
-        ("affected_rows_after_fix", len(affected_after)),
-        ("affected_row_delta_after_minus_before", len(affected_after) - len(affected_before)),
-        ("opener_replacements", n_openers),
-        ("closer_replacements", n_closers),
-        ("column_shift_rows_repaired", column_shift_repaired),
-        ("truncated_closer_rows", len(truncated_rows)),
-        ("truncated_matched_active", int((matched_truncated.get("verdict", pd.Series(dtype=str)) == "matched_active").sum())),
-        ("truncated_matched_zero", int((matched_truncated.get("verdict", pd.Series(dtype=str)) == "matched_zero").sum())),
-        ("truncated_unmatched", len(unmatched_truncated)),
-    ],
-    columns=["metric", "value"],
-).to_csv(recovery_summary_path, index=False)
+    # Export
+    df_clean.to_csv(cleaned_path, index=False)
+    matched_truncated.to_csv(matched_truncated_path, index=False)
+    unmatched_truncated.to_csv(unmatched_truncated_path, index=False)
+    print(f"\nOUTPUT FILES:")
+    print(f"  Cleaned data: {cleaned_path}")
+    print(f"  Recovery summary: {recovery_summary_path}")
+    print(f"  Matched truncated: {matched_truncated_path} ({len(matched_truncated):,})")
+    print(f"  Unmatched truncated: {unmatched_truncated_path} ({len(unmatched_truncated):,})")
 
+    if len(df_dropped) > 0:
+        df_dropped.to_csv(malformed_path, index=False)
+        print(f"  Dropped rows: {malformed_path}")
+        print(f"    ({len(df_dropped):,} total)")
+
+    pd.DataFrame(
+        [
+            ("rows_parsed_before_fix", len(df_before_parse)),
+            ("rows_parsed_after_fix", len(df_after_parse)),
+            ("rows_loaded_main_pipeline", len(df)),
+            ("net_row_delta_after_minus_before", len(df_after_parse) - len(df_before_parse)),
+            ("affected_rows_before_fix", len(affected_before)),
+            ("affected_rows_after_fix", len(affected_after)),
+            ("affected_row_delta_after_minus_before", len(affected_after) - len(affected_before)),
+            ("opener_replacements", n_openers),
+            ("closer_replacements", n_closers),
+            ("affordability_trailing_quote_cells_fixed", affordability_quote_cells_fixed),
+            ("column_shift_rows_repaired", column_shift_repaired),
+            ("truncated_closer_rows", len(truncated_rows)),
+            ("truncated_matched_active", int((matched_truncated.get("verdict", pd.Series(dtype=str)) == "matched_active").sum())),
+            ("truncated_matched_zero", int((matched_truncated.get("verdict", pd.Series(dtype=str)) == "matched_zero").sum())),
+            ("truncated_unmatched", len(unmatched_truncated)),
+        ],
+        columns=["metric", "value"],
+    ).to_csv(recovery_summary_path, index=False)
+
+
+if __name__ == "__main__":
+    main()
 """MIT License"
 
 "Creative Commons CC-BY-SA 4.0 2026 Diego Aguilar-Canabal"""
