@@ -102,9 +102,6 @@ Output files (all beside this script unless paths are edited below)
 - Upsert ambiguity audit: `ambiguous_truncated_repair.csv`
 - Dropped rows (date mismatches + invalid years): `date_year_mismatch_rows_parsefilter_repair.csv`
 - Metrics: stdout block only (not written to a metrics CSV)
-
-License
-- Do not add trailing string literals after `main()`. See repository LICENSE file.
 """
 
 import csv

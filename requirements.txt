@@ -1,11 +1,24 @@
-# TableA2-ACSv2 / acs_v2.py
+# tablea2_parsefilter_repair.py
 pandas>=2.0
 numpy>=1.24
-requests>=2.28
+openpyxl>=3.1
+
+# TableA2-cleanup/tablea2_parsefilter.py
+# TableA2-cleanup/tablea2_basicfilter.py
+# (pandas, numpy only — already listed above)
+
+# TableA2-cleanup/basic_apr_charts.py
 matplotlib>=3.7
+
+# TableA2-ACSjoin/acs_join_parsefilter.py
+# TableA2-ACSjoin/fetch_acs1_annual_population.py
+requests>=2.28
+
+# TableA2-ACSv2/acs_v2.py
 scipy>=1.10
 pymc>=5.0
 statsmodels>=0.14
 arch>=6.0
 firthmodels>=0.3
 tqdm>=4.65
+scikit-learn>=1.3
