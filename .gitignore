@@ -13,7 +13,5 @@ TableA2-ACSjoin/tablea2.csv
 *.xlsm
 *.md
 
-# Cursor: ignore local/state, keep rules in version control
-.cursor/*
-!.cursor/rules/
-!.cursor/rules/**
+# Cursor: ignore everything
+.cursor/
