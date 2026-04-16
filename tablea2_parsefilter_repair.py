@@ -2,12 +2,10 @@
 """Repair variant of TableA2 PARSEFILTER with XLSM-backed truncated-row recovery.
 
 Purpose
-- Standalone parsefilter pipeline implementation (structural CSV repair, pandas load,
-  in-memory fixes, date/year validation, APR dedup) with no runtime dependency on
-  `tablea2_parsefilter.py`.
-- Insert one stage before validation: for deduped truncated-closer identities, look up
-  the authoritative row in source `Table A2` workbooks and upsert mapped APR fields into
-  the working DataFrame (update if one matching APR row exists, else append one row).
+- Structural CSV repair, pandas load, in-memory fixes, date/year validation, APR dedup.
+- For deduped truncated-closer identities, look up the authoritative row in source
+  `Table A2` workbooks (openpyxl) and upsert mapped APR fields into the working
+  DataFrame (update if one matching APR row exists, else append one row).
 
 Two grains (do not conflate)
 - Truncated physical lines: rows from `_extract_truncated_closer_rows` (one per broken
@@ -69,7 +67,7 @@ Pipeline order
 3) `_strip_affordability_trailing_quotes`, `_repair_column_shift_rows`
 4) `_extract_truncated_closer_rows` -> truncated physical lines
 5) dedupe identities -> XLSM lookup -> upsert -> lone-quote cleanup
-6) `_row_date_mismatches` + valid YEAR filter + `_deduplicate_apr`
+6) `_row_date_phase_status` + valid YEAR filter + `_deduplicate_apr`
 7) `_classify_truncated_rows` -> matched/unmatched truncated CSVs
 8) write cleaned APR + malformed drops; print structured stdout summary (no recovery_summary CSV)
 
@@ -87,9 +85,9 @@ Diagnostics snapshot (2026-04-16 run; `tablea2.csv` in `CSVparse_hcd_apr/`)
   `truncated_xlsm_equivalent_duplicates_collapsed=1`,
   `truncated_rows_unresolved_after_xlsm=6`, `rows_after_upsert=785496`,
   `affordability_lone_quote_cells_fixed=9`.
-- Step 6 (validation + dedup): `rows_dropped_date_mismatch=100250`,
-  `rows_dropped_invalid_year=229`, `rows_dropped_validation=100479`,
-  `dedup_rows_removed=17667`, `rows_after_filters=667350`.
+- Step 6 (validation + dedup): `rows_dropped_date_mismatch=26559`,
+  `rows_dropped_invalid_year=229`, `rows_dropped_validation=26788`,
+  `dedup_rows_removed=17127`, `rows_after_filters=741581`.
 - Step 7 (truncated classification outputs): `matched_truncated_repair.csv=75`,
   `unmatched_truncated_repair.csv=5`.
 - Step 8 (final artifacts): wrote `tablea2_cleaned_parsefilter_repair.csv`,
@@ -97,7 +95,6 @@ Diagnostics snapshot (2026-04-16 run; `tablea2.csv` in `CSVparse_hcd_apr/`)
 
 Output files (all beside this script unless paths are edited below)
 - Primary: `tablea2_cleaned_parsefilter_repair.csv`
-- Quote-touch subsets: `before_quote_fix_repair.csv`, `after_quote_fix_repair.csv`
 - Truncated classification: `matched_truncated_repair.csv`, `unmatched_truncated_repair.csv`
 - Upsert ambiguity audit: `ambiguous_truncated_repair.csv`
 - Dropped rows (date mismatches + invalid years): `date_year_mismatch_rows_parsefilter_repair.csv`
@@ -120,8 +117,6 @@ _out_dir = _THIS_DIR
 apr_path = _out_dir / "tablea2.csv"
 cleaned_path = _out_dir / "tablea2_cleaned_parsefilter_repair.csv"
 date_year_mismatch_path = _out_dir / "date_year_mismatch_rows_parsefilter_repair.csv"
-before_fix_path = _out_dir / "before_quote_fix_repair.csv"
-after_fix_path = _out_dir / "after_quote_fix_repair.csv"
 matched_truncated_path = _out_dir / "matched_truncated_repair.csv"
 unmatched_truncated_path = _out_dir / "unmatched_truncated_repair.csv"
 ambiguous_truncated_path = _out_dir / "ambiguous_truncated_repair.csv"
@@ -129,8 +124,10 @@ ambiguous_truncated_path = _out_dir / "ambiguous_truncated_repair.csv"
 _A2_REQUIRED_HEADERS = {"A2_1_ID", "A2_18_Affordable"}
 _A2_TEXT_COLUMNS = ("NO_FA_DR", "NOTES", "FIN_ASSIST_NAME")
 
-# APR dedup: project identity + pipeline counts; preserves different pipeline stages (ENT, BP, CO)
-APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]
+APR_DEDUP_COLS = [
+    "JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME",
+    "NO_BUILDING_PERMITS", "NO_ENTITLEMENTS", "NO_OTHER_FORMS_OF_READINESS", "DEM_DES_UNITS",
+]
 
 _DATE_CHECK_CONFIG = [
     ('BP_ISSUE_DT1', 'NO_BUILDING_PERMITS', "ISS_DATE mismatch"),
@@ -150,9 +147,8 @@ def _deduplicate_apr(df):
     if len(cols) != len(APR_DEDUP_COLS):
         return df, 0
     n_before = len(df)
-    df = df.assign(
-        NO_BUILDING_PERMITS=pd.to_numeric(df['NO_BUILDING_PERMITS'], errors='coerce').fillna(0),
-        DEM_DES_UNITS=pd.to_numeric(df['DEM_DES_UNITS'], errors='coerce').fillna(0),
+    numeric_cols = ["NO_BUILDING_PERMITS", "NO_ENTITLEMENTS", "NO_OTHER_FORMS_OF_READINESS", "DEM_DES_UNITS"]
+    df = df.assign(**{c: pd.to_numeric(df[c], errors='coerce').fillna(0) for c in numeric_cols if c in df.columns}
     ).drop_duplicates(subset=cols, keep="first")
     return df, n_before - len(df)
 
@@ -181,18 +177,31 @@ def safe_int(val):
         return None
 
 
-def check_date_year_mismatch(row, year_col, date_col, count_col):
-    """Check if a single date-year pair mismatches. Returns True if MISMATCH."""
-    count_int = safe_int(row.get(count_col))
-    if count_int is None or count_int <= 0:
-        return False
-    date_year = extract_year_from_date(row.get(date_col))
-    if date_year is None:
-        return False
-    row_year = safe_int(row.get(year_col))
+def _row_date_phase_status(row):
+    """Classify date-year alignment across all active phases.
+
+    Returns (has_any_mismatch, has_any_match, first_mismatch_label).
+    A row should only be dropped when has_any_mismatch=True AND has_any_match=False,
+    i.e. no active phase has a date matching the reporting year.
+    """
+    row_year = safe_int(row.get('YEAR'))
     if row_year is None:
-        return False
-    return date_year != row_year
+        return (False, False, None)
+    has_mismatch, has_match, first_label = False, False, None
+    for date_col, count_col, label in _DATE_CHECK_CONFIG:
+        count_int = safe_int(row.get(count_col))
+        if count_int is None or count_int <= 0:
+            continue
+        date_year = extract_year_from_date(row.get(date_col))
+        if date_year is None:
+            continue
+        if date_year == row_year:
+            has_match = True
+        else:
+            has_mismatch = True
+            if first_label is None:
+                first_label = label
+    return (has_mismatch, has_match, first_label)
 
 
 def _repair_quote_corruption(raw_text):
@@ -238,31 +247,11 @@ def _repair_quote_corruption(raw_text):
     return "".join(repaired_lines), replaced_openers, replaced_closers, (opener_lines | closer_lines)
 
 
-def _parse_csv_with_line_ranges(csv_text):
-    """Parse CSV while tracking source line ranges for each accepted row."""
-    rows = []
-    ranges = []
+def _count_csv_rows(csv_text):
+    """Count valid data rows in CSV text (rows matching header column count)."""
     reader = csv.reader(io.StringIO(csv_text))
-    header = next(reader)
-    expected_len = len(header)
-    prev_line = reader.line_num
-    for row in reader:
-        start_line = prev_line + 1
-        end_line = reader.line_num
-        prev_line = end_line
-        if len(row) != expected_len:
-            continue
-        rows.append(row)
-        ranges.append((start_line, end_line))
-    return pd.DataFrame(rows, columns=header), ranges
-
-
-def _subset_rows_by_line_hits(df, ranges, line_hits):
-    """Keep rows whose source line interval intersects touched line set."""
-    if not line_hits:
-        return df.iloc[0:0].copy()
-    keep = [any(line in line_hits for line in range(start, end + 1)) for start, end in ranges]
-    return df.loc[keep].copy()
+    expected_len = len(next(reader))
+    return sum(1 for row in reader if len(row) == expected_len)
 
 
 def _strip_affordability_trailing_quotes(df):
@@ -399,13 +388,6 @@ def _classify_truncated_rows(df_clean, truncated_df):
         matched_records.append(rec)
     return pd.DataFrame(matched_records), pd.DataFrame(unmatched_records)
 
-
-def _row_date_mismatches(row):
-    """Return (iss_mismatch, ent_mismatch, co_mismatch) for one row."""
-    return tuple(
-        check_date_year_mismatch(row, 'YEAR', date_col, count_col)
-        for date_col, count_col, _ in _DATE_CHECK_CONFIG
-    )
 
 
 def _norm_str(val):
@@ -722,22 +704,18 @@ def _print_summary_block(metrics):
 def main():
     print(f"Loading: {apr_path}")
     raw_csv = apr_path.read_text(encoding="utf-8", errors="replace")
-    fixed_csv, n_openers, n_closers, touched_lines = _repair_quote_corruption(raw_csv)
+    fixed_csv, n_openers, n_closers, _ = _repair_quote_corruption(raw_csv)
     closer_pattern = re.compile(r"^([A-Z][A-Z ]*?)\"\"\"([,\n\r])")
     closer_lines = {i for i, line in enumerate(raw_csv.splitlines(), start=1) if closer_pattern.match(line)}
 
-    df_before_parse, before_ranges = _parse_csv_with_line_ranges(raw_csv)
-    df_after_parse, after_ranges = _parse_csv_with_line_ranges(fixed_csv)
+    rows_before_fix = _count_csv_rows(raw_csv)
+    rows_after_fix = _count_csv_rows(fixed_csv)
     df = pd.read_csv(io.StringIO(fixed_csv), low_memory=False, on_bad_lines="skip")
     rows_loaded_main_pipeline = len(df)
 
     affordability_quote_cells_fixed = _strip_affordability_trailing_quotes(df)
     column_shift_repaired = _repair_column_shift_rows(df)
     truncated_rows = _extract_truncated_closer_rows(fixed_csv, closer_lines)
-    affected_before = _subset_rows_by_line_hits(df_before_parse, before_ranges, touched_lines)
-    affected_after = _subset_rows_by_line_hits(df_after_parse, after_ranges, touched_lines)
-    affected_before.to_csv(before_fix_path, index=False)
-    affected_after.to_csv(after_fix_path, index=False)
 
     identities = _dedupe_truncated_identities(truncated_rows)
     identity_source_map = _build_identity_source_map(truncated_rows)
@@ -825,22 +803,15 @@ def main():
     truncated_rows_unresolved_after_xlsm = upsert_unresolved + upsert_ambiguous + upsert_integrity_error
     rows_after_upsert = len(df)
 
-    _mismatch_tuples = df.apply(_row_date_mismatches, axis=1)
-    _mismatch_df = pd.DataFrame(_mismatch_tuples.tolist(), index=df.index)
-    iss_mismatch = _mismatch_df[0]
-    ent_mismatch = _mismatch_df[1]
-    co_mismatch = _mismatch_df[2]
-    any_mismatch = iss_mismatch | ent_mismatch | co_mismatch
-    df_after_mismatch = df[~any_mismatch].copy()
-    df_dropped_mismatch = df[any_mismatch].copy()
-
-    _dropped_arr = np.array(_mismatch_tuples[any_mismatch].tolist()) if any_mismatch.any() else np.empty((0, 3))
-    if len(df_dropped_mismatch) > 0:
-        first_true_idx = np.argmax(_dropped_arr.astype(int), axis=1)
-        _reasons = pd.Series([_DATE_CHECK_CONFIG[i][2] for i in first_true_idx], index=df_dropped_mismatch.index)
-        df_dropped_mismatch = df_dropped_mismatch.assign(mismatch_reason=_reasons)
-    if "mismatch_reason" not in df_dropped_mismatch.columns:
-        df_dropped_mismatch["mismatch_reason"] = pd.Series("", index=df_dropped_mismatch.index, dtype=object)
+    _status = df.apply(_row_date_phase_status, axis=1)
+    _status_df = pd.DataFrame(_status.tolist(), index=df.index,
+                              columns=['has_mismatch', 'has_match', 'first_label'])
+    should_drop = _status_df['has_mismatch'] & ~_status_df['has_match']
+    df_after_mismatch = df[~should_drop].copy()
+    df_dropped_mismatch = df[should_drop].copy()
+    df_dropped_mismatch = df_dropped_mismatch.assign(
+        mismatch_reason=_status_df.loc[should_drop, 'first_label'].fillna("")
+    )
 
     valid_years = [2018, 2019, 2020, 2021, 2022, 2023, 2024]
     year_numeric = pd.to_numeric(df_after_mismatch["YEAR"], errors="coerce")
@@ -860,10 +831,10 @@ def main():
     df_dropped.to_csv(date_year_mismatch_path, index=False)
 
     metrics = [
-        ("rows_parsed_before_fix", len(df_before_parse)),
-        ("rows_parsed_after_fix", len(df_after_parse)),
+        ("rows_parsed_before_fix", rows_before_fix),
+        ("rows_parsed_after_fix", rows_after_fix),
         ("rows_loaded_main_pipeline", rows_loaded_main_pipeline),
-        ("net_row_delta_after_minus_before", len(df_after_parse) - len(df_before_parse)),
+        ("net_row_delta_after_minus_before", rows_after_fix - rows_before_fix),
         ("opener_replacements", n_openers),
         ("closer_replacements", n_closers),
         ("affordability_trailing_quote_cells_fixed", affordability_quote_cells_fixed),
