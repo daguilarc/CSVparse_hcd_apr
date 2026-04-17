@@ -26,23 +26,6 @@ import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta
 
-# APR dedup: project identity + pipeline counts; preserves different pipeline stages (ENT, BP, CO)
-APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]
-
-
-def _deduplicate_apr(df):
-    """Deduplicate APR rows on project identity + pipeline counts. Returns (df_deduped, n_removed)."""
-    cols = [c for c in APR_DEDUP_COLS if c in df.columns]
-    if len(cols) != len(APR_DEDUP_COLS):
-        return df, 0
-    n_before = len(df)
-    df = df.assign(
-        NO_BUILDING_PERMITS=pd.to_numeric(df['NO_BUILDING_PERMITS'], errors='coerce').fillna(0),
-        DEM_DES_UNITS=pd.to_numeric(df['DEM_DES_UNITS'], errors='coerce').fillna(0),
-    ).drop_duplicates(subset=cols, keep="first")
-    return df, n_before - len(df)
-
-
 # Configuration
 NHGIS_API_BASE = "https://api.ipums.org"
 NHGIS_DATASET = "2019_2023_ACS5a"
