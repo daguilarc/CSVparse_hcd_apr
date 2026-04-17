@@ -104,11 +104,14 @@ Output files (all beside this script unless paths are edited below)
 import csv
 import io
 import re
+import warnings
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 _THIS_DIR = Path(__file__).resolve().parent
 
@@ -123,6 +126,11 @@ ambiguous_truncated_path = _out_dir / "ambiguous_truncated_repair.csv"
 
 _A2_REQUIRED_HEADERS = {"A2_1_ID", "A2_18_Affordable"}
 _A2_TEXT_COLUMNS = ("NO_FA_DR", "NOTES", "FIN_ASSIST_NAME")
+_XLSM_TO_APR_PHASE = (
+    ("A2_6_Units", "NO_ENTITLEMENTS"),
+    ("A2_9_Units", "NO_BUILDING_PERMITS"),
+    ("A2_10_Units", "NO_OTHER_FORMS_OF_READINESS"),
+)
 
 APR_DEDUP_COLS = [
     "JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME",
@@ -464,6 +472,9 @@ def map_a2_row_to_apr_record(a2_row, identity_row):
         "JURS_TRACKING_ID": a2_row.get("A2_1_ID", ""),
         "UNIT_CAT": a2_row.get("A2_2_Unit", ""),
         "TENURE": a2_row.get("A2_3_Tenure", ""),
+        "NO_ENTITLEMENTS": a2_row.get("A2_6_Units", ""),
+        "NO_BUILDING_PERMITS": a2_row.get("A2_9_Units", ""),
+        "NO_OTHER_FORMS_OF_READINESS": a2_row.get("A2_10_Units", ""),
         "EXTR_LOW_INCOME_UNITS": a2_row.get("A2_13_xLow", ""),
         "APPROVE_SB35": a2_row.get("A2_14_Stream", ""),
         "INFILL_UNITS": a2_row.get("A2_15_Infill", ""),
@@ -545,7 +556,7 @@ def _build_identity_source_map(truncated_rows):
 
 def _identity_context(identity, source_info, workbook_path):
     return {
-        "workbook_path": str(workbook_path),
+        "workbook_path": Path(workbook_path).name,
         "source_lines": "|".join(str(v) for v in source_info["source_lines"]),
         "raw_truncated_rows_for_identity": source_info["raw_row_count"],
         "JURIS_NAME": identity.get("JURIS_NAME", ""),
@@ -679,6 +690,78 @@ def _df_update_match_indices(df, identity):
     return df.index[mask].tolist()
 
 
+def _apply_mapped_to_df_row(df, idx, mapped):
+    """Write mapped payload values into a single DataFrame row."""
+    for col, val in mapped.items():
+        if col in df.columns:
+            df.at[idx, col] = val
+
+
+def _apply_paired_upserts(pairs, df, identity):
+    """Apply all paired XLSM-to-DF mappings, return count of rows updated."""
+    for xlsm_row, idx in pairs:
+        _apply_mapped_to_df_row(df, idx, map_a2_row_to_apr_record(xlsm_row, identity))
+    return len(pairs)
+
+
+def _resolve_multi_xlsm(matches, identity, df):
+    """Resolve multiple XLSM candidates for one truncated identity.
+
+    Returns (resolution, mapped_candidates_or_None, pairs_or_None):
+        "collapsed" – all payloads equivalent; caller picks one from mapped_candidates
+        "paired"    – each candidate matched to a unique DF row via phase counts
+        "ambiguous" – unresolvable
+    """
+    mapped_candidates = [map_a2_row_to_apr_record(c, identity) for c in matches]
+    if _all_mapped_payloads_equivalent(mapped_candidates):
+        return "collapsed", mapped_candidates, None
+    update_idxs = _df_update_match_indices(df, identity)
+    pairs = _pair_xlsm_to_df_by_phase(matches, update_idxs, df)
+    if pairs is not None:
+        return "paired", None, pairs
+    return "ambiguous", None, None
+
+
+def _pair_xlsm_to_df_by_phase(xlsm_rows, df_idxs, df):
+    """Pair XLSM candidates to DataFrame rows using phase count columns.
+
+    Pass 1: match XLSM rows to DF rows that have non-zero phase data.
+    Pass 2: assign remaining XLSM rows to skeleton DF rows (all-zero phases,
+    typically from truncation that lost the phase counts).
+
+    Returns list of (xlsm_row, df_index) if all pair uniquely, else None.
+    """
+    if len(xlsm_rows) != len(df_idxs):
+        return None
+    phase_cols = [col for _, col in _XLSM_TO_APR_PHASE if col in df.columns]
+    populated, skeletons = [], []
+    for idx in df_idxs:
+        (skeletons if all((safe_int(df.at[idx, c]) or 0) == 0 for c in phase_cols)
+         else populated).append(idx)
+    used_xlsm, pairs = set(), []
+    for idx in populated:
+        df_phases = {c: safe_int(df.at[idx, c]) or 0 for c in phase_cols}
+        matched_i = None
+        for i, xlsm_row in enumerate(xlsm_rows):
+            if i in used_xlsm:
+                continue
+            xlsm_phases = {apr: safe_int(xlsm_row.get(xlsm, 0)) or 0
+                           for xlsm, apr in _XLSM_TO_APR_PHASE if apr in df.columns}
+            if all(xlsm_phases.get(c, 0) == v for c, v in df_phases.items()):
+                matched_i = i
+                break
+        if matched_i is None:
+            return None
+        pairs.append((xlsm_rows[matched_i], idx))
+        used_xlsm.add(matched_i)
+    remaining = [i for i in range(len(xlsm_rows)) if i not in used_xlsm]
+    if len(remaining) != len(skeletons):
+        return None
+    for xlsm_i, idx in zip(remaining, skeletons):
+        pairs.append((xlsm_rows[xlsm_i], idx))
+    return pairs
+
+
 def _append_with_dtype_defaults(df, mapped_row):
     row = {}
     for col in df.columns:
@@ -754,46 +837,41 @@ def main():
             rec.update(integrity_issue)
             ambiguous_records.append(rec)
             continue
-        mapped = None
-        if len(matches) != 1:
-            if len(matches) > 1:
-                mapped_candidates = [map_a2_row_to_apr_record(candidate, identity) for candidate in matches]
-                if _all_mapped_payloads_equivalent(mapped_candidates):
-                    selected_idx = _deterministic_candidate_index(excel_row_numbers)
-                    mapped = mapped_candidates[selected_idx]
-                    equivalent_duplicates_collapsed += 1
-                else:
-                    upsert_ambiguous += 1
-                    rec = _make_ambiguous_record(
-                        "xlsm_multi_match",
-                        len(matches),
-                        0,
-                        identity,
-                        source_info,
-                        workbook_path,
-                    )
-                    rec = _with_match_provenance(rec, match_stage_used, excel_row_numbers, candidate_key_digest)
-                    ambiguous_records.append(rec)
-            else:
-                upsert_unresolved += 1
-            if mapped is None:
-                continue
-        else:
-            mapped = map_a2_row_to_apr_record(matches[0], identity)
-        if mapped is None:
+        if not matches:
+            upsert_unresolved += 1
             continue
+        if len(matches) == 1:
+            mapped = map_a2_row_to_apr_record(matches[0], identity)
+        else:
+            resolution, payload, pairs = _resolve_multi_xlsm(matches, identity, df)
+            if resolution == "paired":
+                upsert_update += _apply_paired_upserts(pairs, df, identity)
+                continue
+            if resolution == "ambiguous":
+                upsert_ambiguous += 1
+                rec = _make_ambiguous_record(
+                    "xlsm_multi_match", len(matches), 0, identity, source_info, workbook_path,
+                )
+                rec = _with_match_provenance(rec, match_stage_used, excel_row_numbers, candidate_key_digest)
+                ambiguous_records.append(rec)
+                continue
+            mapped = payload[_deterministic_candidate_index(excel_row_numbers)]
+            equivalent_duplicates_collapsed += 1
         update_idxs = _df_update_match_indices(df, identity)
         if len(update_idxs) > 1:
-            upsert_ambiguous += 1
-            rec = _make_ambiguous_record("df_multi_match", len(matches), len(update_idxs), identity, source_info, workbook_path)
-            rec = _with_match_provenance(rec, match_stage_used, excel_row_numbers, candidate_key_digest)
-            ambiguous_records.append(rec)
+            pairs = _pair_xlsm_to_df_by_phase(matches, update_idxs, df)
+            if pairs is None:
+                upsert_ambiguous += 1
+                rec = _make_ambiguous_record(
+                    "df_multi_match", len(matches), len(update_idxs), identity, source_info, workbook_path,
+                )
+                rec = _with_match_provenance(rec, match_stage_used, excel_row_numbers, candidate_key_digest)
+                ambiguous_records.append(rec)
+                continue
+            upsert_update += _apply_paired_upserts(pairs, df, identity)
             continue
         if len(update_idxs) == 1:
-            idx = update_idxs[0]
-            for col, val in mapped.items():
-                if col in df.columns:
-                    df.at[idx, col] = val
+            _apply_mapped_to_df_row(df, update_idxs[0], mapped)
             upsert_update += 1
             continue
         df = _append_with_dtype_defaults(df, mapped)

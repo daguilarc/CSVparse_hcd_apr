@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Generate charts from BASICFILTER cleaned APR data.
+"""Generate charts from parsefilter repair cleaned APR data.
+
+Prerequisite: run tablea2_parsefilter_repair.py in the parent directory so
+tablea2_cleaned_parsefilter_repair.csv exists (same artifact ACS join uses).
 
 Charts are numbered sequentially in output; see chart_counter below.
 
@@ -13,25 +16,9 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FixedLocator, MaxNLocator
 from pathlib import Path
 
-# APR dedup: project identity + pipeline counts; preserves different pipeline stages (ENT, BP, CO)
-APR_DEDUP_COLS = ["JURIS_NAME", "CNTY_NAME", "YEAR", "APN", "STREET_ADDRESS", "PROJECT_NAME", "NO_BUILDING_PERMITS", "DEM_DES_UNITS"]
-
-
-def _deduplicate_apr(df):
-    """Deduplicate APR rows on project identity + pipeline counts. Returns (df_deduped, n_removed)."""
-    cols = [c for c in APR_DEDUP_COLS if c in df.columns]
-    if len(cols) != len(APR_DEDUP_COLS):
-        return df, 0
-    n_before = len(df)
-    df = df.assign(
-        NO_BUILDING_PERMITS=pd.to_numeric(df['NO_BUILDING_PERMITS'], errors='coerce').fillna(0),
-        DEM_DES_UNITS=pd.to_numeric(df['DEM_DES_UNITS'], errors='coerce').fillna(0),
-    ).drop_duplicates(subset=cols, keep="first")
-    return df, n_before - len(df)
-
-
-# Paths
-DATA_PATH = Path(__file__).parent / "tablea2_cleaned_parsefilter.csv"
+# Paths: repair output lives in CSVparse_hcd_apr/ (parent of TableA2-cleanup/)
+_DATA_ROOT = Path(__file__).resolve().parent.parent
+DATA_PATH = _DATA_ROOT / "tablea2_cleaned_parsefilter_repair.csv"
 OUTPUT_DIR = Path(__file__).parent
 
 # Color scheme (colorblind-friendly)
@@ -124,10 +111,6 @@ if n_dem_fix > 0:
     df.loc[dem_year_mask, 'DEM_DES_UNITS'] = 1
     print(f"  DEM year-entry fix: corrected {n_dem_fix} rows where YEAR was entered as DEM_DES_UNITS")
 
-df, n_dedup = _deduplicate_apr(df)
-if n_dedup > 0:
-    pct_dedup = 100 * n_dedup / (len(df) + n_dedup)
-    print(f"  APR deduplication: removed {n_dedup:,} duplicate rows ({pct_dedup:.1f}% of pre-dedup total)")
 print(f"  Rows: {len(df):,}")
 
 # Convert key columns to numeric
@@ -149,7 +132,7 @@ df['bp_net'] = bp - df['dem_bp']
 df['co_net'] = co - df['dem_co']
 df['ent_net'] = ent - df['dem_ent']
 
-# Get years (source data already filtered to valid years by parsefilter)
+# Get years (source data already filtered to valid years by parsefilter repair)
 years = sorted(df['YEAR'].unique())
 print(f"  Years: {years}")
 
