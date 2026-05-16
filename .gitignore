@@ -10,7 +10,6 @@ TableA2-ACSjoin/tablea2.csv
 *.json
 *.zip
 *.xlsx
-*.xlsm
 *.md
 
 # Cursor: ignore everything

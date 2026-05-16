@@ -1,0 +1,32 @@
+Regression (Multifamily, per 1000 pop)	Geography	McFadden R2	OLS positive R2	OLS positive β	Zero Hurdle β	Posterior β
+Deed-Restricted Density-Bonus CO vs Net CO	City (- # 20%)	0.07	0.3	0.12	0.08	0.3
+Deed-Restricted Density-Bonus CO vs Net CO	City (excl. SF - # 20%)	0.07	0.31	0.14	0.08	0.31
+Deed-Restricted Density-Bonus CO vs Net CO	ZIP codes	0.09	0.54	0.13	0.01	0.4
+Deed-Restricted Density-Bonus CO vs Net CO	ZIP codes (- # 20%)	0.06	0.39	0.13	0.01	0.42
+Deed-Restricted Density-Bonus CO vs Net CO	ZIP codes (excl. SF Co. - # 20%)	0.05	0.32	0.16	0.01	0.45
+Deed-Restricted Density-Bonus CO vs Net CO	ZIP codes (excl. SF Co.)	0.09	0.52	0.15	0.01	0.42
+Density-Bonus CO vs Net CO	City (- # 20%)	0.07	0.3	0.12	0.08	0.31
+Density-Bonus CO vs Net CO	City (excl. SF - # 20%)	0.07	0.31	0.14	0.08	0.31
+Density-Bonus CO vs Net CO	ZIP codes	0.09	0.54	0.13	0.01	0.41
+Density-Bonus CO vs Net CO	ZIP codes (- # 20%)	0.06	0.39	0.13	0.01	0.41
+Density-Bonus CO vs Net CO	ZIP codes (excl. SF Co. - # 20%)	0.05	0.32	0.16	0.01	0.44
+Density-Bonus CO vs Net CO	ZIP codes (excl. SF Co.)	0.09	0.52	0.15	0.01	0.42
+Net CO vs ΔZHVI (Condos)	City (- # 20%)	0.04	0.21	-0.15	-0.02	0.35
+Net CO vs ΔZORI	City	0.05	0.21	-0.24	-0.06	0.65
+Net CO vs ΔZORI	City (- # 20%)	0.06	0.25	-0.23	-0.07	0.51
+Net CO vs ΔZORI	City (excl. SF - # 20%)	0.06	0.21	-0.2	-0.07	0.5
+Net CO vs ΔZORI / Income	City	0.05	0.21	-86.97	-23.46	0.56
+Net CO vs ΔZORI / Income	City (- # 20%)	0.07	0.26	-84.73	-29.04	0.46
+Net CO vs ΔZORI / Income	City (excl. SF - # 20%)	0.06	0.21	-72.81	-28.94	0.45
+Non-Bonus Inclusionary CO vs Net CO	City	0.12	0.35	0.38	0.17	0.39
+Non-Bonus Inclusionary CO vs Net CO	City (- # 20%)	0.12	0.39	0.45	0.19	0.37
+Non-Bonus Inclusionary CO vs Net CO	City (excl. SF - # 20%)	0.11	0.29	0.37	0.19	0.33
+Non-Bonus Inclusionary CO vs Net CO	City (excl. SF)	0.1	0.29	0.32	0.17	0.35
+Non-Bonus Inclusionary CO vs Net CO	ZIP codes	0.12	0.76	0.69	0.03	0.41
+Non-Bonus Inclusionary CO vs Net CO	ZIP codes (- # 20%)	0.13	0.78	0.7	0.03	0.37
+Non-Bonus Inclusionary CO vs Net CO	ZIP codes (excl. SF Co. - # 20%)	0.04	0.27	0.27	0.03	0.26
+Non-Bonus Inclusionary CO vs Net CO	ZIP codes (excl. SF Co.)	0.04	0.26	0.27	0.02	0.29
+Non-Bonus Inclusionary CO vs ΔZHVI (Condos) / Income	City	0.1	0.24	-2.29	-1.14	0.04
+Non-Bonus Inclusionary CO vs ΔZORI / Income	ZIP codes	0.05	0.24	-284.87	-15.19	0.32
+Owner CO vs Net CO	ZIP codes	0.05	0.34	0.08	0.01	0.16
+Owner CO vs Net CO	ZIP codes (- # 20%)	0.06	0.38	0.08	0.02	0.14
