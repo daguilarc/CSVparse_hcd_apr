@@ -17,6 +17,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 from matplotlib.ticker import FixedLocator, FuncFormatter, MaxNLocator, MultipleLocator, NullFormatter, NullLocator, PercentFormatter, ScalarFormatter
 from scipy.special import expit
 from scipy import stats as scipy_stats
@@ -1114,6 +1115,7 @@ TIMELINE_PHASE_DAYS_REQUIRED_YEARLY = TIMELINE_PHASE_DAYS
 # Step 11b (construction timeline charts / merges): off by default. APR entitlement / BP / CO date
 # fields are still not considered reliable for modeling (parse coverage, duplicates, year-from-CO, etc.).
 ENABLE_CONSTRUCTION_TIMELINE = False
+RUN_PCA_ONLY = os.environ.get("ACS_APR_RUN_PCA_ONLY", "").strip().lower() in ("1", "true", "yes")
 
 # Configuration
 NHGIS_API_BASE = "https://api.ipums.org"
@@ -3798,42 +3800,29 @@ def _place_ev1_pie_side_annotations(ax, side_entries, sign, dy=0.13):
     target_y_raw = [1.08 * entry[1] for entry in side_entries]
     target_y = _non_overlapping_side_y_positions(target_y_raw, min_gap=dy)
     for entry, text_y in zip(side_entries, target_y):
-        xc, yc, pct, disp, _ = entry
+        xc, yc, pct = entry
         text_x = 1.24 * sign
         ax.annotate(
-            f"{disp} ({pct:.1f}%)",
+            f"{pct:.1f}%",
             xy=(xc, yc),
             xytext=(text_x, text_y),
             textcoords="data",
             ha="left" if sign > 0 else "right",
             va="center",
-            fontsize=8,
-            bbox=dict(
-                boxstyle="round,pad=0.18",
-                facecolor="white",
-                edgecolor="#6b7280",
-                linewidth=0.7,
-                alpha=0.92,
-            ),
+            fontsize=13,
             arrowprops=dict(arrowstyle="-", color="black", lw=0.8, connectionstyle="arc3,rad=0.0"),
         )
 
 
-def _plot_ev1_pie_annotations_staggered(ax, composition_df, wedges):
-    """Side-based EV1 pie labels with vertical staggering to reduce collisions."""
-    entries = []
+def _plot_ev1_pie_annotations_staggered(ax, shares, wedges):
+    """Side-based EV1 pie labels with vertical staggering to reduce collisions.
+    ``shares`` is the per-wedge percentage array aligned with ``wedges`` (reused from the pie call)."""
+    right, left = [], []
     for idx, wedge in enumerate(wedges):
-        angle = (wedge.theta1 + wedge.theta2) / 2.0
-        rad = np.deg2rad(angle)
-        xc = np.cos(rad)
-        yc = np.sin(rad)
-        pct = float(composition_df.iloc[idx]["share_pct"])
-        feat = composition_df.iloc[idx]["feature"]
-        disp = _ev1_pca_feature_display_name(feat)
-        entries.append((xc, yc, pct, disp, xc >= 0.0))
-
-    right = [entry for entry in entries if entry[4]]
-    left = [entry for entry in entries if not entry[4]]
+        rad = np.deg2rad((wedge.theta1 + wedge.theta2) / 2.0)
+        xc = float(np.cos(rad))
+        entry = (xc, float(np.sin(rad)), float(shares[idx]))
+        (right if xc >= 0.0 else left).append(entry)
     _place_ev1_pie_side_annotations(ax, right, 1)
     _place_ev1_pie_side_annotations(ax, left, -1)
 
@@ -3846,13 +3835,25 @@ def _plot_ev1_composition_pie(composition_df, output_path, title):
     setup_chart_style()
     # Portrait orientation improves callout readability for EV1 pie labels.
     fig, ax = plt.subplots(figsize=(8.2, 10.2))
-    wedges, _ = ax.pie(
-        composition_df["share_pct"].to_numpy(dtype=np.float64),
-        labels=None,
-        startangle=90,
+    shares = composition_df["share_pct"].to_numpy(dtype=np.float64)
+    wedges, _ = ax.pie(shares, labels=None, startangle=90)
+    _plot_ev1_pie_annotations_staggered(ax, shares, wedges)
+    legend_labels = [_ev1_pca_feature_display_name(f) for f in composition_df["feature"]]
+    legend_handles = [Patch(facecolor=w.get_facecolor(), edgecolor="none") for w in wedges]
+    ax.legend(
+        legend_handles,
+        legend_labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=1,
+        fontsize=11,
+        frameon=False,
+        handlelength=1.0,
+        handleheight=1.0,
+        labelspacing=0.6,
+        borderaxespad=0.0,
     )
-    _plot_ev1_pie_annotations_staggered(ax, composition_df, wedges)
-    fig.subplots_adjust(top=0.88, left=0.06, right=0.94)
+    fig.subplots_adjust(top=0.88, left=0.06, right=0.94, bottom=0.28)
     ax.set_title(title, pad=26)
     fig.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -4645,6 +4646,8 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
     label_col: column for chart dot labels (e.g. 'JURISDICTION' for cities, 'zipcode' for ZIPs). Falls back to county_col.
     For x_col in X_COL_TWO_PART_LINEAR_X (% change and dollar-change/income) we use raw x so negative values are allowed.
     For zhvi_afford_ratio and zori_afford_ratio we use raw x (ratio on linear scale; do not log)."""
+    if RUN_PCA_ONLY:
+        return None
     if label_col is None:
         label_col = county_col
 
@@ -4957,6 +4960,8 @@ def run_one_regression(df_geo, dr_type, type_label, geo_label, x_col, file_tag, 
                        r2_diagnostics=None, r2_geography=None, legend_exclusion_note=None):
     """Run two-part regression for one (dr_type, geo, category); plot if fit succeeds.
     label_col: column for chart dot labels (e.g. 'JURISDICTION' for cities). Hierarchy always uses 'county'."""
+    if RUN_PCA_ONLY:
+        return
     cat_prefix = f'{dr_type}_{cat_suffix}'
     total_col = f'{cat_prefix}_total'
     if total_col not in df_geo.columns:
@@ -7104,7 +7109,7 @@ def main():
     print(f"  APR rows with valid CA ZIP: {len(df_apr_zip):,} / {len(df_apr_db_inc):,}")
     
     df_zip_for_pca = None
-    if len(df_apr_zip) > 0:
+    if not RUN_PCA_ONLY and len(df_apr_zip) > 0:
         # Efficient aggregation (OMNI: vectorized masks, single merge)
         db_mask = df_apr_zip['DR_TYPE_CLEAN'] == 'DB'
         inc_mask = df_apr_zip['DR_TYPE_CLEAN'] == 'INC'
