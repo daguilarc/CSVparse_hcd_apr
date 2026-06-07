@@ -11,11 +11,12 @@ TableA2-ACSjoin/tablea2.csv
 *.zip
 *.xlsx
 *.md
+*.log
 
-# Cursor: keep private OMNI master rule local only (not on GitHub)
+# Private OMNI master rule (local only, not on GitHub)
 .cursor/rules/omni-rule.mdc
 
-# VS Code / Cursor multi-root workspace (local folder layout)
+# Multi-root workspace (local folder layout)
 *.code-workspace
 
 # Census county FIPS reference (auto-downloaded by acs_apr_models.py if absent)
