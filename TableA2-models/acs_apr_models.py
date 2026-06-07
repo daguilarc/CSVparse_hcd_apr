@@ -48,30 +48,106 @@ ACS_INCOME_DELTA_PCA_FEATURE_LABEL = (
 ACS_POPULATION_DELTA_PCA_FEATURE_LABEL = (
     "% change in place population (ACS 2014–2018 vs 2020–2024)"
 )
-# X-axis label for Zillow Home Value Index condo-only % change
-ZHVI_PCT_LABEL = "Zillow Home Value Index (Condo) % change (Jan 2018 – Dec 2024, Real 2024 Dollars)"
-# X-axis label for affordability ratio (Dec 2024 condo ZHVI / MSA median household income)
-AFFORD_X_LABEL = (
-    f"Ratio: Dec. 2024 Zillow Home Value Index (Condo) / MSA median household income ({ACS_5YR_MHI_DENOM_LABEL})"
+# ZHVI tier registry: single source for file stems, column names, labels, and chart tags.
+ZHVI_TIERS = (
+    {
+        "key": "condo",
+        "label": "Condo",
+        "file_stem": "zhvi_uc_condo_tier_0.33_0.67_sm_sa_month",
+    },
+    {
+        "key": "sfrcondo",
+        "label": "All Homes (SFR+Condo)",
+        "file_stem": "zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month",
+    },
 )
-# ZIP-level: same definition and wording as city (spell out ZHVI; single source for chart x-axes).
-AFFORD_X_LABEL_ZIP = AFFORD_X_LABEL
+
+
+def _zhvi_pct_label(tier_label):
+    return (
+        f"Zillow Home Value Index ({tier_label}) % change "
+        "(Jan 2018 – Dec 2024, Real 2024 Dollars)"
+    )
+
+
+def _zhvi_afford_label(tier_label):
+    return (
+        f"Ratio: Dec. 2024 Zillow Home Value Index ({tier_label}) / "
+        f"MSA median household income ({ACS_5YR_MHI_DENOM_LABEL})"
+    )
+
+
+def _zhvi_pct_afford_label(tier_label):
+    return (
+        f"ΔZHVI ({tier_label}) / MSA median household income (%)\n"
+        "Real 2024 dollars"
+    )
+
+
+def _zhvi_tier_pct_col(key):
+    return f"zhvi_{key}_pct_change"
+
+
+def _zhvi_tier_dec_col(key):
+    return f"zhvi_{key}_dec2024"
+
+
+def _zhvi_tier_afford_ratio_col(key):
+    return f"zhvi_{key}_afford_ratio"
+
+
+def _zhvi_tier_pct_afford_col(key):
+    return f"pct_afford_{key}"
+
+
+def _zhvi_tier_all_cols(key):
+    return (
+        _zhvi_tier_pct_col(key),
+        _zhvi_tier_dec_col(key),
+        _zhvi_tier_afford_ratio_col(key),
+        _zhvi_tier_pct_afford_col(key),
+    )
+
+
+def _zhvi_predictor_file_tags():
+    tags = {}
+    for tier in ZHVI_TIERS:
+        key = tier["key"]
+        tags[_zhvi_tier_pct_col(key)] = f"zhvi_{key}"
+        tags[_zhvi_tier_afford_ratio_col(key)] = f"afford_{key}"
+        tags[_zhvi_tier_pct_afford_col(key)] = f"pct_afford_{key}"
+    return tags
+
+
+def _zhvi_yearly_pred_cols():
+    cols = []
+    for tier in ZHVI_TIERS:
+        key = tier["key"]
+        cols.extend(_zhvi_tier_all_cols(key)[:3])
+    return tuple(cols)
+
+
+DR_TYPES = ("DB", "INC")
+UNIT_CATEGORIES = ("CO", "BP", "ENT")
+CO_BP_CATEGORIES = ("CO", "BP")
+OWNER_PREFIXES = ("total_owner", "db_owner", "TOTAL", "TOTAL_MF", "mf_owner")
+
+
+ZHVI_AFFORD_X_LABELS = frozenset(_zhvi_afford_label(t["label"]) for t in ZHVI_TIERS)
 ZORI_PCT_LABEL = "Zillow Observed Rent Index (ZORI) % change (Jan 2018 – Dec 2024, Real 2024 Dollars)"
 # ZORI affordability: ratio = (monthly_rent × 12) / annual_income; single constant, no magic number in formula
 ZORI_MONTHS_PER_YEAR = 12
 ZORI_AFFORD_X_LABEL = f"(Dec. 2024 ZORI / MSA median household income ({ACS_5YR_MHI_DENOM_LABEL}))%"
 ZORI_AFFORD_X_LABEL_ZIP = ZORI_AFFORD_X_LABEL
-# Real index dollar change (same window as % change) shown as percent of MSA income
-PCT_AFFORD_X_LABEL = (
-    "ΔZHVI (Condo) / MSA median household income (%)\n"
-    "Real 2024 dollars"
-)
-PCT_AFFORD_X_LABEL_ZIP = PCT_AFFORD_X_LABEL
 ZORI_PCT_AFFORD_X_LABEL = (
     "ΔZORI (annualized) / MSA median household income (%)\n"
     "Real 2024 dollars"
 )
 ZORI_PCT_AFFORD_X_LABEL_ZIP = ZORI_PCT_AFFORD_X_LABEL
+SCALE_X_PCT_AFFORD_LABELS = frozenset(
+    {_zhvi_pct_afford_label(t["label"]) for t in ZHVI_TIERS}
+    | {ZORI_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL}
+)
 # Legacy hardcoded SF ZCTAs (superseded at runtime: _xsf ZIP charts use all ZCTAs with CNTY_CLEAN == SAN FRANCISCO from APR).
 ZIP_XSF_EXCLUDE = {'94102', '94103', '94105'}
 # City (JURISDICTION) excluded in city-level XSF variant
@@ -106,39 +182,6 @@ PREDICTOR_META = {
         "fit_mask_kind": "finite",
         "geo_applicability": "both",
         "positive_ols_companion": False,
-    },
-    "zhvi_pct_change": {
-        "display_label": ZHVI_PCT_LABEL,
-        "print_title": "ZHVI % change",
-        "tick_kind": "percent",
-        "is_log_x": False,
-        "allow_negative_x": True,
-        "requires_msa": False,
-        "fit_mask_kind": "finite",
-        "geo_applicability": "both",
-        "positive_ols_companion": True,
-    },
-    "zhvi_afford_ratio": {
-        "display_label": AFFORD_X_LABEL,
-        "print_title": "ZHVI condo affordability ratio",
-        "tick_kind": "percent",
-        "is_log_x": False,
-        "allow_negative_x": False,
-        "requires_msa": True,
-        "fit_mask_kind": "positive",
-        "geo_applicability": "both",
-        "positive_ols_companion": False,
-    },
-    "pct_afford": {
-        "display_label": PCT_AFFORD_X_LABEL,
-        "print_title": "ZHVI condo real $ change / income",
-        "tick_kind": "percent",
-        "is_log_x": False,
-        "allow_negative_x": True,
-        "requires_msa": True,
-        "fit_mask_kind": "finite",
-        "geo_applicability": "both",
-        "positive_ols_companion": True,
     },
     "zori_pct_change": {
         "display_label": ZORI_PCT_LABEL,
@@ -185,6 +228,43 @@ PREDICTOR_META = {
         "positive_ols_companion": False,
     },
 }
+
+for _zhvi_tier in ZHVI_TIERS:
+    _zhvi_key = _zhvi_tier["key"]
+    _zhvi_lbl = _zhvi_tier["label"]
+    PREDICTOR_META[_zhvi_tier_pct_col(_zhvi_key)] = {
+        "display_label": _zhvi_pct_label(_zhvi_lbl),
+        "print_title": f"ZHVI ({_zhvi_lbl}) % change",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": True,
+        "requires_msa": False,
+        "fit_mask_kind": "finite",
+        "geo_applicability": "both",
+        "positive_ols_companion": True,
+    }
+    PREDICTOR_META[_zhvi_tier_afford_ratio_col(_zhvi_key)] = {
+        "display_label": _zhvi_afford_label(_zhvi_lbl),
+        "print_title": f"ZHVI ({_zhvi_lbl}) affordability ratio",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": False,
+        "requires_msa": True,
+        "fit_mask_kind": "positive",
+        "geo_applicability": "both",
+        "positive_ols_companion": False,
+    }
+    PREDICTOR_META[_zhvi_tier_pct_afford_col(_zhvi_key)] = {
+        "display_label": _zhvi_pct_afford_label(_zhvi_lbl),
+        "print_title": f"ZHVI ({_zhvi_lbl}) real $ change / income",
+        "tick_kind": "percent",
+        "is_log_x": False,
+        "allow_negative_x": True,
+        "requires_msa": True,
+        "fit_mask_kind": "finite",
+        "geo_applicability": "both",
+        "positive_ols_companion": True,
+    }
 
 
 # --- Section: Predictor accessors & X_COL_* derivation ---
@@ -647,11 +727,9 @@ CI_COLOR_CYAN = "cyan"
 CI_COLOR_PINK = "#F472B6"
 CI_COLOR_OVERLAP = "#6B2D5C"
 # R² chart policy: one numeric cutoff (R2_THRESHOLD) but two different R² definitions (name the gate at call sites).
-# - Timeline scatter (median phase days vs predictor): OLS R² from sm.OLS → R2_THRESHOLD_TIMELINE_OLS_CHART (only if ENABLE_CONSTRUCTION_TIMELINE)
-# - Two-part (units, rate-on-rate, ZIP outcomes, timeline comp×phase): McFadden pseudo-R² → R2_THRESHOLD_TWOPART_MCFADDEN_CHART
+# - Two-part (units, rate-on-rate, ZIP outcomes): McFadden pseudo-R² → R2_THRESHOLD_TWOPART_MCFADDEN_CHART
 # - Secondary two-part gate: OLS R² on y>0 subset must also pass R2_OLS_POSITIVE_THRESHOLD (after McFadden passes).
 R2_THRESHOLD = 0.03
-R2_THRESHOLD_TIMELINE_OLS_CHART = R2_THRESHOLD
 R2_THRESHOLD_TWOPART_MCFADDEN_CHART = R2_THRESHOLD
 R2_THRESHOLD_CI_CHART = R2_THRESHOLD  # legacy alias; equals both semantic thresholds numerically
 R2_OLS_POSITIVE_THRESHOLD = 0.20
@@ -679,6 +757,72 @@ def _numerator_over_ref_income(numerator, ref_income, ok_mask):
     v = np.asarray(ok_mask, dtype=bool) & np.isfinite(num) & np.isfinite(ref) & (ref > 0)
     np.divide(num, ref, out=out, where=v)
     return out
+
+
+def _attach_zhvi_tier_predictors(
+    df,
+    tier,
+    df_join_col,
+    load_id_col,
+    id_transform,
+    source_label,
+    ref_income_col,
+    csv_path,
+    target_ids,
+):
+    """Load one ZHVI tier, merge, and derive afford_ratio + pct_afford columns."""
+    key = tier["key"]
+    pct_col = _zhvi_tier_pct_col(key)
+    level_col = _zhvi_tier_dec_col(key)
+    afford_col = _zhvi_tier_afford_ratio_col(key)
+    pct_afford_col = _zhvi_tier_pct_afford_col(key)
+    tier_cols = _zhvi_tier_all_cols(key)
+
+    if not csv_path.exists():
+        print(f"\nWARNING: ZHVI file not found: {csv_path}")
+        for col in tier_cols:
+            df[col] = np.nan
+        return df, 0
+
+    print(f"\nLoading Zillow Home Value Index (ZHVI) data ({tier['label']})...")
+    loaded = _load_zillow_monthly_index(
+        csv_path,
+        target_ids,
+        load_id_col,
+        id_transform,
+        source_label,
+        pct_col,
+        level_col,
+    )
+    df = df.merge(loaded, left_on=df_join_col, right_on=load_id_col, how="left")
+    if load_id_col != df_join_col:
+        df = df.drop(columns=[load_id_col], errors="ignore")
+
+    ref_income = df[ref_income_col]
+    df[afford_col] = np.where(
+        df[level_col].notna()
+        & (df[level_col] > 0)
+        & ref_income.notna()
+        & (ref_income > 0),
+        df[level_col].values / np.asarray(ref_income, dtype=np.float64),
+        np.nan,
+    )
+    ok_delta = (
+        df[pct_col].notna()
+        & np.isfinite(df[pct_col].values)
+        & df[level_col].notna()
+        & (df[level_col] > 0)
+    )
+    delta_zhvi = _dollar_change_real_from_pct_and_level(
+        df[pct_col].values, df[level_col].values, ok_delta
+    )
+    ok_pct_afford = np.isfinite(delta_zhvi) & ref_income.notna() & (ref_income > 0)
+    df[pct_afford_col] = _numerator_over_ref_income(
+        delta_zhvi, ref_income.values, np.asarray(ok_pct_afford, dtype=bool)
+    )
+    return df, int(df[pct_col].notna().sum())
+
+
 # Hierarchical Bayes RE prior scales (year vs county). County same tightness as year.
 SIGMA_INT_YEAR = 0.5
 SIGMA_SLOPE_YEAR = 0.25
@@ -1107,14 +1251,7 @@ def load_a2_csv(filepath, usecols=None):
     return df_clean
 
 
-# --- Section: Timeline config, NHGIS paths, suppression codes ---
-# Timeline phase day columns (OMNI: single list reused in build_timeline_projects, aggregate, means, long, charts)
-TIMELINE_PHASE_DAYS = ["days_ent_permit", "days_permit_completion", "days_ent_completion"]
-# Yearly timeline uses the same phase set (alias avoids duplicate literals; OMNI Tier 2)
-TIMELINE_PHASE_DAYS_REQUIRED_YEARLY = TIMELINE_PHASE_DAYS
-# Step 11b (construction timeline charts / merges): off by default. APR entitlement / BP / CO date
-# fields are still not considered reliable for modeling (parse coverage, duplicates, year-from-CO, etc.).
-ENABLE_CONSTRUCTION_TIMELINE = False
+# --- Section: NHGIS paths, suppression codes ---
 RUN_PCA_ONLY = os.environ.get("ACS_APR_RUN_PCA_ONLY", "").strip().lower() in ("1", "true", "yes")
 
 # Configuration
@@ -1806,70 +1943,6 @@ def get_cpi_for_month(cpi_data, year, month):
     return month_index.get(f"{year}-{month:02d}")
 
 
-def build_timeline_jurisdiction_year_long(df_jy, df_final, juris_col="JURIS_CLEAN",
-                                         completions_db_prefix="DB_CO", completions_owner_prefix="total_owner_CO",
-                                         strict_mode=False, strict_max_drop_ratio=0.20):
-    """Build long table: one row per (jurisdiction, year) with wait times and yearly completions.
-    Years derived from df_jy only (single source of truth). OMNI: concat once.
-    strict_mode: when True, raise if unmatched key ratio exceeds strict_max_drop_ratio."""
-    if df_jy.empty or "YEAR" not in df_jy.columns or juris_col not in df_jy.columns:
-        return pd.DataFrame()
-    jy_cols = [juris_col, "YEAR", "n_projects"] + [c for c in TIMELINE_PHASE_DAYS if c in df_jy.columns]
-    df_jy_sub = df_jy[[c for c in jy_cols if c in df_jy.columns]].copy()
-    df_jy_sub["YEAR"] = pd.to_numeric(df_jy_sub["YEAR"], errors="coerce")
-    df_jy_sub = df_jy_sub.dropna(subset=["YEAR"])
-    df_jy_sub["YEAR"] = df_jy_sub["YEAR"].astype(np.int64)
-    years = sorted(df_jy_sub["YEAR"].unique().tolist())
-    if not years:
-        return pd.DataFrame()
-    key_final = "JURISDICTION"
-    if key_final not in df_final.columns:
-        return pd.DataFrame()
-    # Build long completions: one block per year (from df_jy), then concat
-    year_dfs = []
-    for y in years:
-        c_db = f"{completions_db_prefix}_{y}" if f"{completions_db_prefix}_{y}" in df_final.columns else None
-        c_own = f"{completions_owner_prefix}_{y}" if f"{completions_owner_prefix}_{y}" in df_final.columns else None
-        if c_db is None and c_own is None:
-            continue
-        cols = [key_final]
-        renames = {}
-        if c_db:
-            cols.append(c_db)
-            renames[c_db] = "completions_DB"
-        if c_own:
-            cols.append(c_own)
-            renames[c_own] = "completions_owner"
-        block = df_final[[c for c in cols if c in df_final.columns]].copy()
-        block["YEAR"] = y
-        block = block.rename(columns=renames)
-        year_dfs.append(block)
-    if not year_dfs:
-        return pd.DataFrame()
-    comp_long = pd.concat(year_dfs, ignore_index=True)
-    comp_long["YEAR"] = pd.to_numeric(comp_long["YEAR"], errors="coerce").astype(np.int64)
-    left_keys = df_jy_sub[[juris_col, "YEAR"]].drop_duplicates()
-    right_keys = comp_long[[key_final, "YEAR"]].rename(columns={key_final: juris_col}).drop_duplicates()
-    key_check = left_keys.merge(right_keys, on=[juris_col, "YEAR"], how="outer", indicator=True)
-    left_only = int((key_check["_merge"] == "left_only").sum())
-    right_only = int((key_check["_merge"] == "right_only").sum())
-    left_total = len(left_keys)
-    left_drop_ratio = (left_only / left_total) if left_total else 0.0
-    print(
-        "  Timeline merge key diagnostics: "
-        f"left_only={left_only}, right_only={right_only}, "
-        f"left_drop_ratio={left_drop_ratio:.3f}"
-    )
-    if strict_mode and left_drop_ratio > strict_max_drop_ratio:
-        raise ValueError(
-            f"Timeline strict-mode failure: left_drop_ratio={left_drop_ratio:.3f} "
-            f"> threshold={strict_max_drop_ratio:.3f}"
-        )
-    merged = df_jy_sub.merge(comp_long, left_on=[juris_col, "YEAR"], right_on=[key_final, "YEAR"], how="inner")
-    merged = merged.drop(columns=[key_final], errors="ignore")
-    return merged
-
-
 def deflate_zhvi_values(v0_nominal, v1_nominal, source_label="ZHVI"):
     """Deflate ZHVI values from Jan 2018 and Dec 2024 to real 2024 dollars; also compute % change and Dec 2024 level.
     
@@ -1954,20 +2027,23 @@ def _load_zillow_monthly_index(path, target_ids, id_col, id_transform_fn, source
     })
 
 
-def load_zhvi_zip(zhvi_path, target_zips=None):
+def load_zhvi_zip(zhvi_path, target_zips=None, tier_key="condo"):
     """Load Zillow Home Value Index by ZIP; % change and Dec 2024 level.
 
     Args:
         zhvi_path: Path to ZIP-level ZHVI CSV (monthly data)
         target_zips: Optional set of ZIP codes to filter to
+        tier_key: ZHVI tier key from ZHVI_TIERS (default condo)
 
     Returns:
-        DataFrame with columns: zipcode, zhvi_pct_change, zhvi_dec2024
+        DataFrame with columns: zipcode, zhvi_{tier}_pct_change, zhvi_{tier}_dec2024
     """
     return _load_zillow_monthly_index(
         zhvi_path, target_zips, 'zipcode',
         lambda x: str(x).zfill(5),
-        'ZHVI ZIP', 'zhvi_pct_change', 'zhvi_dec2024'
+        'ZHVI ZIP',
+        _zhvi_tier_pct_col(tier_key),
+        _zhvi_tier_dec_col(tier_key),
     )
 
 
@@ -2344,19 +2420,6 @@ def _append_two_part_r2_diagnostics_row(
         ppm,
     ))
     return ols_r2
-
-
-def _append_timeline_r2_diagnostics_row(r2_list, regression_label, geography, ols_r2):
-    """Append timeline OLS row. Not the two-part helper: median phase-day OLS only (no McFadden, hurdle slopes, or PPM)."""
-    r2_list.append((
-        regression_label,
-        geography,
-        np.nan,
-        float(ols_r2),
-        np.nan,
-        np.nan,
-        np.nan,
-    ))
 
 
 def _append_zip_zinb_r2_diagnostics_row(r2_list, regression_label, geography, pseudo_r2, slope_log1p):
@@ -3298,128 +3361,6 @@ def stationary_bootstrap_ols(x, y, n_boot=10000, min_success=100):
     return arr[:, 0], arr[:, 1]
 
 
-# --- Section: APR dates, construction timeline, ZHVI/ZORI jurisdiction ---
-def parse_apr_date(val):
-    """Parse APR date string to datetime. Returns pd.NaT if invalid.
-    Supports YYYY-MM-DD and MM/DD/YYYY. OMNI: single place for date parsing."""
-    if pd.isna(val) or str(val).strip() in ("", "nan", "None"):
-        return pd.NaT
-    v = str(val).strip()
-    if "-" in v and len(v) >= 10 and v[:4].isdigit():
-        try:
-            return pd.to_datetime(v[:10], format="%Y-%m-%d", errors="coerce")
-        except (ValueError, TypeError):
-            return pd.NaT
-    if "/" in v:
-        parts = v.split("/")
-        if len(parts) == 3 and len(parts[2]) == 4 and parts[2].isdigit():
-            try:
-                return pd.to_datetime(v, format="%m/%d/%Y", errors="coerce")
-            except (ValueError, TypeError):
-                return pd.NaT
-    return pd.NaT
-
-
-def build_timeline_projects(df_apr, ent_col="ENT_APPROVE_DT1", bp_col="BP_ISSUE_DT1", co_col="CO_ISSUE_DT1",
-                            project_key_cols=None):
-    """Build project-level timeline: one row per (APN, STREET_ADDRESS, JURIS_NAME) with day-diffs.
-    Drops projects with any zero-day phase. OMNI: single pipeline, accumulate then filter."""
-    if project_key_cols is None:
-        project_key_cols = ["APN", "STREET_ADDRESS", "JURIS_NAME"]
-    available_key = [c for c in project_key_cols if c in df_apr.columns]
-    if not available_key:
-        available_key = [c for c in ["STREET_ADDRESS", "JURIS_NAME"] if c in df_apr.columns]
-    if not available_key or ent_col not in df_apr.columns or bp_col not in df_apr.columns or co_col not in df_apr.columns:
-        return pd.DataFrame()
-
-    need_cols = available_key + [ent_col, bp_col, co_col]
-    if "YEAR" in df_apr.columns:
-        need_cols = need_cols + ["YEAR"]
-    df = df_apr[[c for c in need_cols if c in df_apr.columns]].copy()
-    df["_ent_dt"] = df[ent_col].apply(parse_apr_date)
-    df["_bp_dt"] = df[bp_col].apply(parse_apr_date)
-    df["_co_dt"] = df[co_col].apply(parse_apr_date)
-    df["days_ent_permit"] = (df["_bp_dt"] - df["_ent_dt"]).dt.days
-    df["days_permit_completion"] = (df["_co_dt"] - df["_bp_dt"]).dt.days
-    df["days_ent_completion"] = (df["_co_dt"] - df["_ent_dt"]).dt.days
-    df = df.drop(columns=["_ent_dt", "_bp_dt", "_co_dt"])
-    valid = (df["days_ent_permit"].notna() & (df["days_ent_permit"] > 0) &
-             df["days_permit_completion"].notna() & (df["days_permit_completion"] > 0) &
-             df["days_ent_completion"].notna() & (df["days_ent_completion"] > 0))
-    df = df[valid].copy()
-    if "YEAR" not in df.columns and co_col in df_apr.columns:
-        df["YEAR"] = pd.to_datetime(df_apr.loc[df.index, co_col], errors="coerce").dt.year
-    elif "YEAR" not in df.columns:
-        df["YEAR"] = np.nan
-    if df.duplicated(subset=available_key).any():
-        df = df.sort_values("days_ent_completion", ascending=False)
-        df = df.drop_duplicates(subset=available_key, keep="first")
-    return df
-
-
-def aggregate_timeline_by_jurisdiction_year(df_projects, juris_col="JURIS_CLEAN", min_projects=1):
-    """Aggregate project-level timeline to jurisdiction-year: n_projects, mean days for each phase.
-    min_projects=1 keeps all jurisdiction-years (no per-year minimum). Jurisdiction-level total filter applied later."""
-    if df_projects.empty or "YEAR" not in df_projects.columns:
-        return pd.DataFrame()
-    if juris_col not in df_projects.columns and "JURIS_NAME" in df_projects.columns:
-        df_projects = df_projects.copy()
-        df_projects[juris_col] = df_projects["JURIS_NAME"].apply(juris_caps)
-    if juris_col not in df_projects.columns:
-        return pd.DataFrame()
-    phase_cols = [c for c in TIMELINE_PHASE_DAYS if c in df_projects.columns]
-    if not phase_cols:
-        return pd.DataFrame()
-    means = df_projects.groupby([juris_col, "YEAR"], as_index=False)[phase_cols].mean()
-    counts = df_projects.groupby([juris_col, "YEAR"]).size().reset_index(name="n_projects")
-    merged = means.merge(counts, on=[juris_col, "YEAR"], how="left")
-    merged = merged[merged["n_projects"] >= min_projects]
-    return merged
-
-
-def timeline_jurisdiction_means(df_jy, juris_col="JURIS_CLEAN", phase_cols=None):
-    """From jurisdiction-year means, compute jurisdiction-level MEDIAN wait times (across years). OMNI: single groupby."""
-    if df_jy.empty or juris_col not in df_jy.columns:
-        return pd.DataFrame()
-    if phase_cols is None:
-        phase_cols = [c for c in TIMELINE_PHASE_DAYS if c in df_jy.columns]
-    else:
-        phase_cols = [c for c in phase_cols if c in df_jy.columns]
-    if not phase_cols:
-        return pd.DataFrame()
-    agg = df_jy.groupby(juris_col, as_index=False)[phase_cols].median()
-    agg = agg.rename(columns={c: f"median_{c}" for c in phase_cols})
-    n_total = df_jy.groupby(juris_col)["n_projects"].sum().reset_index(name="n_projects_total")
-    return agg.merge(n_total, on=juris_col, how="left")
-
-
-
-def _timeline_ci_samples(use_hierarchical, df_yearly, yearly_y_col, pred_col, permit_years, pred_scale, use_log_y, x_trans, y_fit, n_boot, phase_tag):
-    """Return (intercept_samples, slope_samples, ci_method) for timeline OLS. Uses hierarchical when requested and data available; else bootstrap. OMNI: keeps timeline loop nesting ≤3."""
-    if use_hierarchical and df_yearly is not None and yearly_y_col and yearly_y_col in df_yearly.columns and pred_col in df_yearly.columns:
-        hi = hierarchical_ci_transformed(
-            df_yearly, "YEAR", pred_col, yearly_y_col, permit_years,
-            x_transform=pred_scale, y_transform="log" if use_log_y else "identity",
-            n_draws=5000, county_col="county"
-        )
-        if hi is not None:
-            ci_method = hi.get("method", "bayesian")
-            return (hi["intercept_samples"], hi["slope_samples"], ci_method)
-        else:
-            print(f"  Warning: hierarchical_ci_transformed returned None for {phase_tag} vs {pred_col}, falling back to bootstrap")
-    elif use_log_y:
-        if df_yearly is None:
-            print(f"  Warning: df_yearly_timeline is None for {phase_tag} vs {pred_col}, using bootstrap")
-        elif yearly_y_col is None or (df_yearly is not None and yearly_y_col not in df_yearly.columns):
-            print(f"  Warning: yearly_y_col '{yearly_y_col}' missing for {phase_tag} vs {pred_col}, using bootstrap")
-        elif df_yearly is not None and pred_col not in df_yearly.columns:
-            print(f"  Warning: pred_col '{pred_col}' missing from df_yearly_timeline for {phase_tag}, using bootstrap")
-    bi, bs_slope = stationary_bootstrap_ols(x_trans, y_fit, n_boot=n_boot, min_success=100)
-    if bi is not None:
-        return (bi, bs_slope, "stationary_bootstrap")
-    return (None, None, None)
-
-
 def hierarchical_ci_transformed(df, year_col, x_col, y_col, years, x_transform='log', y_transform='log', n_draws=5000, county_col='county'):
     """Hierarchical Bayesian CI for transformed outcome (non-hurdle, single-part OLS-style).
     Hierarchy: population -> year REs -> county REs (omitted when x_col in X_COL_MSA_INCOME_PREDICTORS).
@@ -3509,19 +3450,22 @@ def hierarchical_ci_transformed(df, year_col, x_col, y_col, years, x_transform='
     return None
 
 
-def load_zhvi(zhvi_path, target_jurisdictions):
+def load_zhvi(zhvi_path, target_jurisdictions, tier_key="condo"):
     """Load Zillow Home Value Index for CA cities; % change and Dec 2024 level.
 
     Args:
         zhvi_path: Path to City ZHVI CSV (monthly data)
         target_jurisdictions: Set of normalized jurisdiction names to match
+        tier_key: ZHVI tier key from ZHVI_TIERS (default condo)
 
     Returns:
-        DataFrame with columns: city_clean, zhvi_pct_change, zhvi_dec2024
+        DataFrame with columns: city_clean, zhvi_{tier}_pct_change, zhvi_{tier}_dec2024
     """
     return _load_zillow_monthly_index(
         zhvi_path, target_jurisdictions, 'city_clean', juris_caps,
-        'ZHVI', 'zhvi_pct_change', 'zhvi_dec2024'
+        'ZHVI',
+        _zhvi_tier_pct_col(tier_key),
+        _zhvi_tier_dec_col(tier_key),
     )
 
 
@@ -3784,9 +3728,8 @@ def _non_overlapping_side_y_positions(raw_y, lower=-1.08, upper=1.08, min_gap=0.
         y_slot = min(y, prev - min_gap, upper)
         placed.append(y_slot)
         prev = y_slot
-    floor = lower + min_gap * (len(placed) - 1)
     if placed and placed[-1] < lower:
-        shift = min(lower - placed[-1], upper - placed[0], lower - floor)
+        shift = min(lower - placed[-1], upper - placed[0])
         if shift > 0:
             placed = [y + shift for y in placed]
     return placed
@@ -3799,15 +3742,16 @@ def _place_ev1_pie_side_annotations(ax, side_entries, sign, dy=0.13):
     side_entries.sort(key=lambda t: t[1], reverse=True)
     target_y_raw = [1.08 * entry[1] for entry in side_entries]
     target_y = _non_overlapping_side_y_positions(target_y_raw, min_gap=dy)
+    text_x = 1.24 * sign
+    ha = "left" if sign > 0 else "right"
     for entry, text_y in zip(side_entries, target_y):
         xc, yc, pct = entry
-        text_x = 1.24 * sign
         ax.annotate(
             f"{pct:.1f}%",
             xy=(xc, yc),
             xytext=(text_x, text_y),
             textcoords="data",
-            ha="left" if sign > 0 else "right",
+            ha=ha,
             va="center",
             fontsize=13,
             arrowprops=dict(arrowstyle="-", color="black", lw=0.8, connectionstyle="arc3,rad=0.0"),
@@ -3985,7 +3929,7 @@ def _plot_ev1_ols_chart(
     ax.set_ylim(y_lo - pad_y, y_hi + pad_y)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
-    # pct_afford / zori_pct_afford are dollar change / ref_income (0–1 scale), not 0–100;
+    # pct_afford_{tier} / zori_pct_afford are dollar change / ref_income (0–1 scale), not 0–100;
     # integer "%" formatting rounded every tick to 0%.
     if predictor_col is not None and predictor_col in X_COL_AFFORD_DELTA_PREDICTORS:
         ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=1))
@@ -4012,19 +3956,44 @@ class PcaEv1Runner:
         self.zip_output_dir = zip_output_dir
         self.diagnostics_output_dir = diagnostics_output_dir
         self.y_labels = {
-            "pct_afford": f"ZHVI condo affordability change (MSA income: {ACS_5YR_MHI_DENOM_LABEL})",
-            "zori_pct_afford": f"ZORI affordability change (MSA income: {ACS_5YR_MHI_DENOM_LABEL})",
+            _zhvi_tier_pct_afford_col(t["key"]): (
+                f"ZHVI {t['label']} affordability change "
+                f"(MSA income: {ACS_5YR_MHI_DENOM_LABEL})"
+            )
+            for t in ZHVI_TIERS
         }
+        self.y_labels["zori_pct_afford"] = (
+            f"ZORI affordability change (MSA income: {ACS_5YR_MHI_DENOM_LABEL})"
+        )
         self.short_outcome_labels = {
-            "pct_afford": "ZHVI condo affordability change",
-            "zori_pct_afford": "ZORI affordability change",
+            _zhvi_tier_pct_afford_col(t["key"]): f"ZHVI {t['label']} affordability change"
+            for t in ZHVI_TIERS
         }
+        self.short_outcome_labels["zori_pct_afford"] = "ZORI affordability change"
 
     def build_specs(self, df_city, df_zip):
-        return [
-            ("city", df_city, "pct_afford", "ZHVI", "pca_ev1_pie_city_pct_afford.png", "pca_ev1_ols_city_pct_afford.png"),
-            ("city", df_city, "zori_pct_afford", "ZORI", "pca_ev1_pie_city_zori_pct_afford.png", "pca_ev1_ols_city_zori_pct_afford.png"),
+        specs = [
+            (
+                "city",
+                df_city,
+                _zhvi_tier_pct_afford_col(t["key"]),
+                "ZHVI",
+                f"pca_ev1_pie_city_pct_afford_{t['key']}.png",
+                f"pca_ev1_ols_city_pct_afford_{t['key']}.png",
+            )
+            for t in ZHVI_TIERS
         ]
+        specs.append(
+            (
+                "city",
+                df_city,
+                "zori_pct_afford",
+                "ZORI",
+                "pca_ev1_pie_city_zori_pct_afford.png",
+                "pca_ev1_ols_city_zori_pct_afford.png",
+            )
+        )
+        return specs
 
     def run_spec(self, geo_tag, df_geo, predictor_col, zillow_family, pie_name, ols_name):
         if df_geo is None or len(df_geo) == 0:
@@ -4645,7 +4614,7 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
     county_col: column for hierarchical grouping (always 'county'). Used in hierarchical_ci.
     label_col: column for chart dot labels (e.g. 'JURISDICTION' for cities, 'zipcode' for ZIPs). Falls back to county_col.
     For x_col in X_COL_TWO_PART_LINEAR_X (% change and dollar-change/income) we use raw x so negative values are allowed.
-    For zhvi_afford_ratio and zori_afford_ratio we use raw x (ratio on linear scale; do not log)."""
+    For zhvi_{tier}_afford_ratio and zori_afford_ratio we use raw x (ratio on linear scale; do not log)."""
     if RUN_PCA_ONLY:
         return None
     if label_col is None:
@@ -4859,10 +4828,10 @@ def _round_dollar_ticks_from_range(x_lo, x_hi, max_ticks=8):
 
 
 def _income_x_label(income_label, acs_year_range, filter_note, is_log_x):
-    """Build x-axis label for income/ZHVI/afford/timeline charts."""
+    """Build x-axis label for income/ZHVI/afford charts."""
     if is_log_x:
-        if income_label == AFFORD_X_LABEL:
-            x_label = AFFORD_X_LABEL
+        if income_label in ZHVI_AFFORD_X_LABELS:
+            x_label = income_label
         else:
             yr = f'ACS {acs_year_range}' if acs_year_range == '2020-2024' else (acs_year_range or '')
             x_label = f'{income_label} ({yr}), log scale' if yr else f'{income_label}, log scale'
@@ -4875,7 +4844,7 @@ def _income_x_label(income_label, acs_year_range, filter_note, is_log_x):
 
 def _plot_income_chart(result, output_path, title_suffix, acs_year_range, apr_year_range, data_label,
                        positive_ols_simple=False, x_col_for_ols=None, legend_exclusion_note=None):
-    """Chart for income/ZHVI/afford/timeline regressions: builds labels, computes MLE/CI, delegates to plot_two_part_chart."""
+    """Chart for income/ZHVI/afford regressions: builds labels, computes MLE/CI, delegates to plot_two_part_chart."""
     income_label = result.get('income_label', 'County Income')
     filter_note = result.get('x_axis_filter_note', '')
     is_log_x = (result.get('x_transform') == 'log')
@@ -4887,9 +4856,7 @@ def _plot_income_chart(result, output_path, title_suffix, acs_year_range, apr_ye
     if is_log_x:
         x_range = np.maximum(x_range, 1e-300)
     # Affordability-style ratios: display x as % (scale by 100); pass unscaled x_range to _build_mle_ci
-    scale_x_for_plot = income_label in (
-        ZORI_AFFORD_X_LABEL, PCT_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL,
-    )
+    scale_x_for_plot = income_label in SCALE_X_PCT_AFFORD_LABELS
     if scale_x_for_plot:
         x_scatter_plot = x_data * 100
         x_line_plot = x_range * 100
@@ -5373,7 +5340,10 @@ def _impute_place_home_pop_from_county(df_final, df_county, county_home_cols, co
 
 
 def _attach_income_and_price_predictors(df_final, base_path):
-    predictor_diag = {"zhvi_file_found": False, "zori_file_found": False, "zhvi_matches": 0, "zori_matches": 0}
+    predictor_diag = {"zori_file_found": False, "zori_matches": 0}
+    for tier in ZHVI_TIERS:
+        predictor_diag[f"zhvi_{tier['key']}_file_found"] = False
+        predictor_diag[f"zhvi_{tier['key']}_matches"] = 0
     df_final["ref_income"] = df_final["msa_income"].fillna(df_final["county_income"])
     if "place_income_2018" not in df_final.columns:
         df_final["place_income_2018"] = np.nan
@@ -5414,41 +5384,25 @@ def _attach_income_and_price_predictors(df_final, base_path):
         )
     df_final["affordability_ratio"] = afford_ratio(df_final, "ref_income")
     target_jurisdictions = set(df_final["JURISDICTION"].dropna().astype(str))
-    zhvi_path = base_path / "City_zhvi_uc_condo_tier_0.33_0.67_sm_sa_month.csv"
-    if zhvi_path.exists():
-        predictor_diag["zhvi_file_found"] = True
-        print("\nLoading Zillow Home Value Index (ZHVI) data...")
-        df_zhvi = load_zhvi(zhvi_path, target_jurisdictions)
-        df_final = df_final.merge(df_zhvi, left_on="JURISDICTION", right_on="city_clean", how="left").drop(
-            columns=["city_clean"], errors="ignore"
+    for tier in ZHVI_TIERS:
+        zhvi_path = base_path / f"City_{tier['file_stem']}.csv"
+        if zhvi_path.exists():
+            predictor_diag[f"zhvi_{tier['key']}_file_found"] = True
+        df_final, n_matches = _attach_zhvi_tier_predictors(
+            df_final,
+            tier,
+            "JURISDICTION",
+            "city_clean",
+            juris_caps,
+            f"ZHVI ({tier['label']})",
+            "ref_income",
+            zhvi_path,
+            target_jurisdictions,
         )
-        predictor_diag["zhvi_matches"] = int(df_final["zhvi_pct_change"].notna().sum())
-        print(f"  ZHVI: Matched {predictor_diag['zhvi_matches']} jurisdictions with zhvi_pct_change")
-        df_final["zhvi_afford_ratio"] = np.where(
-            df_final["zhvi_dec2024"].notna()
-            & (df_final["zhvi_dec2024"] > 0)
-            & df_final["ref_income"].notna()
-            & (df_final["ref_income"] > 0),
-            df_final["zhvi_dec2024"].values / np.asarray(df_final["ref_income"], dtype=np.float64),
-            np.nan,
-        )
-        ok_delta_zhvi = (
-            df_final["zhvi_pct_change"].notna()
-            & np.isfinite(df_final["zhvi_pct_change"].values)
-            & df_final["zhvi_dec2024"].notna()
-            & (df_final["zhvi_dec2024"] > 0)
-        )
-        delta_zhvi = _dollar_change_real_from_pct_and_level(
-            df_final["zhvi_pct_change"].values, df_final["zhvi_dec2024"].values, ok_delta_zhvi
-        )
-        ok_pct_afford = np.isfinite(delta_zhvi) & df_final["ref_income"].notna() & (df_final["ref_income"] > 0)
-        df_final["pct_afford"] = _numerator_over_ref_income(
-            delta_zhvi, df_final["ref_income"].values, np.asarray(ok_pct_afford, dtype=bool)
-        )
-    else:
-        print(f"\nWARNING: ZHVI file not found: {zhvi_path}")
-        for col in ["zhvi_pct_change", "zhvi_dec2024", "zhvi_afford_ratio", "pct_afford"]:
-            df_final[col] = np.nan
+        if zhvi_path.exists():
+            predictor_diag[f"zhvi_{tier['key']}_matches"] = n_matches
+            pct_col = _zhvi_tier_pct_col(tier["key"])
+            print(f"  ZHVI ({tier['label']}): Matched {n_matches} jurisdictions with {pct_col}")
     zori_path = base_path / "City_zori_uc_sfrcondomfr_sm_sa_month.csv"
     if zori_path.exists():
         predictor_diag["zori_file_found"] = True
@@ -5680,17 +5634,63 @@ def _prepare_apr_net_units_context(df_final, base_path):
     )
 
 
+def _build_output_cols(
+    permit_years,
+    categories,
+    year_cols_by_dr_cat,
+    proj_year_cols_by_dr_cat,
+    pop_cols_by_dr_cat,
+    net_permit_cols,
+    net_rate_cols,
+    cos_cols,
+    demolitions_cols,
+    demolitions_owner_cols,
+    co_net_cols,
+):
+    """Return candidate export column list for Step 11; existence pruning happens once in main()."""
+    output_cols = [
+        "JURISDICTION", "county", "geography_type", "median_home_value", "home_ref", "population",
+        "place_income", "place_income_2018", "place_population_2018",
+        "income_delta_raw", "income_delta_stratum", "income_delta_pct_change", "income_delta_positive",
+        "population_delta_raw", "population_delta_pct_change",
+        "county_income", "msa_income", "ref_income", "affordability_ratio",
+        *[c for t in ZHVI_TIERS for c in _zhvi_tier_all_cols(t["key"])],
+        "zori_pct_change", "zori_dec2024", "zori_afford_ratio", "zori_pct_afford",
+    ]
+    output_cols += net_permit_cols + ["total_net_permits"] + net_rate_cols + ["avg_annual_net_rate"]
+    output_cols += cos_cols + ["total_cos"]
+    output_cols += demolitions_cols + ["total_demolitions"]
+    output_cols += demolitions_owner_cols + ["total_demolitions_owner"]
+    output_cols += co_net_cols + ["total_co_net"]
+    for dr in DR_TYPES:
+        for cat in categories:
+            output_cols += year_cols_by_dr_cat[(dr, cat)]
+            output_cols += proj_year_cols_by_dr_cat[(dr, cat)]
+            output_cols += pop_cols_by_dr_cat[(dr, cat)]
+            output_cols += [f"dr_units_{dr}_{cat}", f"total_units_{dr}_{cat}", f"avg_annual_rate_{dr}_{cat}"]
+        output_cols += [f"dr_units_{dr}", f"total_units_{dr}"]
+        for cat in CO_BP_CATEGORIES:
+            output_cols += [f"{dr}_{cat}_total", f"PROJ_{dr}_{cat}_total"]
+    output_cols += ["dr_units_all", "total_units_all"]
+    for prefix in OWNER_PREFIXES:
+        for cat in CO_BP_CATEGORIES:
+            output_cols += [f"{prefix}_{cat}_{y}" for y in permit_years]
+            output_cols.append(f"{prefix}_{cat}_total")
+    output_cols += ["VLOW_LOW_CO_total", "MOD_CO_total"]
+    return output_cols
+
+
 def _merge_city_aggregates_into_final(
     df_final, df_apr_db_inc, df_apr_all, owner_net_city, is_city_all, mf_mask_all, permit_years
 ):
     print("\nAggregating density bonus/inclusionary units by jurisdiction, year, and category...")
-    categories = ["CO", "BP", "ENT"]
+    categories = list(UNIT_CATEGORIES)
     city_mask_db_inc = ~df_apr_db_inc["is_county"]
     city_sub = df_apr_db_inc[city_mask_db_inc]
-    city_agg_dfs = [_agg_units_by_year_cat(city_sub, dr, cat, permit_years) for dr in ["DB", "INC"] for cat in categories]
+    city_agg_dfs = [_agg_units_by_year_cat(city_sub, dr, cat, permit_years) for dr in DR_TYPES for cat in categories]
     city_agg_dfs += [
         _agg_units_by_year_cat(city_sub, dr, cat, permit_years, unit_col=f"proj_units_{cat}", output_prefix=f"PROJ_{dr}_{cat}")
-        for dr in ["DB", "INC"]
+        for dr in DR_TYPES
         for cat in categories
     ]
     df_city_units = city_agg_dfs[0]
@@ -5753,10 +5753,10 @@ def _merge_city_aggregates_into_final(
     )
     print(f"  Cities with unit data: {len(df_city_units)}")
     df_final = df_final.merge(df_city_units, left_on="JURISDICTION", right_on="JURIS_CLEAN", how="left")
-    year_cols_by_dr_cat = {(dr, cat): [f"{dr}_{cat}_{y}" for y in permit_years] for dr in ["DB", "INC"] for cat in categories}
-    pop_cols_by_dr_cat = {(dr, cat): [f"{dr}_{cat}_pop_{y}" for y in permit_years] for dr in ["DB", "INC"] for cat in categories}
+    year_cols_by_dr_cat = {(dr, cat): [f"{dr}_{cat}_{y}" for y in permit_years] for dr in DR_TYPES for cat in categories}
+    pop_cols_by_dr_cat = {(dr, cat): [f"{dr}_{cat}_pop_{y}" for y in permit_years] for dr in DR_TYPES for cat in categories}
     proj_year_cols_by_dr_cat = {
-        (dr, cat): [f"PROJ_{dr}_{cat}_{y}" for y in permit_years] for dr in ["DB", "INC"] for cat in categories
+        (dr, cat): [f"PROJ_{dr}_{cat}_{y}" for y in permit_years] for dr in DR_TYPES for cat in categories
     }
     all_year_cols = [col for cols in year_cols_by_dr_cat.values() for col in cols]
     all_proj_year_cols = [col for cols in proj_year_cols_by_dr_cat.values() for col in cols]
@@ -6318,10 +6318,10 @@ def main():
         df_apr_db_inc["CNTY_MATCH"] = df_apr_db_inc["CNTY_CLEAN"] + " COUNTY"
         # DR (income-tier) and project-total aggregations for counties
         county_agg_dfs = [_agg_units_by_year_cat(df_apr_db_inc, dr, cat, permit_years, group_col="CNTY_MATCH") 
-                          for dr in ["DB", "INC"] for cat in categories]
+                          for dr in DR_TYPES for cat in categories]
         county_agg_dfs += [_agg_units_by_year_cat(df_apr_db_inc, dr, cat, permit_years, group_col="CNTY_MATCH",
                               unit_col=f"proj_units_{cat}", output_prefix=f"PROJ_{dr}_{cat}")
-                           for dr in ["DB", "INC"] for cat in categories]
+                           for dr in DR_TYPES for cat in categories]
 
         # Merge all aggregations into one dataframe
         df_county_units = county_agg_dfs[0]
@@ -6392,7 +6392,7 @@ def main():
 
     # Step 10b: Apply totals and population-adjusted rates to combined cities + counties
     # Fill NaN with 0 for all yearly columns (DR, PROJ, owner tenure, TOTAL, income-tier)
-    owner_year_cols = [f"{pre}_{cat}_{y}" for pre in ["total_owner", "db_owner", "TOTAL", "TOTAL_MF", "mf_owner"] for cat in ["CO", "BP"] for y in permit_years]
+    owner_year_cols = [f"{pre}_{cat}_{y}" for pre in OWNER_PREFIXES for cat in CO_BP_CATEGORIES for y in permit_years]
     income_tier_year_cols = [f"VLOW_LOW_CO_{y}" for y in permit_years] + [f"MOD_CO_{y}" for y in permit_years]
     for col in all_year_cols + all_proj_year_cols + owner_year_cols + income_tier_year_cols:
         if col in df_final.columns:
@@ -6405,7 +6405,7 @@ def main():
     new_cols = {}
 
     # Calculate DR (deed-restricted) totals and per-capita rates for each DR_TYPE + category
-    for dr in ["DB", "INC"]:
+    for dr in DR_TYPES:
         for cat in categories:
             new_cols[f"dr_units_{dr}_{cat}"] = df_final[year_cols_by_dr_cat[(dr, cat)]].sum(axis=1).values
             proj_ycols = proj_year_cols_by_dr_cat[(dr, cat)]
@@ -6421,21 +6421,21 @@ def main():
     new_cols = {}
 
     # Average annual rates (need pop columns that now exist)
-    for dr in ["DB", "INC"]:
+    for dr in DR_TYPES:
         for cat in categories:
             pop_cols = pop_cols_by_dr_cat[(dr, cat)]
             new_cols[f"avg_annual_rate_{dr}_{cat}"] = df_final[pop_cols].mean(axis=1).values
 
     # Grand totals by DR_TYPE (sum of CO + BP + ENT)
-    for dr in ["DB", "INC"]:
+    for dr in DR_TYPES:
         new_cols[f"dr_units_{dr}"] = sum(df_final[f"dr_units_{dr}_{cat}"].values for cat in categories)
         new_cols[f"total_units_{dr}"] = sum(df_final[f"total_units_{dr}_{cat}"].values for cat in categories)
     new_cols["dr_units_all"] = new_cols["dr_units_DB"] + new_cols["dr_units_INC"]
     new_cols["total_units_all"] = new_cols["total_units_DB"] + new_cols["total_units_INC"]
 
     # Owner tenure and TOTAL totals (CO and BP only)
-    for prefix in ["total_owner", "db_owner", "TOTAL", "TOTAL_MF", "mf_owner"]:
-        for cat in ["CO", "BP"]:
+    for prefix in OWNER_PREFIXES:
+        for cat in CO_BP_CATEGORIES:
             existing_cols = [f"{prefix}_{cat}_{y}" for y in permit_years if f"{prefix}_{cat}_{y}" in df_final.columns]
             new_cols[f"{prefix}_{cat}_total"] = df_final[existing_cols].sum(axis=1).values if existing_cols else 0
     # Income-tier CO totals (Very low + Low, Moderate) for rate-on-rate
@@ -6445,8 +6445,8 @@ def main():
     new_cols["MOD_CO_total"] = df_final[mod_year_cols].sum(axis=1).values if mod_year_cols else np.zeros(len(df_final))
 
     # Alias columns for regression: DR uses income-tier data, PROJ uses project totals
-    for dr in ["DB", "INC"]:
-        for cat in ["CO", "BP"]:
+    for dr in DR_TYPES:
+        for cat in CO_BP_CATEGORIES:
             new_cols[f"{dr}_{cat}_total"] = df_final[f"dr_units_{dr}_{cat}"].values
             new_cols[f"PROJ_{dr}_{cat}_total"] = df_final[f"total_units_{dr}_{cat}"].values
 
@@ -6465,358 +6465,18 @@ def main():
             income_diagnostics.append(f"  {col_name}: ALL NULL")
     print("\n".join(income_diagnostics))
 
-    # Suppression codes already replaced during initial cleaning (lines 276-283) - no redundant cleanup needed
-
     # Step 11: select only relevant columns for output (remove raw NHGIS columns and duplicates)
-    # Build output columns: base ACS cols + net new units + (yearly + pop + total + avg) for each DR_TYPE + category
-    output_cols = ["JURISDICTION", "county", "geography_type", "median_home_value", "home_ref", "population",
-                   "place_income", "place_income_2018", "place_population_2018",
-                   "income_delta_raw", "income_delta_stratum", "income_delta_pct_change", "income_delta_positive",
-                   "population_delta_raw", "population_delta_pct_change",
-                   "county_income", "msa_income", "ref_income", "affordability_ratio",
-                   "zhvi_pct_change", "zhvi_dec2024", "zhvi_afford_ratio", "pct_afford",
-                   "zori_pct_change", "zori_dec2024", "zori_afford_ratio", "zori_pct_afford"]
-
-    # Add net permits columns (building permits minus demolitions)
-    output_cols += net_permit_cols + ["total_net_permits"] + net_rate_cols + ["avg_annual_net_rate"]
-
-    # Add COs, demolitions, and CO net columns
-    output_cols += cos_cols + ["total_cos"]
-    output_cols += demolitions_cols + ["total_demolitions"]
-    if "total_demolitions_owner" in df_final.columns:
-        output_cols += demolitions_owner_cols + ["total_demolitions_owner"]
-    output_cols += co_net_cols + ["total_co_net"]
-
-    # Add density bonus/inclusionary columns (DR = deed-restricted, PROJ = project total)
-    for dr in ["DB", "INC"]:
-        for cat in categories:
-            output_cols += year_cols_by_dr_cat[(dr, cat)]
-            output_cols += [c for c in proj_year_cols_by_dr_cat[(dr, cat)] if c in df_final.columns]
-            output_cols += pop_cols_by_dr_cat[(dr, cat)]
-            output_cols += [f"dr_units_{dr}_{cat}", f"total_units_{dr}_{cat}", f"avg_annual_rate_{dr}_{cat}"]
-        output_cols += [f"dr_units_{dr}", f"total_units_{dr}"]
-        for cat in ["CO", "BP"]:
-            output_cols += [f"{dr}_{cat}_total", f"PROJ_{dr}_{cat}_total"]
-    output_cols += ["dr_units_all", "total_units_all"]
-    # Owner tenure and TOTAL columns (yearly + totals)
-    for prefix in ["total_owner", "db_owner", "TOTAL", "TOTAL_MF", "mf_owner"]:
-        for cat in ["CO", "BP"]:
-            output_cols += [f"{prefix}_{cat}_{y}" for y in permit_years]
-            output_cols.append(f"{prefix}_{cat}_total")
-    # Preserve city EV1 income-tier totals for downstream PCA contract.
-    output_cols += ["VLOW_LOW_CO_total", "MOD_CO_total"]
-
-    # Only keep columns that exist in df_final
-    # Sort by geography_type (City first, County second), then alphabetically by JURISDICTION
+    output_cols = _build_output_cols(
+        permit_years, categories, year_cols_by_dr_cat, proj_year_cols_by_dr_cat,
+        pop_cols_by_dr_cat, net_permit_cols, net_rate_cols, cos_cols,
+        demolitions_cols, demolitions_owner_cols, co_net_cols,
+    )
     output_cols = [col for col in output_cols if col in df_final.columns]
     df_final = df_final[output_cols].sort_values(["geography_type", "JURISDICTION"]).reset_index(drop=True)
 
     print("\nSample output:")
     sample_cols = ["JURISDICTION", "geography_type", "dr_units_DB_CO", "total_units_DB_CO", "dr_units_DB_BP", "total_units_DB_BP", "dr_units_DB"]
     print(df_final[[c for c in sample_cols if c in df_final.columns]].head(10))
-
-    # Timeline charts are intentionally disabled per user request.
-    if False and ENABLE_CONSTRUCTION_TIMELINE:
-        # =============================================================================
-        # Step 11b: Construction Timeline (entitlement -> permit -> completion)
-        # Runs only when ENABLE_CONSTRUCTION_TIMELINE is True (default False: APR dates unreliable).
-        # Three avg wait times per jurisdiction; hierarchical Bayes for CI/variance;
-        # regress total DB CO and total owner CO on the three wait times. OMNI: one pipeline.
-        # =============================================================================
-        print("\n" + "="*70)
-        print("CONSTRUCTION TIMELINE: Wait times by jurisdiction")
-        print("="*70)
-    
-        df_projects = build_timeline_projects(df_apr_master)
-        if df_projects.empty:
-            print("  No project-level timeline (missing date columns or keys). Skipping timeline step.")
-        else:
-            if "JURIS_NAME" in df_projects.columns and "JURIS_CLEAN" not in df_projects.columns:
-                df_projects["JURIS_CLEAN"] = df_projects["JURIS_NAME"].apply(juris_caps)
-            # Restrict to incorporated cities (and counties in df_final) so wait times match pipeline
-            incorporated_jurisdictions_timeline = set(df_final["JURISDICTION"].dropna().unique())
-            df_projects = df_projects[df_projects["JURIS_CLEAN"].isin(incorporated_jurisdictions_timeline)].copy()
-            print(f"  Projects with valid non-zero phase durations (incorporated only): {len(df_projects):,}")
-    
-            df_jy = aggregate_timeline_by_jurisdiction_year(df_projects, juris_col="JURIS_CLEAN", min_projects=1)
-            df_cities_timeline = None
-            wait_time_specs_timeline = ()
-            comp_series_timeline = ()
-            permit_years_timeline = []
-            if df_jy.empty:
-                print("  No jurisdiction-year timeline data. Skipping timeline aggregation.")
-            else:
-                print(f"  Jurisdiction-year cells: {len(df_jy):,} (no per-year minimum)")
-    
-            df_juris_timeline = timeline_jurisdiction_means(df_jy, juris_col="JURIS_CLEAN")
-            if not df_juris_timeline.empty:
-                df_final = df_final.merge(
-                    df_juris_timeline,
-                    left_on="JURISDICTION", right_on="JURIS_CLEAN", how="left"
-                )
-                df_final = df_final.drop(columns=["JURIS_CLEAN"], errors="ignore")
-                print(f"  Merged timeline to df_final for {df_juris_timeline['JURIS_CLEAN'].nunique()} jurisdictions")
-    
-            # Build df_cities for timeline charts (two-part regressions run after fit_two_part_with_ci is defined)
-            cities_mask = (df_final["geography_type"] == "City") if "geography_type" in df_final.columns else pd.Series(True, index=df_final.index)
-            if "population" in df_final.columns:
-                cities_mask = cities_mask & df_final["population"].notna() & (df_final["population"] > 0)
-            df_cities_timeline = df_final.loc[cities_mask].copy()
-            if "n_projects_total" in df_cities_timeline.columns:
-                df_cities_timeline = df_cities_timeline[df_cities_timeline["n_projects_total"].notna() & (df_cities_timeline["n_projects_total"] >= 10)].copy()
-                print(f"  Cities with >= 10 projects total (timeline charts): {len(df_cities_timeline)}")
-            # Timeline charts: one spec per phase present in df_cities_timeline (OMNI: single list, no copy-paste).
-            wait_time_specs_timeline = [
-                ("median_days_ent_permit", "Entitlement to Permit", "ent_permit"),
-            ]
-            # Timeline two-part: Entitlement to Permit vs DB CO only (owner CO chart disabled)
-            comp_series_timeline = [
-                ("dr_units_DB_CO", "Deed-Restricted Density-Bonus DB CO", "dr_db_co", "DB_CO"),
-                ("total_net_permits", "Net Building Permits", "net_bp", "net_permits"),
-            ]
-            permit_years_timeline = [y for y in permit_years if f"DB_CO_{y}" in df_cities_timeline.columns or f"total_owner_CO_{y}" in df_cities_timeline.columns]
-            if not permit_years_timeline:
-                permit_years_timeline = sorted(set(int(c.split("_")[-1]) for c in df_cities_timeline.columns if c.startswith("DB_CO_") and c.split("_")[-1].isdigit())) or [2019, 2020, 2021, 2022, 2023]
-            timeline_dir = city_charts_dir
-            line_color = "#4472C4"
-            ci_color = "purple"
-            point_color = "#ED7D31"
-            setup_chart_style()
-            # OLS: income/ZHVI/afford (x) predicts log(wait time) (y). CI: hierarchical Bayes -> SMC -> bootstrap fallback.
-            timeline_predictors = (
-                "income_delta_pct_change",
-                "population_delta_pct_change",
-                "zhvi_pct_change",
-                "zhvi_afford_ratio",
-                "pct_afford",
-                "zori_pct_change",
-                "zori_afford_ratio",
-                "zori_pct_afford",
-            )
-            timeline_outcomes = [
-                (pred_col, _predictor_display_label(pred_col), "identity", lambda x: x)
-                for pred_col in timeline_predictors
-            ]
-            n_boot = 10000
-            phase_to_yearly_y = {"median_days_ent_permit": "days_ent_permit", "median_days_permit_completion": "days_permit_completion", "median_days_ent_completion": "days_ent_completion"}
-            phase_label_map = {
-                "median_days_ent_permit": "Entitlement to Permit",
-                "median_days_permit_completion": "Permit to Completion",
-                "median_days_ent_completion": "Entitlement to Completion",
-            }
-            df_yearly_timeline = None
-            if not df_jy.empty and "JURIS_CLEAN" in df_jy.columns and "YEAR" in df_jy.columns:
-                if all(c in df_jy.columns for c in TIMELINE_PHASE_DAYS_REQUIRED_YEARLY):
-                    cols_cities = [
-                        "JURISDICTION", "county", "income_delta_pct_change", "income_delta_positive",
-                        "population_delta_pct_change",
-                        "zhvi_pct_change", "zhvi_afford_ratio", "pct_afford",
-                        "zori_pct_change", "zori_afford_ratio", "zori_pct_afford", "population",
-                    ]
-                    cols_cities = [c for c in cols_cities if c in df_cities_timeline.columns]
-                    if cols_cities and not df_jy.empty:
-                        df_yearly_timeline = df_jy.merge(
-                            df_cities_timeline[cols_cities],
-                            left_on="JURIS_CLEAN", right_on="JURISDICTION", how="inner"
-                        )
-                        if "JURIS_CLEAN" in df_yearly_timeline.columns:
-                            df_yearly_timeline = df_yearly_timeline.drop(columns=["JURIS_CLEAN"])
-                        if df_yearly_timeline.empty:
-                            df_yearly_timeline = None
-            df_timeline_use = df_cities_timeline
-            df_yearly_timeline_use = df_yearly_timeline
-            for phase_col, phase_label, phase_tag in wait_time_specs_timeline:
-                if phase_col not in df_timeline_use.columns:
-                    continue
-                yearly_y_col = phase_to_yearly_y.get(phase_col)
-                for pred_col, pred_label, pred_scale, inv_fun in timeline_outcomes:
-                    if pred_col not in df_timeline_use.columns:
-                        continue
-                    if pred_scale == "identity":
-                        valid = (
-                            df_timeline_use[pred_col].notna() & np.isfinite(df_timeline_use[pred_col].values) &
-                            df_timeline_use[phase_col].notna() & (df_timeline_use[phase_col] > 0)
-                        )
-                        if pred_col == "zori_afford_ratio":
-                            valid = valid & (df_timeline_use[pred_col] > 0)
-                    else:
-                        valid = (
-                            df_timeline_use[pred_col].notna() & (df_timeline_use[pred_col] > 0) &
-                            df_timeline_use[phase_col].notna() & (df_timeline_use[phase_col] > 0)
-                        )
-                    x_orig = df_timeline_use.loc[valid, pred_col].values.astype(float)
-                    y_orig = df_timeline_use.loc[valid, phase_col].values.astype(float)
-                    if len(x_orig) < 10:
-                        continue
-                    x_trans = x_orig if pred_scale == "identity" else np.log(x_orig)
-                    use_log_y = False  # Days (y) always linear for timeline charts; predictor scale (x) unchanged (OMNI: consistent)
-                    y_fit = np.log(y_orig) if use_log_y else y_orig
-                    X = sm.add_constant(x_trans)
-                    try:
-                        ols_fit = sm.OLS(y_fit, X).fit()
-                    except (ValueError, FloatingPointError, np.linalg.LinAlgError):
-                        continue
-                    b0 = float(ols_fit.params[0])
-                    b1 = float(ols_fit.params[1])
-                    r2 = float(ols_fit.rsquared)
-                    _append_timeline_r2_diagnostics_row(
-                        all_r2_results,
-                        f"Median {phase_label_map[phase_col]} Days vs {pred_label}",
-                        GEOGRAPHY_CITY,
-                        r2,
-                    )
-                    if r2 < R2_THRESHOLD_TIMELINE_OLS_CHART:
-                        charts_skipped_low_r2.append((f"timeline_{phase_tag}_vs_{pred_col}", r2))
-                        print(f"  Skipping chart: OLS R² = {r2:.3f} < {R2_THRESHOLD_TIMELINE_OLS_CHART} for {phase_tag} vs {pred_col}")
-                        continue
-                    use_hierarchical = use_log_y and (
-                        df_yearly_timeline_use is not None and yearly_y_col is not None
-                        and yearly_y_col in df_yearly_timeline_use.columns and pred_col in df_yearly_timeline_use.columns
-                    )
-                    intercept_samples, slope_samples, ci_method = _timeline_ci_samples(
-                        use_hierarchical, df_yearly_timeline_use, yearly_y_col, pred_col, permit_years_timeline,
-                        pred_scale, use_log_y, x_trans, y_fit, n_boot, phase_tag
-                    )
-                    x_min, x_max = float(np.nanmin(x_orig)), float(np.nanmax(x_orig))
-                    x_max = max(x_max, x_min + 1.0)
-                    if pred_scale == "identity" and x_min < 0:
-                        x_lim_left = min(x_min, 0) - 0.02 * (x_max - x_min)
-                    else:
-                        x_lim_left = x_min
-                    x_grid = np.linspace(x_lim_left, x_max, 100)
-                    x_grid_trans = x_grid if pred_scale == "identity" else np.log(x_grid)
-                    # Identity-scale predictors: scale to % for ZORI afford ratio (display only)
-                    if pred_col == "zori_afford_ratio":
-                        x_orig_plot = x_orig * 100
-                        x_grid_plot = x_grid * 100
-                        x_lim_left_plot = x_lim_left * 100
-                        x_max_plot = x_max * 100
-                    else:
-                        x_orig_plot = x_orig
-                        x_grid_plot = x_grid
-                        x_lim_left_plot = x_lim_left
-                        x_max_plot = x_max
-                    if use_log_y:
-                        y_line = np.exp(b0 + b1 * x_grid_trans)
-                    else:
-                        y_line = b0 + b1 * x_grid_trans
-                    y_plot_max = float(np.nanmax(y_orig)) * 1.1
-                    fig, ax = _fig_ax_square_plot()
-                    if use_log_y:
-                        y_min = max(1.0, float(np.nanmin(y_orig[y_orig > 0])) * 0.5) if np.any(y_orig > 0) else 1.0
-                        ax.set_yscale("log")
-                        ax.set_ylim(bottom=y_min, top=y_plot_max)
-                        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:,.0f}"))
-                    else:
-                        ax.set_ylim(bottom=0, top=y_plot_max)
-                        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:,.0f}"))
-                    if pred_scale == "log":
-                        ax.set_xscale("log")
-                        ax.set_xlim(left=x_lim_left, right=x_max)
-                        ticks_in_range = dollar_ticks_log = None
-                    if pred_scale == "identity":
-                        ax.set_xlim(left=x_lim_left_plot, right=x_max_plot)
-                    ax.scatter(x_orig_plot, y_orig, color=point_color, alpha=0.6, s=40, edgecolors="none",
-                               label=f"{CHART_LEGEND_GEO_CITY} with ≥10 projects total\n(n={len(x_orig)})")
-                    if "JURISDICTION" in df_timeline_use.columns:
-                        juris_names = df_timeline_use.loc[valid, "JURISDICTION"].values
-                        tl_anns = annotate_top_n_by_y(ax, x_orig_plot, y_orig, juris_names, n=3,
-                                                      label_cleanup=lambda s: str(s).replace(" COUNTY", ""))
-                        if tl_anns:
-                            _resolve_scatter_label_overlaps(ax, fig, tl_anns)
-                    ols_label = "OLS\n(log-normal)" if use_log_y else "OLS"
-                    ax.plot(x_grid_plot, y_line, color=line_color, linewidth=2, linestyle="-", label=ols_label)
-                    if intercept_samples is not None:
-                        if use_log_y:
-                            y_samp = np.exp(intercept_samples[:, None] + slope_samples[:, None] * x_grid_trans[None, :])
-                        else:
-                            y_samp = intercept_samples[:, None] + slope_samples[:, None] * x_grid_trans[None, :]
-                        y_lo = np.percentile(y_samp, 2.5, axis=0)
-                        y_hi = np.percentile(y_samp, 97.5, axis=0)
-                        ci_label = CI_LABEL_CREDIBLE_SMC if ci_method == "bayesian" else CI_LABEL_STATIONARY_MC
-                        ax.fill_between(x_grid_plot, y_lo, y_hi, color=ci_color, alpha=0.3, label=ci_label)
-                    r2_str = f"{r2:.2e}" if abs(r2) < 0.001 else f"{r2:.3f}"
-                    ax.plot([], [], " ", label=f"R² = {r2_str}")
-                    xlabel_base = pred_label if pred_scale == "identity" else f"{pred_label}, log scale"
-                    if pred_scale == "identity":
-                        ax.set_xlabel(xlabel_base)
-                        if _x_axis_should_use_percent_ticks(pred_col, pred_label):
-                            if x_min < 0:
-                                ax.xaxis.set_major_locator(MultipleLocator(10))
-                            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.0f}%"))
-                        else:
-                            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.2f}"))
-                    else:
-                        ax.set_xlabel(xlabel_base)
-                    ax.set_ylabel(f"Median {phase_label_map[phase_col]} Days" + (", log scale" if use_log_y else ""))
-                    ax.set_title('')
-                    leg = ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False)
-                    pred_tag = (
-                        "income_delta" if pred_col == "income_delta_pct_change"
-                        else ("population_delta" if pred_col == "population_delta_pct_change"
-                        else ("zhvi" if pred_col == "zhvi_pct_change"
-                        else ("zori" if pred_col == "zori_pct_change"
-                        else ("zori_afford" if pred_col == "zori_afford_ratio"
-                        else ("pct_afford" if pred_col == "pct_afford"
-                        else ("zori_pct_afford" if pred_col == "zori_pct_afford" else "afford")))))))
-                    out_path = timeline_dir / f"timeline_{phase_tag}_vs_{pred_tag}.png"
-                    fig.savefig(
-                        out_path,
-                        dpi=150,
-                        bbox_inches="tight",
-                        bbox_extra_artists=[leg],
-                        facecolor="white",
-                    )
-                    plt.close(fig)
-                    print(f"  Saved: {out_path.name}")
-    
-            # Timeline two-part (all-cities; county in df_timeline_use retained in Step 11 output_cols).
-            if df_timeline_use is not None and permit_years_timeline and wait_time_specs_timeline and comp_series_timeline:
-                for phase_col, phase_label, phase_tag in wait_time_specs_timeline:
-                    if phase_col not in df_timeline_use.columns:
-                        continue
-                    for comp_col, comp_label, comp_tag, yearly_prefix in comp_series_timeline:
-                        if comp_col not in df_timeline_use.columns:
-                            continue
-                        if not any(f"{yearly_prefix}_{y}" in df_timeline_use.columns for y in permit_years_timeline):
-                            continue
-                        df_totals = df_timeline_use[["county", phase_col, "population", comp_col]].rename(columns={comp_col: "units"})
-                        df_yearly = _melt_jurisdiction_years(
-                            df_timeline_use, ["county", phase_col, "population"], permit_years_timeline,
-                            lambda d, y: ({'units': d[f"{yearly_prefix}_{y}"]}
-                                            if f"{yearly_prefix}_{y}" in d.columns else None),
-                        )
-                        if df_yearly.empty:
-                            continue
-                        if len(df_totals) < 10:
-                            continue
-                        regression_results = fit_two_part_with_ci(
-                            df_totals, df_yearly, phase_col, "units", permit_years_timeline, log_x=True,
-                            skipped_low_r2=charts_skipped_low_r2, chart_id=f"timeline_{phase_tag}_{comp_tag}",
-                            r2_diagnostics=all_r2_results,
-                            r2_x_label=f"Median days ({phase_label})",
-                            r2_y_label=comp_label,
-                            r2_geography=GEOGRAPHY_CITY,
-                        )
-                        if not regression_results:
-                            continue
-                        regression_results["income_label"] = f"Median days ({phase_label})"
-                        regression_results["x_axis_filter_note"] = "cities with ≥10 projects"
-                        _plot_income_chart(
-                            regression_results,
-                            timeline_dir / f"timeline_{phase_tag}_{comp_tag}.png",
-                            title_suffix=comp_label,
-                            acs_year_range="",
-                            apr_year_range=f"{min(permit_years_timeline)}-{max(permit_years_timeline)}",
-                            data_label=CHART_LEGEND_GEO_CITY,
-                        )
-                        print(f"  Saved: timeline_{phase_tag}_{comp_tag}.png")
-    else:
-        print("\n" + "="*70)
-        print("CONSTRUCTION TIMELINE: skipped (ENABLE_CONSTRUCTION_TIMELINE=False).")
-        print("  APR entitlement / BP / CO dates are not treated as reliable for modeling.")
-        print("="*70)
-
 
     # =============================================================================
     # Step 12: Bayesian Linear Regression with Sequential Updating (Counties Only)
@@ -6860,9 +6520,7 @@ def main():
     city_file_tag = {
         "income_delta_pct_change": "income_delta",
         "population_delta_pct_change": "population_delta",
-        "zhvi_pct_change": "zhvi",
-        "zhvi_afford_ratio": "afford",
-        "pct_afford": "pct_afford",
+        **_zhvi_predictor_file_tags(),
         "zori_pct_change": "zori",
         "zori_afford_ratio": "zori_afford",
         "zori_pct_afford": "zori_pct_afford",
@@ -7337,45 +6995,27 @@ def main():
             f"income non-null={(df_zip['income_delta_pct_change'].notna()).sum()}, "
             f"population non-null={(df_zip['population_delta_pct_change'].notna()).sum()}"
         )
-        # Load ZHVI by ZIP
-        zhvi_zip_path = Path(__file__).resolve().parent / "Zip_zhvi_uc_condo_tier_0.33_0.67_sm_sa_month.csv"
-        if zhvi_zip_path.exists():
-            target_zips = set(df_zip['zipcode'].values)
-            df_zhvi_zip = load_zhvi_zip(zhvi_zip_path, target_zips)
-            df_zip = df_zip.merge(df_zhvi_zip, on='zipcode', how='left')
-            print(f"  ZIPs with zhvi_pct_change: {df_zip['zhvi_pct_change'].notna().sum() if 'zhvi_pct_change' in df_zip.columns else 0}")
-            # Afford ratio (ZIP): Dec 2024 ZHVI / regional household median income (MSA when available, else county)
-            df_zip['zhvi_afford_ratio'] = np.where(
-                df_zip['zhvi_dec2024'].notna() & (df_zip['zhvi_dec2024'] > 0)
-                & df_zip['ref_income'].notna() & (df_zip['ref_income'] > 0),
-                df_zip['zhvi_dec2024'].values / np.asarray(df_zip['ref_income'], dtype=np.float64),
-                np.nan
+        # Load ZHVI by ZIP (one tier per registry entry)
+        target_zips = set(df_zip['zipcode'].values)
+        zip_base = Path(__file__).resolve().parent
+        for tier in ZHVI_TIERS:
+            zhvi_zip_path = zip_base / f"Zip_{tier['file_stem']}.csv"
+            df_zip, n_matches = _attach_zhvi_tier_predictors(
+                df_zip,
+                tier,
+                "zipcode",
+                "zipcode",
+                lambda x: str(x).zfill(5),
+                f"ZHVI ZIP ({tier['label']})",
+                "ref_income",
+                zhvi_zip_path,
+                target_zips,
             )
-            ok_delta_zhvi_z = (
-                df_zip['zhvi_pct_change'].notna() & np.isfinite(df_zip['zhvi_pct_change'].values)
-                & df_zip['zhvi_dec2024'].notna() & (df_zip['zhvi_dec2024'] > 0)
-            )
-            delta_zhvi_z = _dollar_change_real_from_pct_and_level(
-                df_zip['zhvi_pct_change'].values,
-                df_zip['zhvi_dec2024'].values,
-                ok_delta_zhvi_z,
-            )
-            ok_pct_afford_zip = (
-                np.isfinite(delta_zhvi_z)
-                & df_zip['ref_income'].notna() & (df_zip['ref_income'] > 0)
-            )
-            df_zip['pct_afford'] = _numerator_over_ref_income(
-                delta_zhvi_z,
-                df_zip['ref_income'].values,
-                np.asarray(ok_pct_afford_zip, dtype=bool),
-            )
-        else:
-            print(f"  WARNING: ZHVI ZIP file not found: {zhvi_zip_path}")
-            print(f"  Download from: https://www.zillow.com/research/data/")
-            df_zip['zhvi_pct_change'] = np.nan
-            df_zip['zhvi_dec2024'] = np.nan
-            df_zip['zhvi_afford_ratio'] = np.nan
-            df_zip['pct_afford'] = np.nan
+            if not zhvi_zip_path.exists():
+                print(f"  Download from: https://www.zillow.com/research/data/")
+            else:
+                pct_col = _zhvi_tier_pct_col(tier["key"])
+                print(f"  ZIPs with {pct_col}: {n_matches}")
 
         # Step: ZORI ZIP — same pattern as ZHVI ZIP
         zori_zip_path = Path(__file__).resolve().parent / "Zip_zori_uc_sfrcondomfr_sm_sa_month.csv"
@@ -7553,8 +7193,9 @@ def main():
             zip_cnty_norm["zipcode"] = _normalize_zipcode_series(zip_cnty_norm["zipcode"])
             zip_yearly = zip_yearly.merge(zip_cnty_norm, on="zipcode", how="left")
             pred_cols = [c for c in [
-                "population", "median_income", "zhvi_pct_change", "zhvi_afford_ratio", "pct_afford",
-                "zori_pct_change", "zori_dec2024", "zori_afford_ratio", "zori_pct_afford",
+                "population", "median_income",
+                *_zhvi_yearly_pred_cols(),
+                "zori_pct_change", "zori_afford_ratio", "zori_pct_afford",
             ] if c in df_zip.columns]
             zip_yearly = zip_yearly.merge(df_zip[["zipcode"] + pred_cols].drop_duplicates(subset=["zipcode"]), on="zipcode", how="left")
             pop_ok = zip_yearly["population"].notna() & (zip_yearly["population"] > 0)
@@ -7581,19 +7222,23 @@ def main():
         # (x_col, x_tag, x_axis_label, use_log_x, x_tick_dollar, require_msa) from canonical metadata.
         zip_x_tag = {
             "median_income": "income",
-            "zhvi_pct_change": "zhvi",
-            "zhvi_afford_ratio": "afford",
-            "pct_afford": "pct_afford",
+            **_zhvi_predictor_file_tags(),
             "zori_pct_change": "zori",
             "zori_afford_ratio": "zori_afford",
             "zori_pct_afford": "zori_pct_afford",
         }
         zip_label_override = {
-            "zhvi_afford_ratio": AFFORD_X_LABEL_ZIP,
-            "pct_afford": PCT_AFFORD_X_LABEL_ZIP,
+            _zhvi_tier_afford_ratio_col(t["key"]): _zhvi_afford_label(t["label"])
+            for t in ZHVI_TIERS
+        }
+        zip_label_override.update({
+            _zhvi_tier_pct_afford_col(t["key"]): _zhvi_pct_afford_label(t["label"])
+            for t in ZHVI_TIERS
+        })
+        zip_label_override.update({
             "zori_afford_ratio": ZORI_AFFORD_X_LABEL_ZIP,
             "zori_pct_afford": ZORI_PCT_AFFORD_X_LABEL_ZIP,
-        }
+        })
         zip_predictor_specs = [
             (
                 x_col,
@@ -7797,7 +7442,8 @@ def main():
     print("\n" + "="*70)
     print(
         "PCA EV1 + OLS: affordability ~ EV1 composite "
-        f"({EV1_STANDARDIZED_INPUT_CAPTION}; CITY only; pct_afford, zori_pct_afford)"
+        f"({EV1_STANDARDIZED_INPUT_CAPTION}; CITY only; "
+        f"{', '.join(_zhvi_tier_pct_afford_col(t['key']) for t in ZHVI_TIERS)}, zori_pct_afford)"
     )
     print("="*70)
     df_city_for_pca = df_final[df_final["geography_type"] == "City"].copy()
@@ -7842,9 +7488,7 @@ def main():
     if charts_skipped_low_r2:
         print("\n" + "="*70)
         print(
-            f"Charts not produced (threshold {R2_THRESHOLD}: "
-            f"timeline scatter uses OLS R² when ENABLE_CONSTRUCTION_TIMELINE; "
-            f"two-part uses McFadden's R²)"
+            f"Charts not produced (threshold {R2_THRESHOLD}: two-part uses McFadden's R²)"
         )
         print("="*70)
         for chart_id, r2 in charts_skipped_low_r2:
