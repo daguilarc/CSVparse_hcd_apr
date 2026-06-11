@@ -578,8 +578,8 @@ def _render_all_db_maps(
         )
 
 
-def main() -> None:
-    ensure_dir(OUTPUT_DIR)
+def assemble_plot_frame() -> gpd.GeoDataFrame:
+    """Build merged city/county GeoDataFrame with all map metrics (no PNG output)."""
     ensure_dir(BOUNDARY_CACHE_DIR)
     city_geo, county_geo = load_boundaries()
     apr = load_apr()
@@ -598,6 +598,39 @@ def main() -> None:
     plot_frame = build_plot_frame(city_geo, county_geo, city_metric, county_metric)
     if (plot_frame["geo_type"] == "city").sum() == 0:
         raise RuntimeError("No city geometries found after merge; aborting.")
+    return plot_frame
+
+
+def export_maps_geojson(plot_frame: gpd.GeoDataFrame, output_path: Path, simplify_tolerance: float = 500.0) -> None:
+    """Write simplified WGS84 GeoJSON with metric columns for static choropleth."""
+    ensure_dir(output_path.parent)
+    export_gdf = plot_frame.to_crs(4326).copy()
+    if simplify_tolerance > 0:
+        export_gdf["geometry"] = export_gdf.geometry.simplify(simplify_tolerance, preserve_topology=True)
+    metric_cols = [spec["metric_col"] for spec in MAP_RENDER_SPECS]
+    keep_cols = ["geometry", "geo_type", "city_name", "county_name", "county_fips"] + metric_cols
+    keep_cols = [c for c in keep_cols if c in export_gdf.columns]
+    export_gdf = export_gdf[keep_cols]
+    export_gdf["feature_id"] = np.arange(len(export_gdf)).astype(str)
+    export_gdf.to_file(output_path, driver="GeoJSON")
+
+
+def get_map_metric_options() -> list[dict]:
+    return [
+        {
+            "key": spec["map_file_key"],
+            "metric_col": spec["metric_col"],
+            "title": spec["title"],
+            "subtitle": spec.get("subtitle"),
+            "cmap_kind": spec["cmap_kind"],
+        }
+        for spec in MAP_RENDER_SPECS
+    ]
+
+
+def main() -> None:
+    ensure_dir(OUTPUT_DIR)
+    plot_frame = assemble_plot_frame()
 
     seq_cmap = make_seq_cmap()
     div_cmap = LinearSegmentedColormap.from_list("red_green_div", ["#b2182b", "#f7f7f7", "#1a9850"], N=256)
