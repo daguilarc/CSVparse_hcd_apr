@@ -1,0 +1,86 @@
+name: Build GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * 0"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  TABLEA2_URL: https://data.ca.gov/dataset/81b0841f-2802-403e-b48e-2ef4b751f77c/resource/fe505d9b-8c36-42ba-ba30-08bc4f34e022/download/tablea2.csv
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            TableA2-models/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r TableA2-models/requirements.txt
+
+      - name: Restore census cache bundle
+        uses: actions/cache@v4
+        with:
+          path: |
+            TableA2-models/nhgis_cache.json
+            TableA2-models/nhgis_cache_2018_place_b19013_b01003.json
+            TableA2-models/cpi_cache.json
+            TableA2-models/geocode_cache.json
+            TableA2-models/acs_zcta_income_cache.json
+          key: census-caches-v1-${{ hashFiles('docs/data/census/**') }}
+          restore-keys: census-caches-v1-
+
+      - name: Copy committed census bundle
+        run: python scripts/bootstrap_census_caches.py
+
+      - name: Download tablea2.csv from data.ca.gov
+        run: |
+          curl -fL -A "Mozilla/5.0 (APR-explorer CI)" -o tablea2.csv "$TABLEA2_URL"
+          ls -lh tablea2.csv
+
+      - name: Repair APR CSV
+        run: python tablea2_parsefilter_repair.py
+
+      - name: Build Pages data (maps + regression catalog)
+        env:
+          CI: "true"
+          IPUMS_API_KEY: ${{ secrets.IPUMS_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python scripts/export_pages_catalog.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

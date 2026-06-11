@@ -11,7 +11,13 @@ TableA2-ACSjoin/tablea2.csv
 *.zip
 *.xlsx
 *.md
+!docs/PAGES_SETUP.md
+!docs/index.html
 *.log
+
+# GitHub Pages census bundle (processed NHGIS/CPI caches)
+!docs/data/census/
+!docs/data/census/*.json
 
 # Private OMNI master rule (local only, not on GitHub)
 .cursor/rules/omni-rule.mdc
