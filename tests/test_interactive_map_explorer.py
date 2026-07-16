@@ -434,8 +434,34 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
             manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["catalog_keys"], sorted(pruned))
             self.assertEqual(manifest["n_regressions"], 2)
+            self.assertEqual(manifest["n_pairs_exported"], 2)
             self.assertEqual(manifest["n_stationary_bootstrap_succeeded"], 2)
             self.assertEqual(manifest["n_pairs_attempted"], 2)
+
+    def test_finalize_preserve_runtime_pins_keeps_release_profile_python(self):
+        spec = importlib.util.spec_from_file_location(
+            "export_pages_preserve_runtime", ROOT / "scripts/export_pages_catalog.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp) / "2018-2024"
+            stage.mkdir(parents=True)
+            module._fixture_release(stage)
+            manifest_path = stage / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["input_profile"] = "release-2018-2024-v1"
+            manifest["python_runtime"] = "CPython 3.13.5"
+            manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            module.finalize_release_integrity(stage, preserve_runtime_pins=True)
+            updated = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated["python_runtime"], "CPython 3.11.14")
+            module.finalize_release_integrity(stage, preserve_runtime_pins=False)
+            restamped = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                restamped["python_runtime"],
+                f"{module.platform.python_implementation()} {module.platform.python_version()}",
+            )
 
     def test_pair_registry_generates_directed_nonidentity_variable_pairs(self):
         from pages.pair_registry import iter_pairs

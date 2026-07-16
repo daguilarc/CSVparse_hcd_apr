@@ -52,6 +52,10 @@ CODE_FILES = (
     "docs/chart_labels.json", "docs/index.html", "notebooks/apr_explorer.ipynb",
 )
 DEPENDENCY_FILES = ("requirements-pages-release.lock",)
+# Prune-only / overlay finalize must keep verify_release profile pins (not host Python).
+RELEASE_PROFILE_PYTHON_RUNTIME = {
+    "release-2018-2024-v1": "CPython 3.11.14",
+}
 STATIC_RELEASE_INPUTS = {
     "hcd/tablea2.csv": "tablea2.csv",
     "hcd/tablea2_cleaned_parsefilter_repair.csv": "tablea2_cleaned_parsefilter_repair.csv",
@@ -223,6 +227,7 @@ def prune_non_mf_release_artifacts(stage: Path) -> None:
     hierarchical_failed = int(manifest.get("n_hierarchical_failed", 0) or 0)
     manifest["catalog_keys"] = sorted(catalog)
     manifest["n_regressions"] = len(catalog)
+    manifest["n_pairs_exported"] = len(catalog)
     manifest["n_stationary_bootstrap_succeeded"] = len(catalog)
     manifest["n_hierarchical_succeeded"] = hierarchical_succeeded
     manifest["n_hierarchical_attempted"] = hierarchical_succeeded + hierarchical_failed
@@ -230,14 +235,39 @@ def prune_non_mf_release_artifacts(stage: Path) -> None:
     manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8")
 
 
-def finalize_release_integrity(stage: Path) -> None:
-    """Prune non-MF outcomes, then record integrity metadata before verification."""
-    prune_non_mf_release_artifacts(stage)
+def _resolve_python_runtime(
+    manifest: dict,
+    *,
+    preserve_runtime_pins: bool,
+    prior_runtime: str | None,
+) -> str:
+    if not preserve_runtime_pins:
+        return f"{platform.python_implementation()} {platform.python_version()}"
+    profile_pin = RELEASE_PROFILE_PYTHON_RUNTIME.get(manifest.get("input_profile"))
+    if profile_pin:
+        return profile_pin
+    if isinstance(prior_runtime, str) and prior_runtime:
+        return prior_runtime
+    return f"{platform.python_implementation()} {platform.python_version()}"
+
+
+def finalize_release_integrity(stage: Path, *, preserve_runtime_pins: bool = False) -> None:
+    """Prune non-MF outcomes, then record integrity metadata before verification.
+
+    preserve_runtime_pins: prune-only / overlay path — keep release-profile python_runtime
+    (and prior runtime when no profile pin) instead of restamping from the host interpreter.
+    """
     manifest_path = stage / "manifest.json"
+    prior_runtime = None
+    if preserve_runtime_pins and manifest_path.exists():
+        prior_runtime = json.loads(manifest_path.read_text(encoding="utf-8")).get("python_runtime")
+    prune_non_mf_release_artifacts(stage)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest.setdefault("built_at", _built_at())
     manifest["random_seed"] = RANDOM_SEED
-    manifest["python_runtime"] = f"{platform.python_implementation()} {platform.python_version()}"
+    manifest["python_runtime"] = _resolve_python_runtime(
+        manifest, preserve_runtime_pins=preserve_runtime_pins, prior_runtime=prior_runtime
+    )
     manifest["code_revision"] = _code_revision()
     code_paths = [REPO_ROOT / name for name in CODE_FILES]
     manifest["code_files"] = list(CODE_FILES)
@@ -518,22 +548,39 @@ def main() -> None:
         action="store_true",
         help="replace maps/metrics in an existing staged release using the real prepared panel",
     )
+    parser.add_argument(
+        "--finalize-existing",
+        action="store_true",
+        help="prune + rehash an existing staged release without restamping host python_runtime",
+    )
     parser.add_argument("--publish", action="store_true", help="promote only after successful verification")
     args = parser.parse_args()
     if args.release_id != RELEASE_ID:
         raise SystemExit("This pipeline version only supports release id 2018-2024")
     if args.fixture and args.publish:
         raise SystemExit("fixture releases can never be published")
+    if args.overlay_real_maps and args.finalize_existing:
+        raise SystemExit("--overlay-real-maps and --finalize-existing are mutually exclusive")
     if args.overlay_real_maps:
         if not args.staging_dir:
             raise SystemExit("--overlay-real-maps requires --staging-dir")
         overlay_real_maps(args.staging_dir)
-        finalize_release_integrity(args.staging_dir)
+        finalize_release_integrity(args.staging_dir, preserve_runtime_pins=True)
         sys.path.insert(0, str(REPO_ROOT / "scripts"))
         from verify_pages_catalog import verify_release
 
         verify_release(args.staging_dir)
         print(f"Real maps overlaid: {args.staging_dir}")
+        return
+    if args.finalize_existing:
+        if not args.staging_dir:
+            raise SystemExit("--finalize-existing requires --staging-dir")
+        finalize_release_integrity(args.staging_dir, preserve_runtime_pins=True)
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        from verify_pages_catalog import verify_release
+
+        verify_release(args.staging_dir)
+        print(f"Finalized existing release: {args.staging_dir}")
         return
     if args.staging_dir:
         stage = args.staging_dir
