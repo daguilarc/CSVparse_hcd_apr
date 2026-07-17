@@ -2995,17 +2995,14 @@ def hierarchical_ci_transformed(df, year_col, x_col, y_col, years, x_transform='
         print(f"  [hierarchical_ci_transformed] None: x mean/sd invalid (mean={x_mean}, sd={x_sd})")
         return None
     x_std = (x_arr - x_mean) / x_sd
-    use_year_intercept_re, use_year_slope_re, use_county_re, _use_sign_re = _hierarchy_re_policy(x_col, True)
-    if not use_year_intercept_re:
-        print("  [hierarchical_ci_transformed] Omitting year REs (predictor absorbs time window)")
+    _, _, use_county_re, _use_sign_re = _hierarchy_re_policy(x_col, True)
     if not use_county_re:
         print("  [hierarchical_ci_transformed] Omitting county REs (predictor embeds MSA-level income)")
     county_idx_smc = county_idx if use_county_re else None
     n_counties_smc = n_counties if use_county_re else 0
     try:
         out = _hierarchical_year_county_smc(
-            x_std, y_arr, year_idx, n_years, county_idx_smc, n_counties_smc, x_mean, x_sd, n_draws,
-            use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
+            x_std, y_arr, county_idx_smc, n_counties_smc, x_mean, x_sd, n_draws,
         )
         if out is None:
             raise ValueError("SMC returned None")
@@ -3262,56 +3259,54 @@ def _hlog(tag, msg):
         print(f"      [HIERARCHICAL] {msg}")
 
 
-def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_transform='log', county_col='county',
-                    rate_precomputed=False, x_varies_by_year=True, tag=None, allow_smc_fallback=True):
+def hierarchical_ci(df, x_col, y_col, pop_col, n_draws=5000, x_transform='log', county_col='county',
+                    rate_precomputed=False, x_varies_by_year=False, tag=None, allow_smc_fallback=True):
     """Bayesian Hierarchical Model for CIs with fallback cascade (no bootstrap inside this function).
-    Hierarchy: population -> year REs -> county REs (never city/jurisdiction; no county×year layer).
+    Fit on the jurisdiction cross-section: one row per jurisdiction (the same totals frame the two-part
+    MLE uses). Hierarchy: population -> county REs (no year layer; no jurisdiction-year panel).
     County REs omitted when x_col is in X_COL_MSA_INCOME_PREDICTORS (MSA income in denominator of x).
     Cascade: hierarchical full two-part -> pooled-zero + hierarchical-positive; else None.
     county_col: column for county grouping; if present and >=2 unique, county REs are used unless policy omits them."""
-    x_all, y_rate_all, year_idx_all, county_idx_all, sign_idx_all = [], [], [], [], []
-    year_to_idx = {yr: i for i, yr in enumerate(years)}
-    county_to_idx, n_counties = _build_county_to_idx(df, year_col, years, county_col)
     _, _, _, use_sign_re = _hierarchy_re_policy(x_col, x_varies_by_year)
+    # County index built from the cross-section (no year filtering).
+    county_to_idx, n_counties = {}, 0
+    if county_col and county_col in df.columns:
+        uniq = df[county_col].dropna().unique()
+        n_counties = len(uniq)
+        if n_counties >= 2:
+            county_to_idx = {c: i for i, c in enumerate(uniq)}
     stratum_col = _hierarchy_stratum_column(df, x_col)
     has_stratum_col = use_sign_re and stratum_col is not None and stratum_col in df.columns
     allow_negative = (x_transform is None or x_transform == 'identity')
-    x_finite = np.isfinite(np.asarray(df[x_col].values, dtype=np.float64)) if allow_negative else None
-    for year in years:
-        if allow_negative:
-            vd = df[(df[year_col] == year) & df[x_col].notna() & x_finite &
-                    df[y_col].notna() & df[pop_col].notna() & (df[pop_col] > 0)]
-        else:
-            vd = df[(df[year_col] == year) & df[x_col].notna() & (df[x_col] > 0) &
-                    df[y_col].notna() & df[pop_col].notna() & (df[pop_col] > 0)]
-        if len(vd) < 3:
-            continue
-        x_vals = np.asarray(vd[x_col].values, dtype=np.float64)
-        x_all.extend((np.log(x_vals) if x_transform == 'log' else x_vals).tolist())
-        if rate_precomputed:
-            y_rate_all.extend(np.asarray(vd[y_col].values, dtype=np.float64).tolist())
-        else:
-            y_rate_all.extend(_rate_per_1000(vd[y_col].values, vd[pop_col].values))
-        year_idx_all.extend([year_to_idx[year]] * len(vd))
-        if n_counties >= 2:
-            county_idx_all.extend(vd[county_col].map(county_to_idx).astype(np.intp).tolist())
-        if has_stratum_col:
-            sq = pd.to_numeric(vd[stratum_col], errors="coerce")
-            sign_idx_all.extend(
-                np.clip(np.nan_to_num(sq.values, nan=0.0), 0, N_STRATUM_RE_LEVELS - 1).astype(np.intp).tolist()
-            )
-    if len(x_all) < 20:
-        _hlog(tag, f"Insufficient data ({len(x_all)} obs)")
+    x_vals_all = np.asarray(df[x_col].values, dtype=np.float64)
+    base_valid = (
+        df[x_col].notna().values & df[y_col].notna().values
+        & df[pop_col].notna().values & (df[pop_col].values > 0)
+    )
+    if allow_negative:
+        row_valid = base_valid & np.isfinite(x_vals_all)
+    else:
+        row_valid = base_valid & (x_vals_all > 0)
+    vd = df[row_valid]
+    if len(vd) < 20:
+        _hlog(tag, f"Insufficient data ({len(vd)} jurisdictions)")
         return None
-    x_arr = np.array(x_all, dtype=np.float64)
-    y_rate_arr = np.array(y_rate_all, dtype=np.float64)
-    year_idx = np.array(year_idx_all, dtype=np.intp)
-    county_idx = np.array(county_idx_all, dtype=np.intp) if county_idx_all else None
-    sign_idx_arr = np.array(sign_idx_all, dtype=np.intp) if has_stratum_col and len(sign_idx_all) == len(x_arr) else None
+    x_vals = np.asarray(vd[x_col].values, dtype=np.float64)
+    x_arr = np.log(x_vals) if x_transform == 'log' else x_vals
+    if rate_precomputed:
+        y_rate_arr = np.asarray(vd[y_col].values, dtype=np.float64)
+    else:
+        y_rate_arr = np.asarray(_rate_per_1000(vd[y_col].values, vd[pop_col].values), dtype=np.float64)
+    county_idx = vd[county_col].map(county_to_idx).astype(np.intp).values if n_counties >= 2 else None
+    if has_stratum_col:
+        sq = pd.to_numeric(vd[stratum_col], errors="coerce")
+        sign_idx_arr = np.clip(np.nan_to_num(sq.values, nan=0.0), 0, N_STRATUM_RE_LEVELS - 1).astype(np.intp)
+    else:
+        sign_idx_arr = None
     valid = np.isfinite(x_arr) & np.isfinite(y_rate_arr) & (y_rate_arr >= 0)
     if not np.all(valid):
-        n_dropped = np.sum(~valid)
-        x_arr, y_rate_arr, year_idx = x_arr[valid], y_rate_arr[valid], year_idx[valid]
+        n_dropped = int(np.sum(~valid))
+        x_arr, y_rate_arr = x_arr[valid], y_rate_arr[valid]
         if county_idx is not None:
             county_idx = county_idx[valid]
         if sign_idx_arr is not None:
@@ -3328,21 +3323,17 @@ def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_
     if x_sd <= 0:
         _hlog(tag, "Constant x (sd=0); skipping SMC")
         return None
-    n_years = len(years)
-    use_year_intercept_re, use_year_slope_re, use_county_re, use_sign_re = _hierarchy_re_policy(x_col, x_varies_by_year)
-    if not use_year_intercept_re:
-        _hlog(tag, "Omitting year REs (predictor absorbs time window)")
+    _, _, use_county_re, use_sign_re = _hierarchy_re_policy(x_col, x_varies_by_year)
     if not use_county_re:
         _hlog(tag, "Omitting county REs (predictor embeds MSA-level income)")
-    _hlog(tag, f"{len(x_arr)} obs across {n_years} years, {n_counties} counties (linear positive part)")
+    _hlog(tag, f"{len(x_arr)} jurisdictions, {n_counties} counties (cross-section, linear positive part)")
     county_idx_smc = county_idx if use_county_re else None
     n_counties_smc = n_counties if use_county_re else 0
     use_sign_smc = use_sign_re and sign_idx_arr is not None
     # --- Fallback cascade ---
-    # Step 1: Try hierarchical full two-part (hierarchical zero + hierarchical positive with year+county REs)
+    # Step 1: Try hierarchical full two-part (hierarchical zero + hierarchical positive with county REs)
     result = _hierarchical_full_two_part_smc(
-        x_arr, y_rate_arr, year_idx, n_years, county_idx_smc, n_counties_smc, x_mean, x_sd, n_draws,
-        use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
+        x_arr, y_rate_arr, county_idx_smc, n_counties_smc, x_mean, x_sd, n_draws,
         use_sign_re=use_sign_smc, sign_idx=sign_idx_arr, tag=tag,
     )
     if result is not None:
@@ -3355,15 +3346,13 @@ def hierarchical_ci(df, year_col, x_col, y_col, pop_col, years, n_draws=5000, x_
     positive_mask = y_rate_arr > 0
     x_pos = x_arr[positive_mask]
     y_model_pos = y_rate_arr[positive_mask]
-    year_idx_pos = year_idx[positive_mask]
     county_idx_pos = county_idx_smc[positive_mask] if county_idx_smc is not None else None
     sign_idx_pos = sign_idx_arr[positive_mask] if sign_idx_arr is not None else None
     if len(x_pos) < 10:
         _hlog(tag, f"Insufficient positive observations ({len(x_pos)}); skipping CI")
         return None
     if len(x_pos) >= 20:
-        smc_pos = _hierarchical_ci_smc(x_pos, y_model_pos, year_idx_pos, n_years, x_mean, x_sd, n_draws,
-                                       use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
+        smc_pos = _hierarchical_ci_smc(x_pos, y_model_pos, x_mean, x_sd, n_draws,
                                        county_idx_pos=county_idx_pos, n_counties=n_counties_smc,
                                        use_sign_re=use_sign_smc, sign_idx=sign_idx_pos, tag=tag)
         if smc_pos is not None:
@@ -3410,10 +3399,10 @@ def _non_centered_re(label, sigma_scale, shape, center=None):
     return pm.Deterministic(label, sigma * raw)
 
 
-def _hierarchical_year_county_smc(x_std, y_obs, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
-                                  use_year_intercept_re=True, use_year_slope_re=True,
+def _hierarchical_year_county_smc(x_std, y_obs, county_idx, n_counties, x_mean, x_sd, n_draws,
                                   use_sign_re=False, sign_idx=None):
-    """Single PyMC model: population line + optional year REs + optional county REs + optional sign RE on mu.
+    """Single PyMC model: population line + optional county REs + optional sign RE on mu.
+    Cross-section only (one row per jurisdiction); no year random effects.
     Returns (intercept_std, slope_std) in standardized x space, or None on failure.
     When n_counties >= 2, county_idx must be an int array of shape (n_obs,); else county_idx is ignored.
 
@@ -3423,27 +3412,15 @@ def _hierarchical_year_county_smc(x_std, y_obs, year_idx, n_years, county_idx, n
     with pm.Model():
         intercept_pop = pm.Normal('intercept_pop', mu=0, sigma=2)
         slope_pop = pm.Normal('slope_pop', mu=0, sigma=1)
-        if use_year_intercept_re:
-            intercept_year = _non_centered_re('intercept_year', SIGMA_INT_YEAR, n_years, center=intercept_pop)
-        else:
-            intercept_year = None
-
-        if use_year_slope_re:
-            slope_year = _non_centered_re('slope_year', SIGMA_SLOPE_YEAR, n_years, center=slope_pop)
-            slope_year_term = slope_year[year_idx]
-        else:
-            slope_year_term = slope_pop
-
-        base_int = intercept_year[year_idx] if use_year_intercept_re else intercept_pop
         if use_county:
             intercept_county = _non_centered_re('intercept_county', SIGMA_INT_COUNTY, n_counties)
             slope_county = _non_centered_re('slope_county', SIGMA_SLOPE_COUNTY, n_counties)
             mu = (
-                base_int + intercept_county[county_idx]
-                + (slope_year_term + slope_county[county_idx]) * x_std
+                intercept_pop + intercept_county[county_idx]
+                + (slope_pop + slope_county[county_idx]) * x_std
             )
         else:
-            mu = base_int + slope_year_term * x_std
+            mu = intercept_pop + slope_pop * x_std
         if use_sign_re and sign_idx is not None:
             y_sign = _non_centered_re('y_sign_int_posonly', SIGMA_SIGN_INTERCEPT, N_STRATUM_RE_LEVELS)
             mu = mu + y_sign[sign_idx]
@@ -3462,10 +3439,11 @@ def _hierarchical_year_county_smc(x_std, y_obs, year_idx, n_years, county_idx, n
             return None
 
 
-def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county_idx, n_counties, x_mean, x_sd, n_draws,
-                                   use_year_intercept_re=True, use_year_slope_re=True,
+def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, county_idx, n_counties, x_mean, x_sd, n_draws,
                                    use_sign_re=False, sign_idx=None, tag=None):
-    """Hierarchical two-part model: hierarchical zero part (Bernoulli, county + optional year REs) + hierarchical positive part.
+    """Hierarchical two-part model on the jurisdiction cross-section: hierarchical zero part
+    (Bernoulli, county + optional sign REs) + hierarchical positive part (county + optional sign REs).
+    No year random effects; one row per jurisdiction.
     Fallback cascade: if this model fails, caller should try pooled zero + hierarchical positive-only, then bootstrap.
     Returns dict with alpha_samples, beta_samples, intercept_samples, slope_samples, method or None."""
     x_std = (x_arr - x_mean) / x_sd
@@ -3476,7 +3454,6 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
         return None
     y_obs_pos = y_rate_arr[pos_mask]
     x_pos_std = x_std[pos_mask]
-    year_idx_pos = year_idx[pos_mask]
     use_county = n_counties >= 2 and county_idx is not None
     county_idx_pos = county_idx[pos_mask] if use_county else None
     sign_idx_pos = sign_idx[pos_mask] if use_sign_re and sign_idx is not None else None
@@ -3485,12 +3462,6 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
             alpha = pm.Normal('alpha', 0, 2)
             beta = pm.Normal('beta', 0, 2)
             logit_mu = alpha + beta * x_std
-            if use_year_intercept_re:
-                z_intercept_year = _non_centered_re('z_intercept_year', SIGMA_Z_INT_YEAR, n_years)
-                logit_mu = logit_mu + z_intercept_year[year_idx]
-            if use_year_slope_re:
-                z_slope_year = _non_centered_re('z_slope_year', SIGMA_Z_SLOPE_YEAR, n_years)
-                logit_mu = logit_mu + z_slope_year[year_idx] * x_std
             if use_county:
                 z_intercept_county = _non_centered_re('z_intercept_county', SIGMA_Z_INT_COUNTY, n_counties)
                 z_slope_county = _non_centered_re('z_slope_county', SIGMA_Z_SLOPE_COUNTY, n_counties)
@@ -3502,19 +3473,7 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
             pm.Bernoulli('z', p=p_pos, observed=z_pos)
             intercept_pop = pm.Normal('intercept_pop', mu=0, sigma=2)
             slope_pop = pm.Normal('slope_pop', mu=0, sigma=1)
-            if use_year_intercept_re:
-                intercept_year = _non_centered_re('intercept_year', SIGMA_INT_YEAR, n_years, center=intercept_pop)
-            else:
-                intercept_year = None
-
-            if use_year_slope_re:
-                slope_year = _non_centered_re('slope_year', SIGMA_SLOPE_YEAR, n_years, center=slope_pop)
-                slope_year_term = slope_year[year_idx_pos]
-            else:
-                slope_year_term = slope_pop
-
-            int_base = intercept_year[year_idx_pos] if use_year_intercept_re else intercept_pop
-            mu_pos = int_base + slope_year_term * x_pos_std
+            mu_pos = intercept_pop + slope_pop * x_pos_std
             if use_county:
                 intercept_county = _non_centered_re('intercept_county', SIGMA_INT_COUNTY, n_counties)
                 slope_county = _non_centered_re('slope_county', SIGMA_SLOPE_COUNTY, n_counties)
@@ -3549,14 +3508,13 @@ def _hierarchical_full_two_part_smc(x_arr, y_rate_arr, year_idx, n_years, county
         return None
 
 
-def _hierarchical_ci_smc(x_pos, y_pos, year_idx_pos, n_years, x_mean, x_sd, n_draws, county_idx_pos=None, n_counties=0,
-                        use_year_intercept_re=True, use_year_slope_re=True,
+def _hierarchical_ci_smc(x_pos, y_pos, x_mean, x_sd, n_draws, county_idx_pos=None, n_counties=0,
                         use_sign_re=False, sign_idx=None, tag=None):
-    """Run PyMC SMC for hierarchical CI (positive part only, no zero part). Returns None on failure."""
+    """Run PyMC SMC for hierarchical CI (positive part only, no zero part). Returns None on failure.
+    Cross-section only (one row per jurisdiction); no year random effects."""
     x_std = (x_pos - x_mean) / x_sd
     out = _hierarchical_year_county_smc(
-        x_std, y_pos, year_idx_pos, n_years, county_idx_pos, n_counties, x_mean, x_sd, n_draws,
-        use_year_intercept_re=use_year_intercept_re, use_year_slope_re=use_year_slope_re,
+        x_std, y_pos, county_idx_pos, n_counties, x_mean, x_sd, n_draws,
         use_sign_re=use_sign_re, sign_idx=sign_idx,
     )
     if out is None:
@@ -3685,12 +3643,14 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
     smc_result = None
     skip_hierarchical_for_pages = skip_r2_chart_gate and PAGES_SKIP_HIERARCHICAL
     if y_is_rate and not skip_hierarchical_for_pages:
-        if county_col not in df_yearly.columns:
-            print(f"    Missing '{county_col}' in df_yearly, skipping hierarchical Bayes CI")
+        if county_col not in df_t.columns:
+            print(f"    Missing '{county_col}' in totals frame, skipping hierarchical Bayes CI")
         else:
             print(f"    Running Bayesian Hierarchical Model for CIs...")
+            # Hierarchical CI is fit on the same jurisdiction cross-section (totals) as the MLE;
+            # the year layer has been removed, so df_yearly is no longer used here.
             smc_result = hierarchical_ci(
-                df_yearly, 'year', x_col, y_col, pop_col, years, x_transform=x_transform,
+                df_t, x_col, y_col, pop_col, x_transform=x_transform,
                 county_col=county_col, rate_precomputed=rate_precomputed,
                 x_varies_by_year=x_varies_by_year, tag=chart_id or reg_lbl,
                 allow_smc_fallback=not skip_r2_chart_gate,

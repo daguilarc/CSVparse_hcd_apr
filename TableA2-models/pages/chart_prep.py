@@ -170,7 +170,12 @@ def positive_part_line_from_two_part(x_model_grid, intercept_mle, slope_mle):
 
 
 def hierarchy_re_policy(x_col, x_varies_by_year):
-    """Return (use_year_intercept_re, use_year_slope_re, use_county_re, use_sign_re) for hierarchical SMC."""
+    """Return (use_year_intercept_re, use_year_slope_re, use_county_re, use_sign_re) for hierarchical SMC.
+
+    Year random effects have been removed: hierarchical models are fit on the jurisdiction
+    cross-section (one row per jurisdiction) with county (and, where applicable, sign) REs only.
+    The first two slots are retained for call-site compatibility but are always False; the
+    x_varies_by_year argument is retained but no longer affects the policy."""
     use_county_re = not (x_col is not None and x_col in X_COL_MSA_INCOME_PREDICTORS)
     use_sign_re = (
         x_col is not None
@@ -178,9 +183,7 @@ def hierarchy_re_policy(x_col, x_varies_by_year):
         and x_col not in X_COL_POP_DELTA_PREDICTORS
         and x_col not in X_COL_TWO_PART_LINEAR_X
     )
-    if x_col is not None and x_col in X_COL_TWO_PART_LINEAR_X:
-        return (False, False, use_county_re, False)
-    return (True, bool(x_varies_by_year), use_county_re, use_sign_re)
+    return (False, False, use_county_re, use_sign_re)
 
 
 def income_x_label(income_label, acs_year_range, filter_note, is_log_x):
