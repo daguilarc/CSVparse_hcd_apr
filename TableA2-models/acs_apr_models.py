@@ -194,30 +194,6 @@ R2_DIAG_LEGACY_COLUMN_RENAMES = {
 }
 # Canonical predictor metadata: single source for labels, print titles, transform and tick semantics.
 PREDICTOR_META = {
-    "income_delta_pct_change": {
-        "display_label": ACS_INCOME_DELTA_DISPLAY_LABEL,
-        "print_title": ACS_INCOME_DELTA_DISPLAY_LABEL,
-        "tick_kind": "percent",
-        "is_log_x": False,
-        "allow_negative_x": True,
-        "requires_msa": False,
-        "fit_mask_kind": "finite",
-        "geo_applicability": "both",
-        "positive_ols_companion": False,
-    },
-    "population_delta_pct_change": {
-        "display_label": ACS_POPULATION_DELTA_DISPLAY_LABEL,
-        "print_title": (
-            "% change in place population (ACS 2014–2018 vs 2020–2024 5-year period estimates, same geography)"
-        ),
-        "tick_kind": "percent",
-        "is_log_x": False,
-        "allow_negative_x": True,
-        "requires_msa": False,
-        "fit_mask_kind": "finite",
-        "geo_applicability": "both",
-        "positive_ols_companion": False,
-    },
     "zori_pct_change": {
         "display_label": ZORI_PCT_LABEL,
         "print_title": "ZORI % change",
@@ -354,8 +330,8 @@ X_COL_AFFORD_DELTA_PREDICTORS = tuple(
     x_col for x_col, meta in PREDICTOR_META.items()
     if (not meta["is_log_x"]) and meta["allow_negative_x"] and "afford" in x_col
 )
-X_COL_INCOME_DELTA_PREDICTORS = frozenset({"income_delta_pct_change"})
-X_COL_POP_DELTA_PREDICTORS = frozenset({"population_delta_pct_change"})
+X_COL_INCOME_DELTA_PREDICTORS = frozenset()
+X_COL_POP_DELTA_PREDICTORS = frozenset()
 X_COL_TWO_PART_LINEAR_X = frozenset(
     x_col for x_col, meta in PREDICTOR_META.items()
     if (not meta["is_log_x"]) and meta["allow_negative_x"]
@@ -416,8 +392,11 @@ EV1_STANDARDIZED_INPUT_CAPTION = (
     "(ACS 5-year period estimates, 2014–2018 vs 2020–2024)"
 )
 
-# Moderate-income CO sum (DR + NDR); shared label across chart families.
-MODERATE_INCOME_COMPLETIONS_LABEL = "Multifamily Moderate-Income Certificates of Occupancy (DR + NDR)"
+# Moderate-income CO sum: deed-restricted MOD_INCOME_DR only (excludes NDR).
+MODERATE_INCOME_COMPLETIONS_LABEL = (
+    "Multifamily Deed-Restricted Moderate-Income Certificates of Occupancy"
+)
+ROR_LABEL_MOD_CO = MODERATE_INCOME_COMPLETIONS_LABEL
 
 
 # --- Section: Hierarchy policy, R² helpers, date checks ---
@@ -6253,8 +6232,6 @@ def _run_city_regressions(df_final, df_apr_db_inc, permit_years, legend_note_pay
 
     # City predictor specs from canonical metadata: (x_col, file_tag, print_title, x_axis_filter_note, require_msa)
     city_file_tag = {
-        "income_delta_pct_change": "income_delta",
-        "population_delta_pct_change": "population_delta",
         **_zhvi_predictor_file_tags(),
         "zori_pct_change": "zori",
         "zori_afford_ratio": "zori_afford",
@@ -6269,6 +6246,7 @@ def _run_city_regressions(df_final, df_apr_db_inc, permit_years, legend_note_pay
             _predictor_requires_msa(x_col),
         )
         for x_col in city_file_tag
+        if x_col in PREDICTOR_META
     ]
     # Precompute context for city-level repeated filtering.
     city_xsf_ctx = _build_city_xsf_mask_context(df_final, CITY_XSF_EXCLUDE)
@@ -6374,7 +6352,7 @@ def _run_city_regressions(df_final, df_apr_db_inc, permit_years, legend_note_pay
         ('TOTAL_MF_CO', 'total_owner_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_OWNER_CO, 'net_mf_co_to_owner_co'),
         ('TOTAL_MF_CO', 'mf_owner_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MF_OWNER_CO, 'net_mf_co_to_mf_owner_co'),
         ('TOTAL_MF_CO', 'VLOW_LOW_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_VLOW_LOW_CO, 'net_mf_co_to_vlow_low_co'),
-        ('TOTAL_MF_CO', 'MOD_CO', ROR_LABEL_NET_MF_CO, MODERATE_INCOME_COMPLETIONS_LABEL, 'net_mf_co_to_mod_co'),
+        ('TOTAL_MF_CO', 'MOD_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MOD_CO, 'net_mf_co_to_mod_co'),
     ]
     city_ror_variants = [(None, '', None)] + city_subvariants
 
@@ -6850,7 +6828,7 @@ def _run_zip_regressions(df_apr_db_inc, df_apr_all, mf_mask_all, df_county, df_c
             ('total_owner_CO', ROR_LABEL_OWNER_CO),
             ('mf_owner_CO', ROR_LABEL_MF_OWNER_CO),
             ('vlow_low_CO', ROR_LABEL_VLOW_LOW_CO),
-            ('mod_CO', MODERATE_INCOME_COMPLETIONS_LABEL),
+            ('mod_CO', ROR_LABEL_MOD_CO),
         ]
         # (x_col, x_tag, x_axis_label, use_log_x, x_tick_dollar, require_msa) from canonical metadata.
         zip_x_tag = {
@@ -6921,7 +6899,7 @@ def _run_zip_regressions(df_apr_db_inc, df_apr_all, mf_mask_all, df_county, df_c
                 ('net_MF_CO', 'total_owner_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_OWNER_CO, 'net_mf_co_to_owner_co'),
                 ('net_MF_CO', 'mf_owner_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MF_OWNER_CO, 'net_mf_co_to_mf_owner_co'),
                 ('net_MF_CO', 'vlow_low_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_VLOW_LOW_CO, 'net_mf_co_to_vlow_low_co'),
-                ('net_MF_CO', 'mod_CO', ROR_LABEL_NET_MF_CO, MODERATE_INCOME_COMPLETIONS_LABEL, 'net_mf_co_to_mod_co'),
+                ('net_MF_CO', 'mod_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MOD_CO, 'net_mf_co_to_mod_co'),
             ]
             for exclude_zips, suffix, exclude_label in zip_mfh_subvariants:
                 if exclude_zips is None:

@@ -10,9 +10,13 @@
     h1{margin-bottom:.2rem}.vintage{font-weight:650;margin:.1rem 0 1rem}
     .tab-row{display:flex;align-items:flex-end;gap:1rem;flex-wrap:wrap;margin-bottom:1rem}
     .tabs{display:flex;gap:.5rem}.tabs button{padding:.45rem}.tabs button.active{background:#333;color:#fff}
+    .tab-geo{font-size:.85rem;display:flex;flex-direction:column;gap:.25rem}
+    .tab-geo select{padding:.45rem;min-width:10rem}
+    .tab-geo[hidden]{display:none!important}
     button,select{padding:.45rem}.panel{display:none}.panel.active{display:block}
     .controls{display:grid;gap:.75rem;margin-bottom:1rem}
     .model-grid{grid-template-columns:repeat(2,minmax(220px,1fr))}
+    .map-grid{align-items:end}
     label{display:flex;flex-direction:column;gap:.25rem;font-size:.85rem}
     .robustness-below{margin:1rem 0;max-width:320px}
     #map-chart,#model-chart{min-height:560px;border:1px solid #ddd}
@@ -29,9 +33,10 @@
       <button id="tab-maps" class="active" type="button">Maps</button>
       <button id="tab-models" type="button">Models</button>
     </div>
+    <label class="tab-geo" id="models-geo-wrap" hidden>Geography<select id="geo"></select></label>
   </div>
   <section id="panel-maps" class="panel active">
-    <div class="controls model-grid">
+    <div class="controls model-grid map-grid">
       <label>Geography view<select id="map-geography">
         <option value="incorporated_cities">Incorporated cities</option>
         <option value="whole_counties">Whole counties</option>
@@ -43,9 +48,8 @@
   </section>
   <section id="panel-models" class="panel">
     <div class="controls model-grid">
-      <label>Geography<select id="geo"></select></label>
-      <label>Variable (X)<select id="x-col"></select></label>
       <label>Variable (Y)<select id="y-col"></select></label>
+      <label>Variable (X)<select id="x-col"></select></label>
       <label>Model display<select id="model-display"></select></label>
       <label>Zero Values<select id="zero-values"><option value="two_part_hurdle" selected>Two-Part Hurdle</option><option value="positive_only">Positive Only</option></select></label>
     </div>
@@ -81,6 +85,7 @@
     function setTab(name){
       document.querySelectorAll(".panel").forEach(e=>e.classList.toggle("active",e.id===`panel-${name}`));
       document.querySelectorAll(".tabs button").forEach(e=>e.classList.toggle("active",e.id===`tab-${name}`));
+      byId("models-geo-wrap").hidden=name!=="models";
       if(name!=="models")return;
       renderModel();
       if(modelRendered)Plotly.Plots.resize(byId("model-chart"));
@@ -126,8 +131,21 @@
     function meanTrace(x,component,name,color){if(!component?.mean)return[];return[
       {x,y:component.mean,mode:"lines",line:{color,width:3},name}
     ]}
-    function outcomeIsPer1000(yCol){return (artifacts.labels.per1000Outcomes||[]).includes(yCol)}
-    function yAxisTitle(pair){const base=variableLabel(pair.y_col);return outcomeIsPer1000(pair.y_col)?`${base} per 1,000 pop`:base}
+    const ACS_ECON=new Set(["median_income"]);
+    const ECON_PREFIXES=["zori_","zhvi_","pct_afford_"];
+    function isEconVariable(v){return ACS_ECON.has(v)||ECON_PREFIXES.some(p=>String(v).startsWith(p))}
+    function isHousingVariable(v){return !isEconVariable(v)}
+    function outcomeIsPer1000(col){return (artifacts.labels.per1000Outcomes||[]).includes(col)}
+    function axisTitle(col){
+      if(isHousingVariable(col))return outcomeIsPer1000(col)?"Dwelling Units per 1,000 pop":"Dwelling Units";
+      return variableLabel(col);
+    }
+    function axisTickProps(col){
+      const kind=artifacts.labels.tickKinds?.[col]||(col==="median_income"?"dollar":isEconVariable(col)?"percent":null);
+      if(kind==="dollar")return{tickformat:"$,.0f"};
+      if(kind==="percent")return{tickformat:",.1f",ticksuffix:"%"};
+      return{};
+    }
     function observationLegendName(pair){return pair.data_label||(byId("geo").value==="zip"?"ZIP codes":"Cities")}
     function finiteNums(vals){return vals.filter(v=>Number.isFinite(Number(v))).map(Number)}
     function paddedRange(vals){
@@ -137,16 +155,22 @@
       const pad=span>0?span*.05:(Math.abs(hi)||1)*.05;
       return [lo-pad,hi+pad];
     }
-    function axisLayout(pair,traces){
-      const xs=[...(pair.x_grid||[])],ys=[];
-      for(const t of traces){if(Array.isArray(t.x))xs.push(...t.x);if(Array.isArray(t.y))ys.push(...t.y)}
-      const xrange=paddedRange(xs),yrange=paddedRange(ys),yNums=finiteNums(ys);
-      if(yrange&&yNums.length&&Math.min(...yNums)>=0&&yrange[0]<0)yrange[0]=0;
+    function axisLayout(pair,frameXs,frameYs,obsYs){
+      const xrange=paddedRange(frameXs),yrange=paddedRange(frameYs),obsNums=finiteNums(obsYs);
+      // Floor at 0 from observations only — mean/band curves may go negative; data does not.
+      if(yrange&&obsNums.length&&Math.min(...obsNums)>=0)yrange[0]=0;
       return {
-        xaxis:{title:variableLabel(pair.x_col),...(xrange?{range:xrange}:{})},
-        yaxis:{title:yAxisTitle(pair),...(yrange?{range:yrange}:{})},
+        xaxis:{title:axisTitle(pair.x_col),...axisTickProps(pair.x_col),...(xrange?{range:xrange}:{})},
+        yaxis:{title:axisTitle(pair.y_col),...axisTickProps(pair.y_col),...(yrange?{range:yrange}:{})},
         legend:MODEL_LEGEND,margin:CHART_MARGIN,height:CHART_HEIGHT
       };
+    }
+    function formatDiag(v){
+      if(v==null)return "—";
+      const n=Number(v);
+      if(!Number.isFinite(n))return "—";
+      if(n!==0&&Math.abs(n)<1e-5)return n.toExponential(2);
+      return n.toFixed(4);
     }
     function clearModelChart(message){
       const el=byId("model-chart");
@@ -167,16 +191,25 @@
       const scatter={x:idx.map(i=>obs.x[i]),y:idx.map(i=>obs.y[i]),mode:"markers",type:"scatter",name:observationLegendName(pair),marker:{color:idx.map(i=>obs.y[i]===0?"#777":"#222")}};
       if(names.length===idx.length){scatter.text=names;scatter.hovertemplate="%{text}<br>(%{x}, %{y})<extra></extra>"}
       let traces=[scatter];
+      const frameXs=[...scatter.x],frameYs=[...scatter.y];
       const mleName=pair.model_family==="continuous"?"MLE":"Two-part MLE";
-      if(display!=="hierarchical"){traces.push(...bandTraces(pair.x_grid,view.stationary_bootstrap,"Stationary bootstrap 95% interval","#0097a7"));traces.push(...meanTrace(pair.x_grid,view.mle,mleName,"#0097a7"))}
-      if(display!=="stationary_bootstrap"){traces.push(...bandTraces(pair.x_grid,view.hierarchical,"Posterior 95% credible interval","#c2185b"));traces.push(...meanTrace(pair.x_grid,view.hierarchical,"Posterior Predictive Mean (with county-level random effects)","#c2185b"))}
+      if(display!=="hierarchical"){
+        traces.push(...bandTraces(pair.x_grid,view.stationary_bootstrap,"Stationary bootstrap 95% interval","#0097a7"));
+        traces.push(...meanTrace(pair.x_grid,view.mle,mleName,"#0097a7"));
+        if(view.mle?.mean){frameXs.push(...(pair.x_grid||[]));frameYs.push(...view.mle.mean)}
+      }
+      if(display!=="stationary_bootstrap"){
+        traces.push(...bandTraces(pair.x_grid,view.hierarchical,"Posterior 95% credible interval","#c2185b"));
+        traces.push(...meanTrace(pair.x_grid,view.hierarchical,"Posterior Predictive Mean (with county-level random effects)","#c2185b"));
+        if(view.hierarchical?.mean){frameXs.push(...(pair.x_grid||[]));frameYs.push(...view.hierarchical.mean)}
+      }
       const el=byId("model-chart");
       el.classList.remove("is-empty");
-      Plotly.newPlot(el,traces,axisLayout(pair,traces),{responsive:true});
+      Plotly.newPlot(el,traces,axisLayout(pair,frameXs,frameYs,scatter.y),{responsive:true});
       modelRendered=true;
       renderStats(pair);
     }
-    function renderStats(pair){const s=pair.stats,tp=s.two_part||{},f=v=>v==null?"—":Number(v).toFixed(4);byId("stats").innerHTML=`<p><strong>McFadden R²:</strong> ${f(s.mcfadden_r2)} · <strong>OLS R² (y&gt;0):</strong> ${f(s.ols_r2)}</p><p>Zero part (logit); Positive part (OLS on y &gt; 0).</p>`;byId("coef-table").innerHTML=`<table><thead><tr><th>Part</th><th>Parameter</th><th>Coefficient</th><th>t</th><th>p</th></tr></thead><tbody><tr><td>Zero</td><td>α</td><td>${f(tp.alpha)}</td><td>—</td><td>—</td></tr><tr><td>Zero</td><td>β</td><td>${f(tp.beta)}</td><td>${f(tp.beta_t)}</td><td>${f(tp.beta_p)}</td></tr><tr><td>Positive</td><td>γ</td><td>${f(tp.intercept)}</td><td>—</td><td>—</td></tr><tr><td>Positive</td><td>δ</td><td>${f(tp.slope)}</td><td>${f(tp.slope_t)}</td><td>${f(tp.slope_p)}</td></tr></tbody></table>`}
+    function renderStats(pair){const s=pair.stats,tp=s.two_part||{},f=formatDiag;byId("stats").innerHTML=`<p><strong>McFadden R²:</strong> ${f(s.mcfadden_r2)} · <strong>OLS R² (y&gt;0):</strong> ${f(s.ols_r2)}</p><p>Zero part (logit); Positive part (OLS on y &gt; 0).</p>`;byId("coef-table").innerHTML=`<table><thead><tr><th>Part</th><th>Parameter</th><th>Coefficient</th><th>t</th><th>p</th></tr></thead><tbody><tr><td>Zero</td><td>α</td><td>${f(tp.alpha)}</td><td>—</td><td>—</td></tr><tr><td>Zero</td><td>β</td><td>${f(tp.beta)}</td><td>${f(tp.beta_t)}</td><td>${f(tp.beta_p)}</td></tr><tr><td>Positive</td><td>γ</td><td>${f(tp.intercept)}</td><td>—</td><td>—</td></tr><tr><td>Positive</td><td>δ</td><td>${f(tp.slope)}</td><td>${f(tp.slope_t)}</td><td>${f(tp.slope_p)}</td></tr></tbody></table>`}
     function renderMap(){const metric=artifacts.mapMetrics.find(m=>m.key===byId("map-metric").value);if(!metric)return;const mode=byId("map-geography").value,types=mode==="incorporated_cities"?["city"]:mode==="whole_counties"?["county_whole"]:["city","county_residual"],features=artifacts.geojson.features.filter(f=>types.includes(f.properties.geo_type));
       const geo={...artifacts.geojson,features},div=metric.cmap_kind==="div",sub={incorporated_cities:"Incorporated city jurisdictions",whole_counties:"Whole county jurisdictions",cities_plus_unincorporated:"Incorporated cities and unincorporated county jurisdictions"}[mode];byId("map-subheader").textContent=sub;
       byId("map-unit-hint").textContent=metric.unit==="per_1000_pop"?"(per 1,000 population)":"";

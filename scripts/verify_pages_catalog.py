@@ -389,7 +389,8 @@ def verify_directed_variable_coverage(
 
 def verify_source_contracts(html: str, notebook: dict[str, Any]) -> None:
     if not re.search(
-        r"<h1[^>]*>California Multifamily Housing APR Explorer</h1>\s*<p[^>]*>HCD APR data: 2018–2024</p>",
+        r"<h1[^>]*>California Multifamily Housing APR Explorer</h1>\s*"
+        r"<p[^>]*>HCD APR data: 2018–2024, projects with 5\+ dwelling units</p>",
         html,
     ):
         raise VerificationError("literal APR vintage is not immediately below h1")

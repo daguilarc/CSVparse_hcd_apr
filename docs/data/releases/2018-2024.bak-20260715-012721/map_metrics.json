@@ -1,0 +1,180 @@
+[
+  {
+    "key": "TOTAL_MF_CO_total",
+    "y_col": "TOTAL_MF_CO_total",
+    "metric_col": "TOTAL_MF_CO_total_per1000",
+    "title": "Net multifamily certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq",
+    "phase": "CO",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "unit": "per_1000_pop"
+  },
+  {
+    "key": "DB_CO_total",
+    "y_col": "DB_CO_total",
+    "metric_col": "DB_CO_total_per1000",
+    "title": "Multifamily deed-restricted density-bonus certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq",
+    "phase": "CO",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "unit": "per_1000_pop"
+  },
+  {
+    "key": "PROJ_DB_CO_total",
+    "y_col": "PROJ_DB_CO_total",
+    "metric_col": "PROJ_DB_CO_total_per1000",
+    "title": "Multifamily density-bonus certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq",
+    "phase": "CO",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "unit": "per_1000_pop"
+  },
+  {
+    "key": "PROJ_INC_CO_total",
+    "y_col": "PROJ_INC_CO_total",
+    "metric_col": "PROJ_INC_CO_total_per1000",
+    "title": "Multifamily non-bonus inclusionary certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq",
+    "phase": "CO",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "unit": "per_1000_pop"
+  },
+  {
+    "key": "INC_CO_total",
+    "y_col": "INC_CO_total",
+    "metric_col": "INC_CO_total_per1000",
+    "title": "Multifamily deed-restricted inclusionary certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq",
+    "phase": "CO",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "unit": "per_1000_pop"
+  },
+  {
+    "key": "VLOW_LOW_CO_total",
+    "y_col": "VLOW_LOW_CO_total",
+    "metric_col": "VLOW_LOW_CO_total_per1000",
+    "title": "Multifamily very-low/low-income certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq",
+    "phase": "CO",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "unit": "per_1000_pop"
+  },
+  {
+    "key": "MOD_CO_total",
+    "y_col": "MOD_CO_total",
+    "metric_col": "MOD_CO_total_per1000",
+    "title": "Multifamily moderate-income certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq",
+    "phase": "CO",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "unit": "per_1000_pop"
+  },
+  {
+    "key": "mf_owner_CO_total",
+    "y_col": "mf_owner_CO_total",
+    "metric_col": "mf_owner_CO_total_per1000",
+    "title": "Multifamily for-sale certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq",
+    "phase": "CO",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "unit": "per_1000_pop"
+  },
+  {
+    "key": "total_owner_CO_total",
+    "y_col": "total_owner_CO_total",
+    "metric_col": "total_owner_CO_total_per1000",
+    "title": "For-sale certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq",
+    "phase": "CO",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "unit": "per_1000_pop"
+  },
+  {
+    "key": "TOTAL_CO_total",
+    "y_col": "TOTAL_CO_total",
+    "metric_col": "TOTAL_CO_total_per1000",
+    "title": "Net housing certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq",
+    "phase": "CO",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "unit": "per_1000_pop"
+  },
+  {
+    "key": "population_pct_change",
+    "y_col": null,
+    "metric_col": "population_pct_change",
+    "title": "Population percent change",
+    "subtitle": "",
+    "cmap_kind": "div",
+    "phase": "ACS",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ]
+  },
+  {
+    "key": "income_pct_change",
+    "y_col": null,
+    "metric_col": "income_pct_change",
+    "title": "Real median household income percent change",
+    "subtitle": "",
+    "cmap_kind": "div",
+    "phase": "ACS",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ]
+  }
+]

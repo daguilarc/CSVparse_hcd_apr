@@ -1,0 +1,74 @@
+{
+  "release_id": "2018-2024",
+  "built_at": "2026-06-21T22:18:18.617619+00:00",
+  "build_actor": "local-fixture",
+  "pair_registry_version": "fixture-v1",
+  "hcd_apr_range": "2018\u20132024",
+  "acs_current_vintage": "2020\u20132024 ACS 5-Year Estimates",
+  "acs_comparison_vintage": "2014\u20132018 ACS 5-Year Estimates",
+  "zillow_start": "2018-01",
+  "zillow_end": "2024-12",
+  "zillow_series": [
+    "City_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv",
+    "City_zhvi_uc_condo_tier_0.33_0.67_sm_sa_month.csv",
+    "City_zori_uc_sfrcondomfr_sm_sa_month.csv",
+    "Zip_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv",
+    "Zip_zhvi_uc_condo_tier_0.33_0.67_sm_sa_month.csv",
+    "Zip_zori_uc_sfrcondomfr_sm_sa_month.csv"
+  ],
+  "cpi_basis": "real 2024 dollars",
+  "source_files": [
+    "fixture"
+  ],
+  "input_profile": "fixture-v1",
+  "input_sha256": {
+    "fixture": "f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d"
+  },
+  "catalog_keys": [
+    "city:DB_CO_total:income_delta_pct_change:none",
+    "city:DB_CO_total:zhvi_sfrcondo_pct_change:none",
+    "city:TOTAL_CO_total:population_delta_pct_change:none",
+    "zip:net_MF_CO:median_income:none"
+  ],
+  "n_regressions": 4,
+  "n_pairs_attempted": 4,
+  "n_pairs_mle_failed": 0,
+  "n_stationary_bootstrap_succeeded": 4,
+  "n_stationary_bootstrap_failed": 0,
+  "n_hierarchical_attempted": 2,
+  "n_hierarchical_succeeded": 2,
+  "n_hierarchical_failed": 0,
+  "random_seed": 20240618,
+  "python_runtime": "CPython 3.13.5",
+  "code_revision": "40694813fa4423604e0015d1cadcd776ced61bb8",
+  "code_files": [
+    ".github/workflows/build-pages.yml",
+    "TableA2-models/acs_apr_models.py",
+    "TableA2-models/chart_prep.py",
+    "TableA2-models/db_maps.py",
+    "TableA2-models/map_metric_registry.py",
+    "TableA2-models/pages_catalog_builder.py",
+    "TableA2-models/pages_export.py",
+    "TableA2-models/pages_pipeline_context.py",
+    "TableA2-models/pair_registry.py",
+    "tablea2_parsefilter_repair.py",
+    "scripts/export_pages_catalog.py",
+    "scripts/verify_pages_catalog.py",
+    "docs/chart_labels.json",
+    "docs/index.html",
+    "notebooks/apr_explorer.ipynb"
+  ],
+  "code_sha256": "a7a2bc9bf6a1104b62b67d7637e0def9e229f2e801b0c8c220bb0b42825ae675",
+  "dependency_files": [
+    "requirements-pages-release.lock"
+  ],
+  "dependency_sha256": "511eb183cb94c2e2ea06a4b1118036c991a131bd76f16802036de80650af3be7",
+  "artifact_sha256": {
+    "catalog.json": "bba3bf4971831c50a9182c45443d350d128cf68c1017e528351dfee0e96133a3",
+    "map_metrics.json": "d4b3170e49e733e85cced79fe4d3d196f676fa37d8874d5254b6a75c8904cc3d",
+    "maps.geojson": "b185f3eb4e7ac4952509e97eb464d2a992cc49398d4f1873a378a26be4a48472",
+    "chart_labels.json": "15eabc6f9be74ddf6cdb02dfff162c33d8544424dda4ddbfbf7524899b39324f",
+    "map_formula_audit.json": "9f8cd5c7de24810bd860e18e7b6a1f04fc0d49b6f8303a78e76176ccc1c95e8e",
+    "plotly.min.js": "7f4930eba8f8541dbec28dca5bd5f787f8eef1cde0369ac9657b70bed230b3e0"
+  }
+}

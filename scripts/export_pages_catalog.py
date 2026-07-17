@@ -166,13 +166,19 @@ def _code_revision() -> str:
 
 
 def prune_non_mf_release_artifacts(stage: Path) -> None:
-    """Drop non-MF housing outcomes from staged release artifacts; refresh catalog_keys.
+    """Drop non-MF housing outcomes and econ×econ pairs from staged release artifacts.
 
     Prune rules (x_col or y_col): TOTAL_* except TOTAL_MF_*; total_owner_*; ZIP net_CO /
-    net_BP / net_ENT. Authoring chart_labels.json partitions are not modified.
+    net_BP / net_ENT. Also drop pairs where both axes are economic predictors (ACS or
+    Zillow), and drop ACS income/population %Δ model predictors. Housing×housing pairs
+    are kept when x_col ≠ y_col. Authoring chart_labels.json partitions are not modified.
     """
     sys.path.insert(0, str(MODELS_DIR))
-    from pages.map_metric_registry import is_non_mf_housing_outcome
+    from pages.map_metric_registry import (
+        is_econ_cross_pair,
+        is_non_mf_housing_outcome,
+        is_removed_acs_model_predictor,
+    )
 
     def drop_metric_property(prop: str) -> bool:
         if prop.endswith("_per1000"):
@@ -186,6 +192,9 @@ def prune_non_mf_release_artifacts(stage: Path) -> None:
         for key, entry in catalog.items()
         if not is_non_mf_housing_outcome(entry.get("x_col"))
         and not is_non_mf_housing_outcome(entry.get("y_col"))
+        and not is_econ_cross_pair(entry.get("x_col"), entry.get("y_col"))
+        and not is_removed_acs_model_predictor(entry.get("x_col"))
+        and not is_removed_acs_model_predictor(entry.get("y_col"))
     }
     catalog_path.write_text(json.dumps(catalog, allow_nan=False), encoding="utf-8")
 
@@ -281,6 +290,9 @@ def finalize_release_integrity(stage: Path, *, preserve_runtime_pins: bool = Fal
 
 def enrich_chart_labels(labels: dict) -> dict:
     """Merge role-neutral variables and geography applicability for release export."""
+    sys.path.insert(0, str(MODELS_DIR))
+    from pages.map_metric_registry import predictor_tick_kind
+
     labels["variables"] = {**labels["outcomes"], **labels["predictors"]}
     labels["variableApplicability"] = {
         "city": [
@@ -293,6 +305,11 @@ def enrich_chart_labels(labels: dict) -> dict:
             if k in labels.get("predictorApplicability", {}).get("zip", [])
             or k.endswith("_CO")
         ],
+    }
+    labels["tickKinds"] = {
+        key: kind
+        for key in labels["predictors"]
+        if (kind := predictor_tick_kind(key)) is not None
     }
     return labels
 
@@ -352,11 +369,11 @@ def _fixture_release(stage: Path) -> None:
         json.loads((REPO_ROOT / "docs" / "chart_labels.json").read_text(encoding="utf-8"))
     )
     catalog = {
-        "city:DB_CO_total:income_delta_pct_change:none": _fixture_pair(
-            "city", "DB_CO_total", "income_delta_pct_change", hierarchical=True, labels=["Albany", "Berkeley", "Culver City"]
+        "city:DB_CO_total:zori_pct_change:none": _fixture_pair(
+            "city", "DB_CO_total", "zori_pct_change", hierarchical=True, labels=["Albany", "Berkeley", "Culver City"]
         ),
-        "city:TOTAL_CO_total:population_delta_pct_change:none": _fixture_pair(
-            "city", "TOTAL_CO_total", "population_delta_pct_change", hierarchical=False, labels=["Fresno", "Irvine", "Oakland"]
+        "city:TOTAL_CO_total:zhvi_sfrcondo_pct_change:none": _fixture_pair(
+            "city", "TOTAL_CO_total", "zhvi_sfrcondo_pct_change", hierarchical=False, labels=["Fresno", "Irvine", "Oakland"]
         ),
         "city:DB_CO_total:zhvi_sfrcondo_pct_change:none": _fixture_pair(
             "city", "DB_CO_total", "zhvi_sfrcondo_pct_change", hierarchical=True, labels=["Pasadena", "Redwood City", "Sacramento"]

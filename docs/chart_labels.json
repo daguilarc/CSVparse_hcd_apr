@@ -44,8 +44,6 @@
   ],
   "predictorApplicability": {
     "city": [
-      "income_delta_pct_change",
-      "population_delta_pct_change",
       "zori_pct_change",
       "zori_afford_ratio",
       "zori_pct_afford",
@@ -70,8 +68,6 @@
     ]
   },
   "predictors": {
-    "income_delta_pct_change": "% change in real median household income",
-    "population_delta_pct_change": "% change in population",
     "zori_pct_change": "Zillow Observed Rent Index (ZORI) % change",
     "zori_afford_ratio": "December 2024 ZORI / MSA median household income",
     "zori_pct_afford": "Change in ZORI / MSA median household income",
@@ -111,9 +107,9 @@
     "VLOW_LOW_CO_total": "Multifamily very-low/low-income certificates of occupancy",
     "VLOW_LOW_BP_total": "Multifamily very-low/low-income building permits",
     "VLOW_LOW_ENT_total": "Multifamily very-low/low-income entitlements",
-    "MOD_CO_total": "Multifamily moderate-income certificates of occupancy",
-    "MOD_BP_total": "Multifamily moderate-income building permits",
-    "MOD_ENT_total": "Multifamily moderate-income entitlements",
+    "MOD_CO_total": "Multifamily deed-restricted moderate-income certificates of occupancy",
+    "MOD_BP_total": "Multifamily deed-restricted moderate-income building permits",
+    "MOD_ENT_total": "Multifamily deed-restricted moderate-income entitlements",
     "net_CO": "Net certificates of occupancy (all housing)",
     "net_BP": "Net building permits (all housing)",
     "net_ENT": "Net entitlements (all housing)",
@@ -138,8 +134,8 @@
     "vlow_low_CO": "Multifamily very-low/low-income certificates of occupancy",
     "vlow_low_BP": "Multifamily very-low/low-income building permits",
     "vlow_low_ENT": "Multifamily very-low/low-income entitlements",
-    "mod_CO": "Multifamily moderate-income certificates of occupancy",
-    "mod_BP": "Multifamily moderate-income building permits",
-    "mod_ENT": "Multifamily moderate-income entitlements"
+    "mod_CO": "Multifamily deed-restricted moderate-income certificates of occupancy",
+    "mod_BP": "Multifamily deed-restricted moderate-income building permits",
+    "mod_ENT": "Multifamily deed-restricted moderate-income entitlements"
   }
 }

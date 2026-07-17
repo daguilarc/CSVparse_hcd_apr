@@ -16,6 +16,7 @@ def _fixture_city_df() -> pd.DataFrame:
             "geography_type": ["City", "City", "City"],
             "income_delta_pct_change": [0.1, 0.2, 0.3],
             "population_delta_pct_change": [0.01, 0.02, 0.03],
+            "zori_pct_change": [0.05, 0.06, 0.07],
             "msa_income": [80000, 90000, 100000],
             "DB_CO_total": [1, 2, 3],
             "DB_BP_total": [1, 0, 2],

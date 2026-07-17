@@ -14,6 +14,13 @@ STREAM_ORDER = {
 }
 ALL_GEO_TYPES = ["city", "county_whole", "county_residual"]
 ZIP_ALL_HOUSING_NET = frozenset({"net_CO", "net_BP", "net_ENT"})
+ZILLOW_PREFIXES = ("zori_", "zhvi_", "pct_afford_")
+ACS_ECON_COLS = frozenset({"median_income"})
+# Dropped from Pages/model cartesian (kept as panel columns for maps / legacy diagnostics only).
+REMOVED_ACS_MODEL_PREDICTORS = frozenset({
+    "income_delta_pct_change",
+    "population_delta_pct_change",
+})
 
 
 def is_non_mf_housing_outcome(col: str | None) -> bool:
@@ -29,6 +36,34 @@ def is_non_mf_housing_outcome(col: str | None) -> bool:
     if col.startswith("total_owner_"):
         return True
     return col.startswith("TOTAL_") and not col.startswith("TOTAL_MF_")
+
+
+def is_econ_variable(col: str | None) -> bool:
+    """True for ACS/Zillow economic predictors (cannot occupy both axes together)."""
+    if not isinstance(col, str) or not col:
+        return False
+    if col in ACS_ECON_COLS or col in REMOVED_ACS_MODEL_PREDICTORS:
+        return True
+    return col.startswith(ZILLOW_PREFIXES)
+
+
+def is_removed_acs_model_predictor(col: str | None) -> bool:
+    """True for ACS %Δ income/population predictors removed from model cartesian."""
+    return isinstance(col, str) and col in REMOVED_ACS_MODEL_PREDICTORS
+
+
+def is_econ_cross_pair(x_col: str | None, y_col: str | None) -> bool:
+    """Econ×econ pairs are forbidden; housing×housing (non-identical) is allowed."""
+    return is_econ_variable(x_col) and is_econ_variable(y_col)
+
+
+def predictor_tick_kind(col: str | None) -> str | None:
+    """Tick format kind for economic predictors: percent or dollar."""
+    if not is_econ_variable(col):
+        return None
+    if col == "median_income":
+        return "dollar"
+    return "percent"
 
 
 def load_chart_labels(path: Path) -> dict[str, Any]:

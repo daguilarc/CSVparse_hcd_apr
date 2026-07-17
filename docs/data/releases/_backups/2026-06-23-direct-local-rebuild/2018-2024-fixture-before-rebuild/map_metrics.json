@@ -1,0 +1,41 @@
+[
+  {
+    "key": "DB_CO_total",
+    "y_col": "DB_CO_total",
+    "metric_col": "DB_CO_total_per1000",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "title": "Multifamily deed-restricted density-bonus certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq"
+  },
+  {
+    "key": "TOTAL_CO_total",
+    "y_col": "TOTAL_CO_total",
+    "metric_col": "TOTAL_CO_total_per1000",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "title": "Net housing certificates of occupancy",
+    "subtitle": "per 1,000 population",
+    "cmap_kind": "seq"
+  },
+  {
+    "key": "population_pct_change",
+    "y_col": null,
+    "metric_col": "population_pct_change",
+    "applicable_geo_types": [
+      "city",
+      "county_whole",
+      "county_residual"
+    ],
+    "title": "Population percent change",
+    "subtitle": "",
+    "cmap_kind": "div"
+  }
+]

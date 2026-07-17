@@ -43,12 +43,10 @@ SCALE_X_PCT_AFFORD_LABELS = frozenset(
     | {ZORI_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL}
 )
 
-X_COL_INCOME_DELTA_PREDICTORS = frozenset({"income_delta_pct_change"})
-X_COL_POP_DELTA_PREDICTORS = frozenset({"population_delta_pct_change"})
+X_COL_INCOME_DELTA_PREDICTORS = frozenset()
+X_COL_POP_DELTA_PREDICTORS = frozenset()
 X_COL_TWO_PART_LINEAR_X = frozenset(
     {
-        "income_delta_pct_change",
-        "population_delta_pct_change",
         "zori_pct_change",
         "zori_pct_afford",
         "zhvi_condo_pct_change",

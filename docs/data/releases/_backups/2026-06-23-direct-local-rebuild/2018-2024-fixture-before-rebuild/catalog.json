@@ -1,0 +1,418 @@
+{
+  "city:DB_CO_total:income_delta_pct_change:none": {
+    "geography": "city",
+    "y_col": "DB_CO_total",
+    "x_col": "income_delta_pct_change",
+    "robustness": "none",
+    "observations": {
+      "x": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "y": [
+        0.0,
+        2.0,
+        1.0
+      ],
+      "labels": [
+        "Albany",
+        "Berkeley",
+        "Culver City"
+      ]
+    },
+    "x_grid": [
+      1.0,
+      2.0,
+      3.0
+    ],
+    "stats": {
+      "mcfadden_r2": 0.1,
+      "ols_r2": 0.2,
+      "two_part": {
+        "alpha": 0,
+        "beta": 1,
+        "beta_t": 2,
+        "beta_p": 0.05,
+        "intercept": 0,
+        "slope": 1,
+        "slope_t": 3,
+        "slope_p": 0.01
+      }
+    },
+    "availability": {
+      "stationary_bootstrap": true,
+      "hierarchical": true
+    },
+    "views": {
+      "two_part_hurdle": {
+        "stationary_bootstrap": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ]
+        },
+        "hierarchical": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ],
+          "ppm_beta": 0.5
+        }
+      },
+      "positive_only": {
+        "stationary_bootstrap": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ]
+        },
+        "hierarchical": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ],
+          "ppm_beta": 0.5
+        }
+      }
+    }
+  },
+  "city:TOTAL_CO_total:population_delta_pct_change:none": {
+    "geography": "city",
+    "y_col": "TOTAL_CO_total",
+    "x_col": "population_delta_pct_change",
+    "robustness": "none",
+    "observations": {
+      "x": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "y": [
+        0.0,
+        2.0,
+        1.0
+      ],
+      "labels": [
+        "Fresno",
+        "Irvine",
+        "Oakland"
+      ]
+    },
+    "x_grid": [
+      1.0,
+      2.0,
+      3.0
+    ],
+    "stats": {
+      "mcfadden_r2": 0.1,
+      "ols_r2": 0.2,
+      "two_part": {
+        "alpha": 0,
+        "beta": 1,
+        "beta_t": 2,
+        "beta_p": 0.05,
+        "intercept": 0,
+        "slope": 1,
+        "slope_t": 3,
+        "slope_p": 0.01
+      }
+    },
+    "availability": {
+      "stationary_bootstrap": true,
+      "hierarchical": false
+    },
+    "views": {
+      "two_part_hurdle": {
+        "stationary_bootstrap": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ]
+        }
+      },
+      "positive_only": {
+        "stationary_bootstrap": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ]
+        }
+      }
+    }
+  },
+  "city:DB_CO_total:zhvi_sfrcondo_pct_change:none": {
+    "geography": "city",
+    "y_col": "DB_CO_total",
+    "x_col": "zhvi_sfrcondo_pct_change",
+    "robustness": "none",
+    "observations": {
+      "x": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "y": [
+        0.0,
+        2.0,
+        1.0
+      ],
+      "labels": [
+        "Pasadena",
+        "Redwood City",
+        "Sacramento"
+      ]
+    },
+    "x_grid": [
+      1.0,
+      2.0,
+      3.0
+    ],
+    "stats": {
+      "mcfadden_r2": 0.1,
+      "ols_r2": 0.2,
+      "two_part": {
+        "alpha": 0,
+        "beta": 1,
+        "beta_t": 2,
+        "beta_p": 0.05,
+        "intercept": 0,
+        "slope": 1,
+        "slope_t": 3,
+        "slope_p": 0.01
+      }
+    },
+    "availability": {
+      "stationary_bootstrap": true,
+      "hierarchical": true
+    },
+    "views": {
+      "two_part_hurdle": {
+        "stationary_bootstrap": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ]
+        },
+        "hierarchical": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ],
+          "ppm_beta": 0.5
+        }
+      },
+      "positive_only": {
+        "stationary_bootstrap": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ]
+        },
+        "hierarchical": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ],
+          "ppm_beta": 0.5
+        }
+      }
+    }
+  },
+  "zip:net_MF_CO:median_income:none": {
+    "geography": "zip",
+    "y_col": "net_MF_CO",
+    "x_col": "median_income",
+    "robustness": "none",
+    "observations": {
+      "x": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "y": [
+        0.0,
+        2.0,
+        1.0
+      ],
+      "labels": [
+        "90001",
+        "90002",
+        "94102"
+      ]
+    },
+    "x_grid": [
+      1.0,
+      2.0,
+      3.0
+    ],
+    "stats": {
+      "mcfadden_r2": 0.1,
+      "ols_r2": 0.2,
+      "two_part": {
+        "alpha": 0,
+        "beta": 1,
+        "beta_t": 2,
+        "beta_p": 0.05,
+        "intercept": 0,
+        "slope": 1,
+        "slope_t": 3,
+        "slope_p": 0.01
+      }
+    },
+    "availability": {
+      "stationary_bootstrap": true,
+      "hierarchical": false
+    },
+    "views": {
+      "two_part_hurdle": {
+        "stationary_bootstrap": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ]
+        }
+      },
+      "positive_only": {
+        "stationary_bootstrap": {
+          "mean": [
+            1.0,
+            2.0,
+            3.0
+          ],
+          "lower": [
+            0.5,
+            1.5,
+            2.5
+          ],
+          "upper": [
+            1.5,
+            2.5,
+            3.5
+          ]
+        }
+      }
+    }
+  }
+}

@@ -70,10 +70,10 @@ class CatalogContractTests(unittest.TestCase):
             "zip:net_MF_CO:zhvi_condo_pct_change:none",
         )
         self.export.record_regression(
-            self._result(), geography="city", y_col="DB_CO_total", x_col="income_delta_pct_change",
+            self._result(), geography="city", y_col="DB_CO_total", x_col="zori_pct_change",
             robustness="none", data_label="Cities", dr_type="DB", cat_suffix="CO",
         )
-        payload = self.export.PAGES_CATALOG["city:DB_CO_total:income_delta_pct_change:none"]
+        payload = self.export.PAGES_CATALOG["city:DB_CO_total:zori_pct_change:none"]
         self.assertEqual(set(payload["views"]), {"two_part_hurdle", "positive_only"})
         self.assertIn("mle", payload["views"]["two_part_hurdle"])
         self.assertIn("stationary_bootstrap", payload["views"]["two_part_hurdle"])
@@ -89,7 +89,7 @@ class CatalogContractTests(unittest.TestCase):
         result = self._result()
         result["beta_samples"] = np.array([np.nan, np.nan])
         self.export.record_regression(
-            result, geography="city", y_col="DB_CO_total", x_col="income_delta_pct_change",
+            result, geography="city", y_col="DB_CO_total", x_col="zori_pct_change",
             robustness="none", data_label="Cities", dr_type="DB", cat_suffix="CO",
         )
         payload = next(iter(self.export.PAGES_CATALOG.values()))
@@ -101,7 +101,7 @@ class CatalogContractTests(unittest.TestCase):
         result = self._result(hierarchical=False)
         result["ols_rsquared"] = np.nan
         self.export.record_regression(
-            result, geography="city", y_col="DB_CO_total", x_col="income_delta_pct_change",
+            result, geography="city", y_col="DB_CO_total", x_col="zori_pct_change",
             robustness="none", data_label="Cities", dr_type="DB", cat_suffix="CO",
         )
         payload = next(iter(self.export.PAGES_CATALOG.values()))
@@ -316,7 +316,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
                 "TOTAL_MF_BP_total": "MF permits",
                 "DB_BP_total": "Density bonus BP",
                 "NOT_ARCHIVED_CO_total": "Not listed elsewhere",
-                "income_delta_pct_change": "% change in real median household income",
+                "zori_pct_change": "Zillow Observed Rent Index (ZORI) % change",
             },
         }
         first = build_map_metric_registry(df, labels)
@@ -349,6 +349,24 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         self.assertFalse(is_non_mf_housing_outcome("income_delta_pct_change"))
         self.assertFalse(is_non_mf_housing_outcome(None))
 
+    def test_is_econ_cross_pair_bans_econ_keeps_housing(self):
+        sys.path.insert(0, str(ROOT / "TableA2-models"))
+        from pages.map_metric_registry import (
+            is_econ_cross_pair,
+            is_econ_variable,
+            is_removed_acs_model_predictor,
+        )
+
+        self.assertTrue(is_removed_acs_model_predictor("income_delta_pct_change"))
+        self.assertTrue(is_removed_acs_model_predictor("population_delta_pct_change"))
+        self.assertTrue(is_econ_variable("median_income"))
+        self.assertTrue(is_econ_variable("zori_pct_change"))
+        self.assertFalse(is_econ_variable("DB_CO_total"))
+        self.assertTrue(is_econ_cross_pair("zori_pct_change", "zhvi_condo_pct_change"))
+        self.assertTrue(is_econ_cross_pair("zori_pct_change", "median_income"))
+        self.assertFalse(is_econ_cross_pair("DB_CO_total", "TOTAL_MF_CO_total"))
+        self.assertFalse(is_econ_cross_pair("DB_CO_total", "zori_pct_change"))
+
     def test_prune_non_mf_release_artifacts_drops_all_housing_streams(self):
         spec = importlib.util.spec_from_file_location(
             "export_pages_prune", ROOT / "scripts/export_pages_catalog.py"
@@ -365,11 +383,24 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
                 "city:DB_CO_total:TOTAL_CO_total:none": {
                     "geography": "city", "y_col": "DB_CO_total", "x_col": "TOTAL_CO_total",
                 },
-                "city:TOTAL_CO_total:income_delta_pct_change:none": {
-                    "geography": "city", "y_col": "TOTAL_CO_total", "x_col": "income_delta_pct_change",
+                "city:TOTAL_MF_CO_total:zori_pct_change:none": {
+                    "geography": "city", "y_col": "TOTAL_MF_CO_total", "x_col": "zori_pct_change",
                 },
-                "city:total_owner_CO_total:income_delta_pct_change:none": {
-                    "geography": "city", "y_col": "total_owner_CO_total", "x_col": "income_delta_pct_change",
+                "city:DB_CO_total:income_delta_pct_change:none": {
+                    "geography": "city", "y_col": "DB_CO_total", "x_col": "income_delta_pct_change",
+                },
+                "city:total_owner_CO_total:zori_pct_change:none": {
+                    "geography": "city", "y_col": "total_owner_CO_total", "x_col": "zori_pct_change",
+                },
+                "city:zori_pct_change:zhvi_condo_pct_change:none": {
+                    "geography": "city",
+                    "y_col": "zori_pct_change",
+                    "x_col": "zhvi_condo_pct_change",
+                },
+                "city:zhvi_condo_pct_change:zori_pct_change:none": {
+                    "geography": "city",
+                    "y_col": "zhvi_condo_pct_change",
+                    "x_col": "zori_pct_change",
                 },
                 "zip:net_CO:median_income:none": {
                     "geography": "zip", "y_col": "net_CO", "x_col": "median_income",
@@ -417,6 +448,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
                 set(pruned),
                 {
                     "city:DB_CO_total:TOTAL_MF_CO_total:none",
+                    "city:TOTAL_MF_CO_total:zori_pct_change:none",
                     "zip:net_MF_CO:median_income:none",
                 },
             )
@@ -433,10 +465,10 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
             self.assertEqual([row["metric_col"] for row in pruned_audit], ["TOTAL_MF_CO_total_per1000"])
             manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["catalog_keys"], sorted(pruned))
-            self.assertEqual(manifest["n_regressions"], 2)
-            self.assertEqual(manifest["n_pairs_exported"], 2)
-            self.assertEqual(manifest["n_stationary_bootstrap_succeeded"], 2)
-            self.assertEqual(manifest["n_pairs_attempted"], 2)
+            self.assertEqual(manifest["n_regressions"], 3)
+            self.assertEqual(manifest["n_pairs_exported"], 3)
+            self.assertEqual(manifest["n_stationary_bootstrap_succeeded"], 3)
+            self.assertEqual(manifest["n_pairs_attempted"], 3)
 
     def test_finalize_preserve_runtime_pins_keeps_release_profile_python(self):
         spec = importlib.util.spec_from_file_location(
@@ -468,7 +500,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
 
         class CityFrame:
             columns = {
-                "DB_CO_total", "income_delta_pct_change", "zori_pct_change",
+                "DB_CO_total", "zori_pct_change", "zhvi_condo_pct_change",
                 "JURISDICTION", "county", "population",
             }
 
@@ -480,8 +512,8 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
 
         pairs = list(iter_pairs(CityFrame(), ZipFrame(), sf_zips_for_xsf=frozenset()))
         keys = {(p.geography, p.y_col, p.x_col, p.robustness) for p in pairs}
-        self.assertIn(("city", "DB_CO_total", "income_delta_pct_change", "none"), keys)
-        self.assertIn(("city", "income_delta_pct_change", "DB_CO_total", "none"), keys)
+        self.assertIn(("city", "DB_CO_total", "zori_pct_change", "none"), keys)
+        self.assertIn(("city", "zori_pct_change", "DB_CO_total", "none"), keys)
         self.assertNotIn(("city", "DB_CO_total", "DB_CO_total", "none"), keys)
         self.assertTrue(all(r == "none" for *_, r in keys))
 
@@ -495,18 +527,18 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
             "JURISDICTION": [f"J{i}" for i in range(n)],
             "county": ["001"] * n,
             "population": [1000.0] * n,
-            "income_delta_pct_change": x,
+            "zhvi_condo_pct_change": x,
             "zori_pct_change": 2.0 * x,
         })
         result = _fit_continuous_pair(
             frame,
             label_col="JURISDICTION",
             county_col="county",
-            x_col="income_delta_pct_change",
+            x_col="zhvi_condo_pct_change",
             y_col="zori_pct_change",
             min_jurisdictions=10,
-            x_transform="log" if _predictor_is_log_x("income_delta_pct_change") else "identity",
-            x_fit_mask_kind=_predictor_fit_mask_kind("income_delta_pct_change"),
+            x_transform="log" if _predictor_is_log_x("zhvi_condo_pct_change") else "identity",
+            x_fit_mask_kind=_predictor_fit_mask_kind("zhvi_condo_pct_change"),
             requires_msa=False,
         )
         self.assertIsNotNone(result)
@@ -516,18 +548,18 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         import pages_export
 
         pages_export.PAGES_CATALOG.clear()
-        result["income_label"] = "Income delta"
+        result["income_label"] = "ZHVI condo % change"
         pages_export.record_regression(
             result,
             geography="city",
             y_col="zori_pct_change",
-            x_col="income_delta_pct_change",
+            x_col="zhvi_condo_pct_change",
             robustness="none",
             data_label="Cities",
             dr_type="zori_pct_change",
             cat_suffix="CO",
         )
-        payload = pages_export.PAGES_CATALOG["city:zori_pct_change:income_delta_pct_change:none"]
+        payload = pages_export.PAGES_CATALOG["city:zori_pct_change:zhvi_condo_pct_change:none"]
         self.assertEqual(payload["model_family"], "continuous")
         self.assertEqual(
             len(payload["views"]["two_part_hurdle"]["mle"]["mean"]),
@@ -583,41 +615,82 @@ class StaticContractTests(unittest.TestCase):
         self.assertIsInstance(labels["outcomes"], dict)
         self.assertIn("per1000Outcomes", labels)
         self.assertIn("predictorApplicability", labels)
-        self.assertIn("income_delta_pct_change", labels["predictorApplicability"]["city"])
-        self.assertNotIn("income_delta_pct_change", labels["predictorApplicability"]["zip"])
+        self.assertIn("zori_pct_change", labels["predictorApplicability"]["city"])
+        self.assertNotIn("income_delta_pct_change", labels["predictors"])
+        self.assertNotIn("population_delta_pct_change", labels["predictors"])
         self.assertIn("median_income", labels["predictorApplicability"]["zip"])
         self.assertNotIn("median_income", labels["predictorApplicability"]["city"])
         for values in labels["predictorApplicability"].values():
             self.assertLessEqual(set(values), set(labels["predictors"]))
+        for mod_key in ("MOD_CO_total", "mod_CO"):
+            mod_label = labels["outcomes"][mod_key]
+            self.assertIn("deed-restricted", mod_label)
+            self.assertNotIn("DR + NDR", mod_label)
+        model_source = (MODELS / "acs_apr_models.py").read_text(encoding="utf-8")
+        self.assertIn("ROR_LABEL_MOD_CO = MODERATE_INCOME_COMPLETIONS_LABEL", model_source)
+        self.assertIn("Multifamily Deed-Restricted Moderate-Income Certificates of Occupancy", model_source)
+        self.assertNotIn("Moderate-Income Certificates of Occupancy (DR + NDR)", model_source)
 
     def test_explorer_ux_source_contracts(self):
         html = (ROOT / "docs/index.html").read_text(encoding="utf-8")
         self.assertRegex(
             html,
-            r'(?s)<section id="panel-models"[^>]*>.*?<select id="geo"></select>.*?</section>',
+            r'(?s)<div class="tab-row">.*?<button id="tab-models"[^>]*>Models</button>.*?'
+            r'<label class="tab-geo" id="models-geo-wrap" hidden>Geography<select id="geo"></select></label>',
         )
         self.assertNotRegex(
             html,
-            r'(?s)<div class="tab-row">.*?<select id="geo".*?</div>\s*</div>',
+            r'(?s)<section id="panel-models"[^>]*>.*?<select id="geo".*?</section>',
+        )
+        self.assertRegex(
+            html,
+            r'(?s)<section id="panel-models"[^>]*>\s*'
+            r'<div class="controls model-grid">\s*'
+            r'<label>Variable \(Y\)<select id="y-col"></select></label>\s*'
+            r'<label>Variable \(X\)<select id="x-col"></select></label>\s*'
+            r'<label>Model display<select id="model-display"></select></label>\s*'
+            r'<label>Zero Values<select id="zero-values">',
         )
         self.assertRegex(
             html,
             r'(?s)<section id="panel-maps"[^>]*>\s*'
-            r'<div class="controls model-grid">.*?'
+            r'<div class="controls model-grid map-grid">.*?'
             r'<select id="map-geography">.*?<select id="map-metric">',
         )
         for token in (
             "marker:{opacity:.92",
+            ".map-grid{align-items:end}",
+            'byId("models-geo-wrap").hidden=name!=="models"',
             "function neighborXs(",
             "function neighborYs(",
             "function settleModelControls(",
             'replaceOptions("y-col",ys,variableLabel,y)',
             'replaceOptions("x-col",xs,variableLabel,x)',
             'pair.model_family==="continuous"?"positive_only"',
+            "function axisLayout(pair,frameXs,frameYs,obsYs)",
+            "if(yrange&&obsNums.length&&Math.min(...obsNums)>=0)yrange[0]=0",
+            'return outcomeIsPer1000(col)?"Dwelling Units per 1,000 pop":"Dwelling Units"',
+            'tickformat:"$,.0f"',
+            'ticksuffix:"%"',
+            "function formatDiag(v)",
+            "Math.abs(n)<1e-5",
             "Robustness Checks",
             'v==="none"?"None":v',
         ):
             self.assertIn(token, html)
+
+    def test_shipped_release_has_no_econ_cross_pairs(self):
+        release = ROOT / "docs/data/releases/2018-2024"
+        catalog = json.loads((release / "catalog.json").read_text(encoding="utf-8"))
+        sys.path.insert(0, str(ROOT / "TableA2-models"))
+        from pages.map_metric_registry import is_econ_cross_pair
+
+        for pair in catalog.values():
+            self.assertFalse(
+                is_econ_cross_pair(pair["x_col"], pair["y_col"]),
+                f"econ×econ pair remained: {pair['x_col']} × {pair['y_col']}",
+            )
+            self.assertNotEqual(pair["x_col"], pair["y_col"])
 
     def test_shipped_release_is_multifamily_only(self):
         release = ROOT / "docs/data/releases/2018-2024"
@@ -843,13 +916,13 @@ class VerifierTests(unittest.TestCase):
         spec.loader.exec_module(export)
         labels = json.loads((ROOT / "docs/chart_labels.json").read_text(encoding="utf-8"))
         catalog = {
-            "city:DB_CO_total:income_delta_pct_change:none": {
-                "x_col": "income_delta_pct_change",
+            "city:DB_CO_total:zori_pct_change:none": {
+                "x_col": "zori_pct_change",
                 "y_col": "DB_CO_total",
             },
-            "city:income_delta_pct_change:DB_CO_total:none": {
+            "city:zori_pct_change:DB_CO_total:none": {
                 "x_col": "DB_CO_total",
-                "y_col": "income_delta_pct_change",
+                "y_col": "zori_pct_change",
             },
         }
         with self.assertRaises(verifier.VerificationError):
@@ -863,14 +936,14 @@ class VerifierTests(unittest.TestCase):
         spec.loader.exec_module(export)
         labels = export.enrich_chart_labels(json.loads((ROOT / "docs/chart_labels.json").read_text(encoding="utf-8")))
         labels["variableApplicability"] = {
-            "city": ["DB_CO_total", "income_delta_pct_change"],
+            "city": ["DB_CO_total", "zori_pct_change"],
             "zip": labels["variableApplicability"]["zip"][:2],
         }
         catalog = {
-            "city:DB_CO_total:income_delta_pct_change:none": {
+            "city:DB_CO_total:zori_pct_change:none": {
                 "geography": "city",
                 "y_col": "DB_CO_total",
-                "x_col": "income_delta_pct_change",
+                "x_col": "zori_pct_change",
                 "robustness": "none",
             },
         }

@@ -1,0 +1,125 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "feature_id": "city:0",
+        "geo_type": "city",
+        "city_name": "Sample City",
+        "county_name": "SAMPLE COUNTY",
+        "county_fips": "001",
+        "DB_CO_total_per1000": 5.0,
+        "TOTAL_CO_total_per1000": 4.0,
+        "population_pct_change": 2.5
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -120.25,
+              36.75
+            ],
+            [
+              -119.75,
+              36.75
+            ],
+            [
+              -119.75,
+              37.25
+            ],
+            [
+              -120.25,
+              37.25
+            ],
+            [
+              -120.25,
+              36.75
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "feature_id": "county_whole:1",
+        "geo_type": "county_whole",
+        "city_name": null,
+        "county_name": "SAMPLE COUNTY",
+        "county_fips": "001",
+        "DB_CO_total_per1000": 3.0,
+        "TOTAL_CO_total_per1000": 2.0,
+        "population_pct_change": -1.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -119.25,
+              36.95
+            ],
+            [
+              -118.75,
+              36.95
+            ],
+            [
+              -118.75,
+              37.45
+            ],
+            [
+              -119.25,
+              37.45
+            ],
+            [
+              -119.25,
+              36.95
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "feature_id": "county_residual:2",
+        "geo_type": "county_residual",
+        "city_name": null,
+        "county_name": "SAMPLE COUNTY",
+        "county_fips": "001",
+        "DB_CO_total_per1000": 7.0,
+        "TOTAL_CO_total_per1000": 6.0,
+        "population_pct_change": 0.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -118.25,
+              37.15
+            ],
+            [
+              -117.75,
+              37.15
+            ],
+            [
+              -117.75,
+              37.65
+            ],
+            [
+              -118.25,
+              37.65
+            ],
+            [
+              -118.25,
+              37.15
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

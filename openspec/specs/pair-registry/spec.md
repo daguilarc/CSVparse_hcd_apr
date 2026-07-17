@@ -23,8 +23,8 @@ The pair registry SHALL enumerate predictors from `PREDICTOR_META` keys filtered
 
 #### Scenario: ZIP income delta included
 
-- **WHEN** geography is `zip` and `income_delta_pct_change` has `geo_applicability: both`
-- **THEN** the registry includes pairs with `x_col: income_delta_pct_change`
+- **WHEN** geography is `zip` and `median_income` has `geo_applicability: zip`
+- **THEN** the registry includes pairs with `x_col: median_income`
 
 ### Requirement: Full Cartesian product
 

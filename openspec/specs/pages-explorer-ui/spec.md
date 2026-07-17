@@ -20,7 +20,7 @@ The explorer SHALL populate Variable (X) and Variable (Y) from catalog-neighbor 
 
 #### Scenario: Same universe replaced by neighbors
 
-- **WHEN** geography is City and Variable (Y) is `income_delta_pct_change`
+- **WHEN** geography is City and Variable (Y) is `DB_CO_total`
 - **THEN** Variable (X) lists only catalog neighbors of that Y, each with a display label from `chart_labels`
 - **AND** every listed X yields a rendered chart for that Y
 
@@ -61,15 +61,6 @@ For pairs with `model_family` continuous (or equivalent continuous export), the 
 
 - **WHEN** user views a continuous city pair with Model display including stationary bootstrap
 - **THEN** the bootstrap band surrounds the MLE line (not systematically ~½ the MLE slope)
-
-### Requirement: Chart sizing and axis ranges
-
-The Models chart SHALL use a fixed Plotly height of 560px (or equal to the prior interactive_viz contract). Switching to the Models tab SHALL resize the chart if it was plotted while hidden. Axis ranges SHALL be derived from `x_grid` and from observation and curve y-values with modest padding; for two-part displays that include zeros, y-axis lower bound SHALL be ≤ 0 only as required by data, preferring non-negative y when all plotted y ≥ 0 like the PNG explorer charts.
-
-#### Scenario: First open Models after Maps
-
-- **WHEN** the page loads on Maps then the user opens Models
-- **THEN** the chart is full-width height ~560px, not a tiny stub from `display:none` measurement
 
 ### Requirement: Observation and hierarchical legend copy
 
@@ -120,7 +111,7 @@ The vintage header SHALL read **HCD APR data: 2018–2024, projects with 5+ dwel
 
 ### Requirement: Models Geography control scope
 
-The city/ZIP **Geography** control (`#geo`) SHALL be rendered inside the Models panel only, not in the shared tab row above Maps/Models tabs. The Maps tab SHALL show **Geography view** (`#map-geography`) and **Map metric** only.
+The city/ZIP **Geography** control (`#geo`) SHALL be rendered in the shared `.tab-row` immediately after the Maps/Models tab buttons. It SHALL be visible only when the Models tab is active. The Maps tab SHALL show **Geography view** (`#map-geography`) and **Map metric** only (not City/ZIP Geography).
 
 #### Scenario: Maps tab hides city ZIP geo
 
@@ -128,28 +119,76 @@ The city/ZIP **Geography** control (`#geo`) SHALL be rendered inside the Models 
 - **THEN** the Models Geography (City/ZIP) control is not visible
 - **AND** Geography view remains visible
 
-#### Scenario: Models tab shows city ZIP geo
+#### Scenario: Models tab shows city ZIP geo beside Models
 
 - **WHEN** user is on the Models tab
-- **THEN** the Geography (City/ZIP) control is visible inside the Models panel
+- **THEN** the Geography (City/ZIP) control is visible in the tab row to the right of the Models button
+- **AND** it is not inside the Models 2×2 control grid
 
 ### Requirement: Shared Maps Models control grid
 
-Maps panel controls (Geography view, Map metric) SHALL use the same CSS grid column template as Models panel controls so the two Maps dropdowns align horizontally the same way Models dropdowns align.
+Maps panel controls (Geography view, Map metric) SHALL use the same CSS grid column template as Models panel controls. Geography view and Map metric **select** elements SHALL share a common bottom baseline when the map unit hint is present (unequal label line counts MUST NOT misalign the selects).
 
-#### Scenario: Desktop Maps alignment
+#### Scenario: Desktop Maps select baseline
 
-- **WHEN** viewport is wide enough for two columns
-- **THEN** Geography view and Map metric share equal columns matching Models’ two-column grid
+- **WHEN** viewport is wide enough for two columns and Map metric shows a multi-line unit hint
+- **THEN** Geography view and Map metric select bottoms align
 
-### Requirement: Axis labels from CHART_LABELS
+### Requirement: Models control 2×2 order
 
-The UI SHALL resolve x-axis and y-axis titles from chart labels using `entry.x_col`, `entry.y_col`, `entry.is_log_x`, and `entry.x_axis_filter_note`, preferring `chart_labels.json` / `variables` with partition fallback.
+The Models panel control grid SHALL contain exactly these four controls in DOM order: Variable (Y), Variable (X), Model display, Zero Values — forming a 2×2 grid with Y left / X right on the first row and Model display left / Zero Values right on the second row. Robustness Checks SHALL remain below the chart.
 
-#### Scenario: Label edit without catalog rebuild
+#### Scenario: Models grid order
 
-- **WHEN** a developer changes a variable label in `chart_labels.json` and deploys
-- **THEN** charts show the updated axis label without re-running the catalog builder
+- **WHEN** user views the Models panel
+- **THEN** the first control in the Models grid is Variable (Y) and the second is Variable (X)
+- **AND** Model display and Zero Values occupy the second row left and right respectively
+
+### Requirement: Chart sizing and axis ranges
+
+The Models chart SHALL use a fixed Plotly height of 560px (or equal to the prior interactive_viz contract). Switching to the Models tab SHALL resize the chart if it was plotted while hidden. Axis ranges SHALL be derived from observation values and mean-curve values with modest padding (not from bootstrap/credible band envelopes alone). When all framing y-values are ≥ 0, the y-axis lower bound SHALL be 0 so the plot does not open a negative dead quadrant.
+
+#### Scenario: First open Models after Maps
+
+- **WHEN** the page loads on Maps then the user opens Models
+- **THEN** the chart is full-width height ~560px, not a tiny stub from `display:none` measurement
+
+#### Scenario: Non-negative framing floors y at zero
+
+- **WHEN** all observation and mean-curve y-values used for framing are ≥ 0
+- **THEN** the chart y-axis lower bound is 0 even if interval bands extend below 0 in the underlying series
+
+### Requirement: Axis titles and tick formats
+
+Housing axes SHALL use title **Dwelling Units**, or **Dwelling Units per 1,000 pop** when the variable is listed in `per1000Outcomes`. Economic axes SHALL use the chart-label display string and format ticks as percent (`%` suffix) or dollars with commas per `tickKinds` (`percent` vs `dollar`). Dropdown labels SHALL continue to use full variable names from chart labels.
+
+#### Scenario: Housing axis title
+
+- **WHEN** the selected axis variable is a housing outcome on the per-1,000 list
+- **THEN** that axis title is `Dwelling Units per 1,000 pop`
+
+#### Scenario: Dollar ticks for median income
+
+- **WHEN** the selected axis variable is `median_income`
+- **THEN** Plotly tick format uses dollar-with-commas formatting
+
+### Requirement: Pairing filter (econ vs housing)
+
+Shipped Models catalog pairs SHALL NOT place economic predictors on both axes. Housing×housing pairs SHALL remain when `x_col ≠ y_col`. Housing×econ pairs in either orientation SHALL remain.
+
+#### Scenario: No econ×econ in shipped release
+
+- **WHEN** the published `catalog.json` is inspected
+- **THEN** no entry has both `x_col` and `y_col` classified as economic predictors
+
+### Requirement: Diagnostic scientific notation
+
+Model diagnostic numeric values whose absolute value is nonzero and below `1e-5` SHALL render in scientific notation; other finite values SHALL use four decimal places.
+
+#### Scenario: Tiny diagnostic value
+
+- **WHEN** a coefficient p-value is smaller than `1e-5` in magnitude
+- **THEN** the diagnostics table shows scientific notation rather than `0.0000`
 
 ### Requirement: R² stats displayed not gated
 

@@ -93,7 +93,7 @@
     "key": "MOD_CO_total",
     "y_col": "MOD_CO_total",
     "metric_col": "MOD_CO_total_per1000",
-    "title": "Multifamily moderate-income certificates of occupancy",
+    "title": "Multifamily deed-restricted moderate-income certificates of occupancy",
     "subtitle": "per 1,000 population",
     "unit": "per_1000_pop",
     "cmap_kind": "seq",

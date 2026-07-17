@@ -19,7 +19,9 @@ test("APR explorer separates Maps and Models controls", async ({ page }) => {
   await expect(page.locator("#tab-maps")).toHaveClass(/active/);
   await expect(page.locator("#map-geography")).toBeVisible();
   await expect(page.locator("#map-metric")).toBeVisible();
-  await expect(page.locator("#panel-models #geo")).toBeHidden();
+  await expect(page.locator("#models-geo-wrap")).toBeHidden();
+  await expect(page.locator(".tab-row #geo")).toHaveCount(1);
+  await expect(page.locator("#panel-models #geo")).toHaveCount(0);
   await expect(page.locator("#panel-maps #geo")).toHaveCount(0);
   await expect(page.locator("#map-chart")).toBeVisible();
   await expect(page.locator("#map-unit-hint")).toBeVisible();
@@ -42,9 +44,19 @@ test("APR explorer separates Maps and Models controls", async ({ page }) => {
 
   await page.locator("#tab-models").click();
   await expect(page.locator("#tab-models")).toHaveClass(/active/);
-  await expect(page.locator("#panel-models #geo")).toBeVisible();
+  await expect(page.locator("#models-geo-wrap")).toBeVisible();
+  await expect(page.locator(".tab-row #geo")).toBeVisible();
+  const modelControlOrder = await page.locator("#panel-models .model-grid > label").evaluateAll((labels) =>
+    labels.map((label) => label.firstChild?.textContent?.trim() || ""),
+  );
+  expect(modelControlOrder).toEqual(["Variable (Y)", "Variable (X)", "Model display", "Zero Values"]);
   await expect(page.locator("#model-display")).toBeVisible();
   await expect(page.locator("#zero-values")).toBeVisible();
+  const yRange = await page.locator("#model-chart").evaluate((node) => {
+    const plot = node as HTMLDivElement & { layout?: { yaxis?: { range?: number[] } } };
+    return plot.layout?.yaxis?.range;
+  });
+  expect(yRange?.[0]).toBe(0);
   await expect(page.locator("label.robustness-below")).toContainText("Robustness Checks");
   await expect(page.locator("#robustness option:checked")).toHaveText("None");
   await expect(page.locator("#build-info")).toContainText("Release 2018-2024");
