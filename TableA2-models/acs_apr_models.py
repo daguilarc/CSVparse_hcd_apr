@@ -176,28 +176,6 @@ R2_DIAG_LEGACY_COLUMN_RENAMES = {
 }
 # Canonical predictor metadata: single source for labels, print titles, transform and tick semantics.
 PREDICTOR_META = {
-    "zori_pct_change": {
-        "display_label": ZORI_PCT_LABEL,
-        "print_title": "ZORI % change",
-        "tick_kind": "percent",
-        "is_log_x": False,
-        "allow_negative_x": True,
-        "requires_msa": False,
-        "fit_mask_kind": "finite",
-        "geo_applicability": "both",
-        "positive_ols_companion": True,
-    },
-    "zori_afford_ratio": {
-        "display_label": ZORI_AFFORD_X_LABEL,
-        "print_title": "ZORI rent/income ratio",
-        "tick_kind": "percent",
-        "is_log_x": False,
-        "allow_negative_x": False,
-        "requires_msa": True,
-        "fit_mask_kind": "positive",
-        "geo_applicability": "both",
-        "positive_ols_companion": False,
-    },
     "zori_pct_afford": {
         "display_label": ZORI_PCT_AFFORD_X_LABEL,
         "print_title": "ZORI (Zillow Observed Rent Index) real $ change / income",
@@ -209,44 +187,11 @@ PREDICTOR_META = {
         "geo_applicability": "both",
         "positive_ols_companion": True,
     },
-    "median_income": {
-        "display_label": f"ZIP median household income ({ACS_5YR_MHI_DENOM_LABEL}), log scale",
-        "print_title": "ZIP median household income",
-        "tick_kind": "dollar",
-        "is_log_x": True,
-        "allow_negative_x": False,
-        "requires_msa": False,
-        "fit_mask_kind": "positive",
-        "geo_applicability": "zip",
-        "positive_ols_companion": False,
-    },
 }
 
 for _zhvi_tier in ZHVI_TIERS:
     _zhvi_key = _zhvi_tier["key"]
     _zhvi_lbl = _zhvi_tier["label"]
-    PREDICTOR_META[_zhvi_tier_pct_col(_zhvi_key)] = {
-        "display_label": _zhvi_pct_label(_zhvi_lbl),
-        "print_title": f"ZHVI ({_zhvi_lbl}) % change",
-        "tick_kind": "percent",
-        "is_log_x": False,
-        "allow_negative_x": True,
-        "requires_msa": False,
-        "fit_mask_kind": "finite",
-        "geo_applicability": "both",
-        "positive_ols_companion": True,
-    }
-    PREDICTOR_META[_zhvi_tier_afford_ratio_col(_zhvi_key)] = {
-        "display_label": _zhvi_afford_label(_zhvi_lbl),
-        "print_title": f"ZHVI ({_zhvi_lbl}) affordability ratio",
-        "tick_kind": "percent",
-        "is_log_x": False,
-        "allow_negative_x": False,
-        "requires_msa": True,
-        "fit_mask_kind": "positive",
-        "geo_applicability": "both",
-        "positive_ols_companion": False,
-    }
     PREDICTOR_META[_zhvi_tier_pct_afford_col(_zhvi_key)] = {
         "display_label": _zhvi_pct_afford_label(_zhvi_lbl, _zhvi_tier["pca_index_name"]),
         "print_title": f"{_zhvi_tier['pca_index_name']} / MSA income",
@@ -5592,137 +5537,6 @@ def _run_city_regressions(df_final, df_apr_db_inc, permit_years, legend_note_pay
                                   r2_diagnostics=all_r2_results, r2_geography=_geo_label(GEOGRAPHY_CITY, var_label),
                                   legend_exclusion_note=legend_exclusion_note)
 
-    # =============================================================================
-    # Step 12b: Rate-on-Rate Regressions (Cities, Population-Weighted)
-    # Total CO rate → DB CO rate, Total CO rate → Owner CO rate
-    # =============================================================================
-    print("\n" + "="*70)
-    print("RATE-ON-RATE REGRESSIONS (Cities, Population-Weighted)")
-    print("="*70)
-
-    # Filter to cities with valid population
-    cities_mask = (df_final['geography_type'] == 'City') & df_final['population'].notna() & (df_final['population'] > 0)
-    df_cities = df_final[cities_mask].copy()
-    print(f"  Cities with valid population: {len(df_cities)}")
-
-    # Rate-on-rate: x = all-housing completions (net of demolitions); axis labels say "Net"
-    # DB_CO_total = DR (income-tier), PROJ_DB_CO_total = project total
-    rate_on_rate_specs = [
-        ('TOTAL_MF_CO', 'DB_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MF_DR_DB_CO, 'net_mf_co_to_dr_db_co'),
-        ('TOTAL_MF_CO', 'PROJ_DB_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MF_DB_CO, 'net_mf_co_to_db_co'),
-        ('TOTAL_MF_CO', 'PROJ_INC_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MF_INC_CO, 'net_mf_co_to_inc_co'),
-        ('TOTAL_MF_CO', 'total_owner_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_OWNER_CO, 'net_mf_co_to_owner_co'),
-        ('TOTAL_MF_CO', 'mf_owner_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MF_OWNER_CO, 'net_mf_co_to_mf_owner_co'),
-        ('TOTAL_MF_CO', 'VLOW_LOW_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_VLOW_LOW_CO, 'net_mf_co_to_vlow_low_co'),
-        ('TOTAL_MF_CO', 'MOD_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MOD_CO, 'net_mf_co_to_mod_co'),
-    ]
-    city_ror_variants = [(None, '', None)] + city_subvariants
-
-    for exclude_cities, ror_suffix, ror_label in city_ror_variants:
-        if not exclude_cities:
-            df_ror = df_cities
-        else:
-            exclude_upper = _to_upper_set(exclude_cities)
-            df_ror = df_cities[_exclude_by_upper(df_cities['JURISDICTION'], exclude_upper)].copy()
-        if len(df_ror) < 10:
-            continue
-        for x_prefix, y_prefix, x_label, y_label, file_tag in rate_on_rate_specs:
-            print(f"\n  --- {y_label} vs {x_label}{ror_suffix or ''} ---")
-            x_total_col = f'{x_prefix}_total'
-            y_total_col = f'{y_prefix}_total'
-            if x_total_col not in df_ror.columns or y_total_col not in df_ror.columns:
-                print(f"    Missing columns: {x_total_col} or {y_total_col}")
-                continue
-            ror_years = [
-                y for y in permit_years
-                if f'{x_prefix}_{y}' in df_ror.columns and f'{y_prefix}_{y}' in df_ror.columns
-            ]
-            if not ror_years:
-                print("    No overlapping per-year columns for rate-on-rate panel, skipping")
-                continue
-            pop_ok = df_ror['population'].notna() & (df_ror['population'] > 0)
-            x_num = df_ror[x_total_col]
-            y_num = df_ror[y_total_col]
-            valid = pop_ok & x_num.notna() & (x_num > 0) & y_num.notna() & (y_num >= 0)
-            if valid.sum() < 10:
-                continue
-            df_ror_v = df_ror.loc[valid].copy()
-            keep_ror = ['JURISDICTION', 'county', 'population']
-
-            def _cols_ror_year(d, y):
-                xc = f'{x_prefix}_{y}'
-                yc = f'{y_prefix}_{y}'
-                if xc not in d.columns or yc not in d.columns:
-                    return None
-                p = d['population'].values.astype(float)
-                return {
-                    'x_rate': _rate_per_1000(d[xc].values.astype(float), p),
-                    'y_rate': _rate_per_1000(d[yc].values.astype(float), p),
-                }
-
-            ror_totals = df_ror_v[keep_ror].copy()
-            pop_totals = df_ror.loc[valid, 'population'].values.astype(float)
-            ror_totals['x_rate'] = _rate_per_1000(df_ror.loc[valid, x_total_col].values.astype(float), pop_totals)
-            ror_totals['y_rate'] = _rate_per_1000(df_ror.loc[valid, y_total_col].values.astype(float), pop_totals)
-            ror_yearly = _melt_jurisdiction_years(df_ror_v, keep_ror, ror_years, _cols_ror_year)
-            if ror_yearly.empty:
-                print("    No jurisdiction-year rows for hierarchical panel, skipping")
-                continue
-            ror_file_tag = file_tag + ror_suffix
-            geography_ror = _geo_label(GEOGRAPHY_CITY, ror_label)
-            regression_results = fit_two_part_with_ci(
-                ror_totals, ror_yearly, 'x_rate', 'y_rate', ror_years,
-                log_x=False, y_is_rate=True, rate_precomputed=True,
-                x_varies_by_year=True, county_col='county', label_col='JURISDICTION',
-                skipped_low_r2=charts_skipped_low_r2, chart_id=ror_file_tag,
-                r2_diagnostics=all_r2_results,
-                r2_x_label=f"{x_label} (per 1000 pop)",
-                r2_y_label=f"{y_label} (per 1000 pop)",
-                r2_geography=geography_ror,
-            )
-            if regression_results is None:
-                continue
-            mle_result = regression_results['mle_result']
-            xd = regression_results['x_data']
-            x_range_ror = np.linspace(float(np.nanmin(xd)), float(np.nanmax(xd)), 100)
-            boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(
-                regression_results, x_range_ror,
-            )
-            ols_r2_ror = regression_results.get('ols_rsquared')
-            output_path = city_charts_dir / f'{ror_file_tag}.png'
-            x_label_chart = f'{x_label} (per 1000 pop)'
-            data_label_ror = (
-                f"{CHART_LEGEND_GEO_CITY} {ror_label}" if ror_label else CHART_LEGEND_GEO_CITY
-            )
-            phase_for_ror = "CO" if x_prefix.endswith("_CO") else None
-            legend_exclusion_note = None
-            if phase_for_ror is not None:
-                stream_for_ror = _stream_from_outcome_col(f"net_MF_{phase_for_ror}")
-                legend_exclusion_note = _resolve_legend_note(
-                    legend_note_payload,
-                    stream_for_ror,
-                    phase_for_ror,
-                    "city",
-                )
-            plot_two_part_chart(
-                x_scatter=mle_result['x'], y_scatter=mle_result['y_rate'],
-                x_line=x_range_ror, mle_y=mle_result['predict'](x_range_ror),
-                output_path=output_path,
-                x_label=x_label_chart, y_label=f'{y_label} (per 1000 pop)',
-                data_label=data_label_ror, apr_year_range='',
-                r2=mle_result['mcfadden_r2'], ols_r2=ols_r2_ror,
-                boot_ci_lo=boot_ci_lo, boot_ci_hi=boot_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
-                bayes_mean=bayes_mean,
-                labels=regression_results.get('jurisdictions'),
-                legend_exclusion_note=legend_exclusion_note,
-                mle_beta=float(regression_results['slope_mle']),
-                ppm_beta=(
-                    float(np.mean(regression_results['slope_samples']))
-                    if regression_results.get('slope_samples') is not None else None
-                ),
-            )
-
-    # =============================================================================
     return x_var_labels
 
 def _run_zip_regressions(df_apr_db_inc, df_apr_all, mf_mask_all, df_county, df_county_cbsa, df_msa, ca_county_name_to_fips, x_var_labels, legend_note_payload, charts_skipped_low_r2, all_r2_results, zip_charts_dir, panels_only=False):
@@ -6153,109 +5967,6 @@ def _run_zip_regressions(df_apr_db_inc, df_apr_all, mf_mask_all, df_county, df_c
                     'excl. SF Co. - # 20%',
                 ),
             ]
-            # Rate-on-rate at ZIP: outer loop over zip_mfh_subvariants; net MF CO/BP per 1000 → DB CO / Owner CO per 1000
-            zip_rate_on_rate_specs = [
-                ('net_MF_CO', 'dr_db_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MF_DR_DB_CO, 'net_mf_co_to_dr_db_co'),
-                ('net_MF_CO', 'total_db_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MF_DB_CO, 'net_mf_co_to_db_co'),
-                ('net_MF_CO', 'total_inc_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MF_INC_CO, 'net_mf_co_to_inc_co'),
-                ('net_MF_CO', 'total_owner_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_OWNER_CO, 'net_mf_co_to_owner_co'),
-                ('net_MF_CO', 'mf_owner_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MF_OWNER_CO, 'net_mf_co_to_mf_owner_co'),
-                ('net_MF_CO', 'vlow_low_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_VLOW_LOW_CO, 'net_mf_co_to_vlow_low_co'),
-                ('net_MF_CO', 'mod_CO', ROR_LABEL_NET_MF_CO, ROR_LABEL_MOD_CO, 'net_mf_co_to_mod_co'),
-            ]
-            for exclude_zips, suffix, exclude_label in zip_mfh_subvariants:
-                if exclude_zips is None:
-                    df_use = df_zip
-                else:
-                    df_use = df_zip[_exclude_by_str(df_zip['zipcode'], exclude_zips)].copy()
-                if len(df_use) < 20:
-                    continue
-                use_zips = set(df_use['zipcode'].astype(str).str.zfill(5))
-                for x_col, y_col, x_label, y_label, file_tag in zip_rate_on_rate_specs:
-                    if x_col not in df_use.columns or y_col not in df_use.columns:
-                        continue
-                    pop = df_use['population'].values
-                    valid_pop = df_use['population'].notna() & (df_use['population'] > 0)
-                    x_rate = np.where(valid_pop, (df_use[x_col].values.astype(float) / pop) * 1000.0, np.nan)
-                    y_rate = np.where(valid_pop, (df_use[y_col].values.astype(float) / pop) * 1000.0, np.nan)
-                    valid = valid_pop & (x_rate > 0) & np.isfinite(y_rate) & (y_rate >= 0)
-                    if valid.sum() < 20:
-                        continue
-                    x_pred = x_rate[valid]
-                    y_rate_v = y_rate[valid]
-                    print(f"\n  --- ZIP rate-on-rate{suffix or ''}: {y_label} vs {x_label} ---")
-                    zy = _filter_jurisdiction_panel(
-                        df_zip_yearly_long, 'zipcode', use_zips, x_col, y_col,
-                    )
-                    if zy.empty:
-                        continue
-                    zy_pop = zy['population'].values.astype(float)
-                    zy['y_rate'] = _rate_per_1000(zy[y_col].values.astype(float), zy_pop)
-                    zy['x_rate'] = _rate_per_1000(zy[x_col].values.astype(float), zy_pop)
-                    df_zip_yearly_ror = zy[['year', 'county', 'population', 'x_rate', 'y_rate']].copy()
-                    zip_years_ror = sorted(df_zip_yearly_ror['year'].dropna().unique().astype(int).tolist())
-                    if not zip_years_ror:
-                        continue
-                    df_zip_totals_ror = df_use.loc[valid, ['zipcode', 'county', 'population']].copy().reset_index(drop=True)
-                    df_zip_totals_ror['x_rate'] = x_pred
-                    df_zip_totals_ror['y_rate'] = y_rate_v
-                    geography_zip = _geo_label(GEOGRAPHY_ZIP, exclude_label)
-                    chart_id_zip_ror = f"zip_{file_tag}{suffix}"
-                    regression_zip_ror = fit_two_part_with_ci(
-                        df_zip_totals_ror, df_zip_yearly_ror, 'x_rate', 'y_rate', zip_years_ror,
-                        log_x=False, y_is_rate=True, rate_precomputed=True,
-                        x_varies_by_year=False, county_col='county', label_col='zipcode',
-                        skipped_low_r2=charts_skipped_low_r2, chart_id=chart_id_zip_ror,
-                        r2_diagnostics=all_r2_results,
-                        r2_x_label=f"{x_label} (per 1000 pop)",
-                        r2_y_label=f"{y_label} (per 1000 pop)",
-                        r2_geography=geography_zip,
-                    )
-                    if regression_zip_ror is None:
-                        continue
-                    mle_result = regression_zip_ror['mle_result']
-                    xd = regression_zip_ror['x_data']
-                    x_range_ror = np.linspace(float(np.nanmin(xd)), float(np.nanmax(xd)), 100)
-                    boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(
-                        regression_zip_ror, x_range_ror,
-                    )
-                    ols_r2_zip_ror = regression_zip_ror.get('ols_rsquared')
-                    output_path = zip_charts_dir / f'zip_{file_tag}{suffix}.png'
-                    zip_labels_ror = regression_zip_ror.get('jurisdictions')
-                    x_label_full = f'{x_label} (per 1000 pop)'
-                    data_label_zip_ror = (
-                        f"{CHART_LEGEND_GEO_ZIP} {exclude_label}"
-                        if exclude_label
-                        else CHART_LEGEND_GEO_ZIP
-                    )
-                    phase_for_ror = "CO" if x_col.endswith("_CO") else None
-                    legend_exclusion_note = None
-                    if phase_for_ror is not None:
-                        stream_for_ror = _stream_from_outcome_col(f"net_MF_{phase_for_ror}")
-                        legend_exclusion_note = _resolve_legend_note(
-                            legend_note_payload,
-                            stream_for_ror,
-                            phase_for_ror,
-                            "zip",
-                        )
-                    plot_two_part_chart(
-                        x_scatter=mle_result['x'], y_scatter=mle_result['y_rate'],
-                        x_line=x_range_ror, mle_y=mle_result['predict'](x_range_ror),
-                        output_path=output_path,
-                        x_label=x_label_full, y_label=f'{y_label} (per 1000 pop)',
-                        data_label=data_label_zip_ror, apr_year_range='',
-                        r2=mle_result['mcfadden_r2'], ols_r2=ols_r2_zip_ror,
-                        boot_ci_lo=boot_ci_lo, boot_ci_hi=boot_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
-                        bayes_mean=bayes_mean,
-                        labels=zip_labels_ror,
-                        also_annotate_second_max_x=True,
-                        legend_exclusion_note=legend_exclusion_note,
-                        mle_beta=float(regression_zip_ror['slope_mle']),
-                        ppm_beta=(
-                            float(np.mean(regression_zip_ror['slope_samples']))
-                            if regression_zip_ror.get('slope_samples') is not None else None
-                        ),
-                    )
             # Outcome×predictor at ZIP: MFH outcomes get zip_mfh_subvariants (baseline, _xsf, _zip_hash, _xsf_zip_hash); non-MFH get baseline only
             for y_col, y_label in zip_outcomes:
                 variants = zip_mfh_subvariants if 'MF' in y_col else [(None, '', None)]
