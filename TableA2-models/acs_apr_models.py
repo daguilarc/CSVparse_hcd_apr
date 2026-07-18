@@ -34,8 +34,6 @@ from chart_prep import (
     full_two_part_curve_matrix as _full_two_part_curve_matrix,
     hierarchy_re_policy as _hierarchy_re_policy,
     income_x_label as _income_x_label,
-    positive_part_line_from_two_part as _positive_part_line_from_two_part,
-    x_sc_for_two_part_xgrid as _x_sc_for_two_part_xgrid,
 )
 
 # Skim: run order is main() (banner # --- Section: main() ---), not top-to-bottom. APR repair: # PARSEFILTER. NHGIS/cache: section below.
@@ -218,10 +216,6 @@ def _has_predictor_meta(x_col):
     return x_col in ECON_META
 
 
-def _predictor_tick_kind(x_col):
-    return _predictor_meta(x_col)["tick_kind"]
-
-
 def _predictor_is_log_x(x_col):
     return bool(_predictor_meta(x_col)["is_log_x"])
 
@@ -391,13 +385,6 @@ HOUSING_META = {
 
 
 # --- Section: Hierarchy policy, R² helpers, date checks ---
-def _x_axis_should_use_percent_ticks(x_col=None, x_label=None):
-    """Single source of truth for percent x-axis formatting across chart paths."""
-    if x_col is not None and _has_predictor_meta(x_col) and _predictor_tick_kind(x_col) == "percent":
-        return True
-    return False
-
-
 def _geo_label(base, exclude_label):
     return f"{base} ({exclude_label})" if exclude_label else base
 
@@ -2205,62 +2192,6 @@ def _fit_binary_stage_two_part(x_1d, z):
         return None
 
 
-def _expand_ci_curve_arrays(ci_result, x_range):
-    """Ensure boot_curve_samples / bayes_curve_samples exist from boot_* / Bayes sample keys + MLE scalars."""
-    out = dict(ci_result) if ci_result else {}
-    if not out:
-        return out
-    x_sc = _x_sc_for_two_part_xgrid(x_range, out.get('x_transform'))
-    am, bm = out.get('alpha_mle'), out.get('beta_mle')
-    gm, dm = out.get('intercept_mle'), out.get('slope_mle')
-    ba, bb = out.get('boot_alpha_samples'), out.get('boot_beta_samples')
-    bi0, bs0 = out.get('boot_intercept_samples'), out.get('boot_slope_samples')
-    if out.get('boot_curve_samples') is None and all(s is not None for s in (ba, bb, bi0, bs0)):
-        ba_a = np.asarray(ba, dtype=np.float64)
-        bb_a = np.asarray(bb, dtype=np.float64)
-        bi_a = np.asarray(bi0, dtype=np.float64)
-        bs_a = np.asarray(bs0, dtype=np.float64)
-        if ba_a.shape[0] == bb_a.shape[0] == bi_a.shape[0] == bs_a.shape[0]:
-            out['boot_curve_samples'] = _full_two_part_curve_matrix(ba_a, bb_a, bi_a, bs_a, x_sc)
-    if out.get('boot_curve_samples') is None and bi0 is not None and bs0 is not None:
-        bi = np.asarray(bi0, dtype=np.float64)
-        bs = np.asarray(bs0, dtype=np.float64)
-        if am is not None and bm is not None and gm is not None and dm is not None and (ba is None or bb is None):
-            n_boot = bi.shape[0]
-            a = np.full(n_boot, float(am), dtype=np.float64)
-            b = np.full(n_boot, float(bm), dtype=np.float64)
-            out['boot_curve_samples'] = _full_two_part_curve_matrix(a, b, bi, bs, x_sc)
-    if out.get('bayes_curve_samples') is None:
-        aks, bks = out.get('alpha_samples'), out.get('beta_samples')
-        iks, sks = out.get('intercept_samples'), out.get('slope_samples')
-        if all(s is not None for s in (aks, bks, iks, sks)):
-            a = np.asarray(aks, dtype=np.float64)
-            b = np.asarray(bks, dtype=np.float64)
-            g = np.asarray(iks, dtype=np.float64)
-            d = np.asarray(sks, dtype=np.float64)
-            out['bayes_curve_samples'] = _full_two_part_curve_matrix(a, b, g, d, x_sc)
-    return out
-
-
-def _extract_ci_band(ci_result, x_range):
-    """CI bands from fit_two_part_with_ci result dict. Boot band = percentiles of boot_curve_samples when present (full or legacy expanded curves); Bayes when samples exist.
-    Returns (boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean)."""
-    if ci_result is None:
-        return (None, None, None, None, None)
-    ci = _expand_ci_curve_arrays(ci_result, x_range)
-    boot_lo = boot_hi = bayes_lo = bayes_hi = bayes_mean = None
-    if ci.get('boot_curve_samples') is not None:
-        bc = np.asarray(ci['boot_curve_samples'], dtype=np.float64)
-        boot_lo = np.percentile(bc, 2.5, axis=0)
-        boot_hi = np.percentile(bc, 97.5, axis=0)
-    if ci.get('bayes_curve_samples') is not None:
-        bc = np.asarray(ci['bayes_curve_samples'], dtype=np.float64)
-        bayes_lo = np.percentile(bc, 2.5, axis=0)
-        bayes_hi = np.percentile(bc, 97.5, axis=0)
-        bayes_mean = np.mean(bc, axis=0)
-    return (boot_lo, boot_hi, bayes_lo, bayes_hi, bayes_mean)
-
-
 def _set_log_dollar_ticks(ax, x_lo, x_hi):
     """Apply dollar-formatted ticks on a log-scale x-axis."""
     x_lo, x_hi = max(float(x_lo), 1.0), max(float(x_hi), float(x_lo) + 1.0)
@@ -2589,95 +2520,6 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
     )
     plt.close(fig)
     print(f"    Saved: {output_path}")
-
-
-def _plot_zip_outcome_two_part_and_optional_positive_ols(
-    main_png_path,
-    x_scatter_display,
-    y_rate,
-    x_line_display,
-    mle_y_line,
-    x_label_full,
-    y_label_chart,
-    data_label,
-    apr_year_range,
-    mcfadden_r2,
-    ols_r2_out,
-    boot_ci_lo,
-    boot_ci_hi,
-    bayes_ci_lo,
-    bayes_ci_hi,
-    bayes_mean,
-    zip_labels,
-    use_log_x,
-    x_tick_dollar,
-    x_tick_percent,
-    x_col,
-    positive_line_y,
-    positive_ols_r2,
-    legend_exclusion_note,
-    mle_beta,
-    ppm_beta,
-):
-    """Main ZIP two-part chart plus optional ZHVI/ZORI % simple-OLS companion (one call site)."""
-    plot_two_part_chart(
-        x_scatter=x_scatter_display,
-        y_scatter=y_rate,
-        x_line=x_line_display,
-        mle_y=mle_y_line,
-        output_path=main_png_path,
-        x_label=x_label_full,
-        y_label=y_label_chart,
-        data_label=data_label,
-        apr_year_range=apr_year_range,
-        r2=mcfadden_r2,
-        ols_r2=ols_r2_out,
-        boot_ci_lo=boot_ci_lo,
-        boot_ci_hi=boot_ci_hi,
-        bayes_ci_lo=bayes_ci_lo,
-        bayes_ci_hi=bayes_ci_hi,
-        bayes_mean=bayes_mean,
-        labels=zip_labels,
-        use_log_x=use_log_x,
-        x_tick_dollar=x_tick_dollar,
-        x_tick_percent=x_tick_percent,
-        also_annotate_second_max_x=True,
-        legend_exclusion_note=legend_exclusion_note,
-        mle_beta=mle_beta,
-        ppm_beta=ppm_beta,
-    )
-    if x_col not in X_COL_PCT_CHANGE_PREDICTORS:
-        return
-    ols_png = main_png_path.with_name(f'{main_png_path.stem}_positive_ols{main_png_path.suffix}')
-    plot_two_part_chart(
-        x_scatter=x_scatter_display,
-        y_scatter=y_rate,
-        x_line=x_line_display,
-        mle_y=mle_y_line,
-        output_path=ols_png,
-        x_label=x_label_full,
-        y_label=y_label_chart,
-        data_label=data_label,
-        apr_year_range=apr_year_range,
-        r2=0.0,
-        ols_r2=None,
-        boot_ci_lo=None,
-        boot_ci_hi=None,
-        bayes_ci_lo=None,
-        bayes_ci_hi=None,
-        bayes_mean=None,
-        labels=zip_labels,
-        use_log_x=use_log_x,
-        x_tick_dollar=x_tick_dollar,
-        x_tick_percent=x_tick_percent,
-        also_annotate_second_max_x=True,
-        positive_ols_simple=True,
-        x_col_for_ols=x_col,
-        positive_line_y=positive_line_y,
-        positive_ols_r2=positive_ols_r2,
-        legend_exclusion_note=legend_exclusion_note,
-        mle_beta=mle_beta,
-    )
 
 
 def _xytext_keep_inside(ax, x_val, y_val=None, label=None):

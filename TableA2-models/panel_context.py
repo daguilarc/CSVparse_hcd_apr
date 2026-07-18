@@ -51,7 +51,7 @@ def prepare_panel_context(base_path: Path | None = None) -> dict[str, Any]:
         df_final,
         df_apr_master,
         df_apr_all,
-        phase_context,
+        _,
         _,
         stream_context,
         exclusion_context,
