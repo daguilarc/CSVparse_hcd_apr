@@ -109,6 +109,16 @@ def _model_views(result: dict, x_model: np.ndarray) -> tuple[dict[str, dict], bo
     posterior = _finite_samples(
         result, ("alpha_samples", "beta_samples", "intercept_samples", "slope_samples")
     )
+    # No-hurdle (continuous) fits never set alpha_samples/beta_samples at all (there is no
+    # zero part) -- mirrors chart_prep.py::build_mle_ci's own intercept/slope-only fallback
+    # (6a2), which is gated the same way: only when alpha/beta are genuinely absent (None),
+    # not merely non-finite. A two_part fit whose alpha/beta *are* present but failed to be
+    # finite (e.g. hierarchical zero-part didn't converge) must still fail closed here --
+    # that's a real hurdle-fit failure, not the no-hurdle case, so it keeps advertising no
+    # hierarchical view at all (same as before this fallback existed).
+    posterior_2s = None
+    if posterior is None and result.get("alpha_samples") is None and result.get("beta_samples") is None:
+        posterior_2s = _finite_samples(result, ("intercept_samples", "slope_samples"))
     if posterior:
         alpha, beta, intercept, slope = posterior
         positive = intercept[:, None] + slope[:, None] * x_model[None, :]
@@ -116,7 +126,16 @@ def _model_views(result: dict, x_model: np.ndarray) -> tuple[dict[str, dict], bo
         ppm_beta = float(np.mean(slope))
         views["two_part_hurdle"]["hierarchical"] = _curve_summary(hurdle, ppm_beta=ppm_beta)
         views["positive_only"]["hierarchical"] = _curve_summary(positive, ppm_beta=ppm_beta)
-    return views, bool(boot), bool(posterior)
+    elif posterior_2s:
+        intercept, slope = posterior_2s
+        positive = intercept[:, None] + slope[:, None] * x_model[None, :]
+        ppm_beta = float(np.mean(slope))
+        # psi = 1.0 (no hurdle term): both views get the same curve, matching
+        # _mle_curve_summary's continuous branch above.
+        summary = _curve_summary(positive, ppm_beta=ppm_beta)
+        views["two_part_hurdle"]["hierarchical"] = summary
+        views["positive_only"]["hierarchical"] = summary
+    return views, bool(boot), bool(posterior or posterior_2s)
 
 
 def _two_part_stats(mle_result: dict) -> dict[str, float | None]:

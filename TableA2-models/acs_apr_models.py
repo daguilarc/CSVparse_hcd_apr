@@ -3708,13 +3708,13 @@ class PairFitResult:
 
     ppm_beta is the hierarchical-Bayes posterior mean beta (mean of slope_samples, when
     present) -- populated for BOTH fit kinds now (two_part's positive-part slope, or
-    continuous's single OLS slope). mle_diag carries the positive-part/zero-hurdle t/p-stats
-    straight off fit_two_part_with_ci's mle_result dict (positive_part_t/p, zero_mle_t/p) for
-    the r2_diagnostics.csv row -- still two_part-only (housing-as-Y), since that CSV row and
-    its zero-hurdle stats have no continuous analogue. r2 may also carry a "positive_ols_r2"
-    key (two_part only) -- the companion-chart R² of the y>0 subset vs. the reused
-    positive-part MLE line; that key is absent for continuous (econ-as-Y) results, which OG
-    does not render.
+    continuous's single OLS slope). mle_diag carries the positive-part t/p-stats straight off
+    the fit's mle_result dict (positive_part_t/p) -- populated for BOTH fit kinds now (Task
+    6c): two_part additionally carries zero_mle_t/p (the zero-hurdle stats); continuous has
+    no hurdle part, so zero_mle_t/p are simply absent from mle_result and .get()-default to
+    None there. r2 may also carry a "positive_ols_r2" key (two_part only) -- the
+    companion-chart R² of the y>0 subset vs. the reused positive-part MLE line; that key is
+    absent for continuous (econ-as-Y) results, which OG does not render.
 
     samples carries the raw posterior/bootstrap sample arrays straight off the fit dict
     (alpha_samples, beta_samples, intercept_samples, slope_samples, boot_alpha_samples,
@@ -3904,9 +3904,9 @@ def _fit_econ_y_pair(pair, frame, label_col):
     intercept_mle = float(ols_fit.params[0])
     slope_mle = float(ols_fit.params[1])
     # No-hurdle continuous model: alpha_mle/beta_mle are fixed at 0.0 (no zero part).
-    # model_family + positive_part_t/p mirror pages/catalog_builder.py::_fit_continuous_pair's
-    # mle_result exactly (same ols_fit object, just reading its already-computed t/p-stats)
-    # so both continuous-fit implementations produce the same record shape.
+    # model_family + positive_part_t/p (Task 6c: this is now the only continuous-fit
+    # implementation -- the former duplicate, pages/catalog_builder.py::_fit_continuous_pair,
+    # has been deleted; build_pages_catalog now serializes this fit's output instead).
     mle_result = {
         "intercept_mle": intercept_mle,
         "slope_mle": slope_mle,
@@ -4032,19 +4032,24 @@ def fit_pairs(df_final, df_zip, df_zip_yearly_long, permit_years, *, max_pairs=N
             slope_samples = fit.get("slope_samples")
             if slope_samples is not None:
                 ppm_beta = float(np.mean(slope_samples))
+            # Positive-part t/p-stats -- both fit kinds now (Task 6c). For two_part these are
+            # fit_two_part_with_ci's positive_part_t/p + the zero-hurdle zero_mle_t/p; for
+            # continuous, _fit_econ_y_pair's mle_result carries positive_part_t/p only (no
+            # hurdle part to a continuous fit, so zero_mle_t/p are simply absent/None via
+            # .get) -- same values _fit_continuous_pair used to compute independently.
+            # Plumbing only: reads already-computed values off mle_result, no fit re-runs.
+            mle_result = fit.get("mle_result")
+            if mle_result is not None:
+                mle_diag = {
+                    "positive_part_t": mle_result.get("positive_part_t"),
+                    "positive_part_p": mle_result.get("positive_part_p"),
+                    "zero_mle_t": mle_result.get("zero_mle_t"),
+                    "zero_mle_p": mle_result.get("zero_mle_p"),
+                }
             if not is_econ_y:
-                # two_part (housing-as-Y) only: carry the positive-part/zero-hurdle t/p-stats
-                # (from the raw mle_result fit_two_part_with_ci returns) and the positive-OLS
-                # companion R² (a closed-form R² of the y>0 subset against the already-fit
-                # positive-part MLE line -- no refit). None of this re-runs any fit.
-                mle_result = fit.get("mle_result")
-                if mle_result is not None:
-                    mle_diag = {
-                        "positive_part_t": mle_result.get("positive_part_t"),
-                        "positive_part_p": mle_result.get("positive_part_p"),
-                        "zero_mle_t": mle_result.get("zero_mle_t"),
-                        "zero_mle_p": mle_result.get("zero_mle_p"),
-                    }
+                # two_part (housing-as-Y) only: the positive-OLS companion R² (a closed-form
+                # R² of the y>0 subset against the already-fit positive-part MLE line -- no
+                # refit). OG has no continuous analogue of this companion chart.
                 r2["positive_ols_r2"] = _r2_positive_subset_vs_mle_line(
                     fit["x_data"], fit["y_data"], fit["intercept_mle"], fit["slope_mle"],
                 )

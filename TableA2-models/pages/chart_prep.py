@@ -127,8 +127,8 @@ def build_mle_ci(result, x_range_raw):
     x_sc = x_sc_for_two_part_xgrid(x_range_raw, result.get("x_transform"))
     eta = result["intercept_mle"] + result["slope_mle"] * x_sc
     # Continuous (no-hurdle) fits carry alpha_mle/beta_mle == 0.0 as dummy placeholders
-    # (see acs_apr_models.py::_fit_econ_y_pair / catalog_builder.py::_fit_continuous_pair --
-    # neither has a zero-inflation part). Applying expit(0)=0.5 to those dummies would halve
+    # (see acs_apr_models.py::_fit_econ_y_pair, the sole continuous-fit implementation as of
+    # Task 6c -- it has no zero-inflation part). Applying expit(0)=0.5 to those dummies would halve
     # the curve/bands. Detect the no-hurdle case via model_family (mirrors
     # export.py::_mle_curve_summary's `model_family == "continuous"` branch) and skip the
     # hurdle scaling entirely: psi=1.0, so mle_y/bootstrap/Bayes bands are the raw OLS line
