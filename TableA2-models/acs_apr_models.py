@@ -179,6 +179,7 @@ ECON_META = {
     "zori_pct_afford": {
         "display_label": ZORI_PCT_AFFORD_X_LABEL,
         "print_title": "ZORI (Zillow Observed Rent Index) real $ change / income",
+        "file_tag": "zori_pct_afford",
         "tick_kind": "percent",
         "is_log_x": False,
         "allow_negative_x": True,
@@ -195,6 +196,7 @@ for _zhvi_tier in ZHVI_TIERS:
     ECON_META[_zhvi_tier_pct_afford_col(_zhvi_key)] = {
         "display_label": _zhvi_pct_afford_label(_zhvi_lbl, _zhvi_tier["pca_index_name"]),
         "print_title": f"{_zhvi_tier['pca_index_name']} / MSA income",
+        "file_tag": f"pct_afford_{_zhvi_key}",
         "tick_kind": "percent",
         "is_log_x": False,
         "allow_negative_x": True,
