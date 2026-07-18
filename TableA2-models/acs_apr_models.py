@@ -2385,7 +2385,8 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
                         also_annotate_second_max_x=False,
                         positive_ols_simple=False, x_col_for_ols=None,
                         positive_line_y=None, positive_ols_r2=None,
-                        legend_exclusion_note=None, mle_beta=None, ppm_beta=None):
+                        legend_exclusion_note=None, mle_beta=None, ppm_beta=None,
+                        continuous_y=False, y_tick_percent=False):
     """Unified two-part regression chart. Scatter always filtered to y > 0.
     x_scatter, y_scatter: raw data arrays (same length; y=0 rows excluded from scatter).
     x_line, mle_y: MLE curve arrays in display space.
@@ -2393,7 +2394,15 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
     bayes_mean: if not None, plot posterior predictive mean line (Hierarchical Bayes).
     ols_r2: if finite, second legend line for OLS R² on y>0 subset (same x scaling as scatter).
     x_tick_dollar/percent/days: mutually exclusive x-axis formatting flags.
-    positive_ols_simple: if True, only scatter + positive-part line from two-part fit (no MLE/CI/Bayes/McFadden)."""
+    positive_ols_simple: if True, only scatter + positive-part line from two-part fit (no MLE/CI/Bayes/McFadden).
+    continuous_y: econ-as-Y variant, only meaningful when positive_ols_simple=True (Task 6b). Keeps the
+    full scatter (no y>0 filter -- econ outcomes can be negative), sets ylim from the actual data range
+    (allow negative, no floor at 0), draws the boot_ci/bayes_ci bands via the shared _draw_ci_bands_on_ax
+    primitive when supplied, and labels the line as a plain OLS fit rather than 'reused from two-part
+    fit'. Defaults to False and has no effect on the two_part path or on positive_ols_simple's existing
+    housing-Y companion chart -- that output is unchanged.
+    y_tick_percent: format the Y axis as a percent (continuous/econ-Y only; two_part Y is always a count,
+    so this stays False there)."""
     if positive_ols_simple:
         if positive_line_y is None:
             raise ValueError("positive_ols_simple requires positive_line_y from two-part fit output")
@@ -2401,14 +2410,25 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
         ols_r2_simple = positive_ols_r2
         setup_chart_style()
         fig, ax = _fig_ax_square_plot()
-        nz = y_scatter > 0
+        if continuous_y:
+            nz = np.ones(len(y_scatter), dtype=bool)
+        else:
+            nz = y_scatter > 0
         x_nz, y_nz = x_scatter[nz], y_scatter[nz]
         labels_nz = labels[nz] if labels is not None else None
         scatter_suffix = f'n={len(x_scatter)}'
         beta_str = _format_beta_for_legend(mle_beta)
+        line_label = (
+            f'OLS line (continuous fit)\nβ = {beta_str}' if continuous_y
+            else f'Positive-part MLE line\n(reused from two-part fit)\nβ = {beta_str}'
+        )
         ols_line_handle, = ax.plot(
             x_line, y_ols_line, color='#1d4ed8', linewidth=2,
-            label=f'Positive-part MLE line\n(reused from two-part fit)\nβ = {beta_str}',
+            label=line_label,
+        )
+        ci_patch = (
+            _draw_ci_bands_on_ax(ax, x_line, boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi)
+            if continuous_y else None
         )
         scatter_label = f'{data_label}\n({scatter_suffix})'
         if legend_exclusion_note:
@@ -2420,12 +2440,20 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
         r2_ols_handle = None
         if ols_r2_simple is not None and np.isfinite(ols_r2_simple):
             ols_str = f'{ols_r2_simple:.2e}' if abs(ols_r2_simple) < 0.001 else f'{ols_r2_simple:.3f}'
-            r2_ols_handle, = ax.plot([], [], ' ', label=f"R² (y>0 vs positive-part line) = {ols_str}")
+            r2_label = 'OLS R²' if continuous_y else 'R² (y>0 vs positive-part line)'
+            r2_ols_handle, = ax.plot([], [], ' ', label=f"{r2_label} = {ols_str}")
         ax.set_xlim(x_line.min(), x_line.max())
         if use_log_x:
             ax.set_xscale('log')
-        y_max = (np.max(y_nz) if len(y_nz) > 0 else 1) * 1.05
-        ax.set_ylim(0, y_max)
+        if continuous_y:
+            y_lo = float(np.min(y_nz)) if len(y_nz) > 0 else 0.0
+            y_hi = float(np.max(y_nz)) if len(y_nz) > 0 else 1.0
+            y_span = y_hi - y_lo
+            y_pad = y_span * 0.05 if y_span > 0 else max(abs(y_hi), 1.0) * 0.05
+            ax.set_ylim(y_lo - y_pad, y_hi + y_pad)
+        else:
+            y_max = (np.max(y_nz) if len(y_nz) > 0 else 1) * 1.05
+            ax.set_ylim(0, y_max)
         ann_list = []
         if labels_nz is not None and len(labels_nz) > 0:
             cleanup = label_cleanup or (lambda s: str(s))
@@ -2443,7 +2471,10 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
         ax.set_xlabel(x_label)
         ax.set_ylabel(y_label)
         ax.set_title('')
-        handles = [ols_line_handle, scatter_handle] + ([r2_ols_handle] if r2_ols_handle is not None else [])
+        handles = [ols_line_handle]
+        if ci_patch is not None:
+            handles += ci_patch if isinstance(ci_patch, list) else [ci_patch]
+        handles += [scatter_handle] + ([r2_ols_handle] if r2_ols_handle is not None else [])
         leg = ax.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False)
         x_lo, x_hi = float(x_line.min()), float(x_line.max())
         if use_log_x and x_tick_dollar:
@@ -2462,7 +2493,10 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
         else:
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
             ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune="lower"))
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:,.0f}'))
+        if y_tick_percent:
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:.1f}%'))
+        else:
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:,.0f}'))
         fig.savefig(
             output_path,
             dpi=150,
@@ -6026,6 +6060,101 @@ def _render_two_part_results(fit_results, geography, output_dir, legend_note_pay
                 charts_skipped_low_r2.append((chart_id, result.r2["mcfadden_r2"]))
             continue
         _draw_two_part_pair_png(result, output_dir, legend_note_payload, apr_year_range)
+
+
+# --- Section: continuous (econ-as-Y) PairFitResult renderer (Task 6b) ---
+# Econ-as-Y results (fit_kind == "continuous") reuse plot_two_part_chart's positive_ols_simple
+# drawing (continuous_y=True), rather than a new chart engine: same scatter/line/legend/CI-band
+# primitives (_draw_ci_bands_on_ax), adapted for a possibly-negative percent outcome. No fit
+# happens here -- pure consumption of fit_pairs' precomputed chart_arrays.
+
+
+def _continuous_pair_chart_id(result):
+    """Filename stem for one continuous (econ-as-Y) PairFitResult.
+
+    y_render_meta['file_tag'] is always None for ECON_META columns (see _render_meta), and
+    y_col here is an econ column, not a housing-provenance one -- parse_city_outcome /
+    parse_zip_outcome (used by _two_part_pair_chart_id) assume the latter and would raise on
+    the former. So this uses the raw econ y_col directly (lowercased) instead, with a
+    dedicated 'econy_' segment so the filename can never collide with a two_part chart_id
+    that happens to share the same x_col."""
+    is_zip = result.geography == "zip"
+    y_tag = result.y_col.lower()
+    x_tag = result.x_render_meta.get("file_tag") or result.x_col
+    robustness_tag = "" if result.robustness == "none" else ("_zip_hash" if is_zip else "_city_hash")
+    return f"{'zip_' if is_zip else ''}econy_{y_tag}_{x_tag}{robustness_tag}"
+
+
+def _draw_continuous_econ_y_png(result, output_dir, apr_year_range):
+    """Draw one continuous (econ-as-Y) PairFitResult's PNG from its precomputed chart_arrays.
+
+    Reuses plot_two_part_chart's positive_ols_simple drawing via continuous_y=True: full
+    scatter (no y>0 filter -- econ outcomes can be negative), ylim spanning the actual data
+    (no floor at 0), a percent Y formatter when y_render_meta calls for one, and the
+    continuous mle_y line (== the positive-part line for a no-hurdle fit, see
+    chart_prep.build_mle_ci's is_continuous branch) plus the boot_ci/bayes_ci bands
+    (populated for continuous fits since Task 6a2) drawn through the shared
+    _draw_ci_bands_on_ax primitive. No fitting here.
+    """
+    is_zip = result.geography == "zip"
+    ca = result.chart_arrays
+    y_label = result.y_render_meta["display_label"]
+    tick_kind = result.x_render_meta.get("tick_kind")
+    is_log_x = bool(ca.get("is_log_x"))
+    x_tick_dollar = is_log_x and tick_kind != "days"
+    x_tick_days = is_log_x and tick_kind == "days"
+    x_tick_percent = (not is_log_x) and tick_kind == "percent"
+    y_tick_percent = result.y_render_meta.get("tick_kind") == "percent"
+    data_label = CHART_LEGEND_GEO_ZIP if is_zip else CHART_LEGEND_GEO_CITY
+    chart_id = _continuous_pair_chart_id(result)
+    output_path = output_dir / f"{chart_id}.png"
+    label_cleanup = lambda s: str(s).replace(' COUNTY', '')
+    plot_two_part_chart(
+        x_scatter=ca["x_scatter_plot"], y_scatter=ca["y_scatter"],
+        x_line=ca["x_line_plot"], mle_y=ca["mle_y"],
+        output_path=output_path,
+        x_label=ca["x_label"], y_label=y_label,
+        data_label=data_label, apr_year_range=apr_year_range,
+        r2=0.0, ols_r2=None,
+        boot_ci_lo=ca["boot_ci_lo"], boot_ci_hi=ca["boot_ci_hi"],
+        bayes_ci_lo=ca["bayes_ci_lo"], bayes_ci_hi=ca["bayes_ci_hi"],
+        bayes_mean=ca["bayes_mean"],
+        labels=ca.get("labels"), label_cleanup=label_cleanup,
+        use_log_x=is_log_x,
+        x_tick_dollar=x_tick_dollar, x_tick_percent=x_tick_percent, x_tick_days=x_tick_days,
+        also_annotate_second_max_x=is_zip,
+        positive_ols_simple=True, x_col_for_ols=result.x_col,
+        positive_line_y=ca["mle_y"], positive_ols_r2=result.r2.get("ols_rsquared"),
+        mle_beta=float(result.coeffs["slope_mle"]),
+        continuous_y=True, y_tick_percent=y_tick_percent,
+    )
+
+
+def _render_continuous_results(fit_results, geography, output_dir, charts_skipped_low_r2, all_r2_results, apr_year_range):
+    """Draw PNGs for every fit_kind == 'continuous' (econ-as-Y) PairFitResult at one
+    geography; track low-R² skips. Sibling of _render_two_part_results, sharing its
+    r2-gate/skip-tracking shape (gated on r2_gate_passed, which fit_pairs already computed
+    from the OLS R² threshold for continuous fits).
+
+    No r2_diagnostics row is appended: _append_pair_r2_diagnostics_row unconditionally reads
+    result.r2['mcfadden_r2'] (float(None) -> TypeError for a continuous fit, which has no
+    zero-hurdle/McFadden component at all), so it does not support continuous results as-is.
+    Rather than fabricate a McFadden value or two-part-only fields that don't exist for an
+    OLS-only fit, continuous rows are simply skipped here (all_r2_results is accepted for
+    signature parity with _render_two_part_results but unused). Pure consumption of
+    fit_pairs output -- no fitting.
+    """
+    for result in fit_results:
+        if result.geography != geography or result.fit_kind != "continuous":
+            continue
+        if result.coeffs is None or result.chart_arrays is None:
+            continue
+        if not result.r2_gate_passed:
+            if charts_skipped_low_r2 is not None:
+                chart_id = _continuous_pair_chart_id(result)
+                charts_skipped_low_r2.append((chart_id, result.r2.get("ols_rsquared")))
+            continue
+        _draw_continuous_econ_y_png(result, output_dir, apr_year_range)
 
 
 def _run_city_regressions(fit_results, legend_note_payload, charts_skipped_low_r2, all_r2_results, city_charts_dir, permit_years):

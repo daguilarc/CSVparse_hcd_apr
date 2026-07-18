@@ -5,6 +5,7 @@ from __future__ import annotations
 from acs_apr_models import (
     R2_DIAG_COLUMNS,
     R2_THRESHOLD,
+    _render_continuous_results,
     _run_city_regressions,
     _run_zip_regressions,
     fit_pairs,
@@ -15,8 +16,9 @@ from acs_apr_models import (
 def build_original_models(ctx):
     """Run Steps 12-13 + r2 diagnostics from precomputed panel context.
 
-    fit_pairs runs exactly once here; both renderers (_run_city_regressions,
-    _run_zip_regressions) only draw PNGs from its result list, never fit."""
+    fit_pairs runs exactly once here; the renderers (_run_city_regressions,
+    _run_zip_regressions for fit_kind == 'two_part', _render_continuous_results for
+    fit_kind == 'continuous') only draw PNGs from its result list, never fit."""
     charts_skipped_low_r2 = []
     all_r2_results = ctx["all_r2_results"]
     base_output_dir = ctx["base_output_dir"]
@@ -65,6 +67,16 @@ def build_original_models(ctx):
         panels_only=False,
         fit_results=fit_results,
         permit_years=ctx["permit_years"],
+    )
+
+    # Econ-as-Y (fit_kind == "continuous") charts: same one fit_pairs pass, other direction.
+    permit_years = ctx["permit_years"]
+    apr_year_range = f"{min(permit_years)}-{max(permit_years)}" if permit_years else ""
+    _render_continuous_results(
+        fit_results, "city", city_charts_dir, charts_skipped_low_r2, all_r2_results, apr_year_range,
+    )
+    _render_continuous_results(
+        fit_results, "zip", zip_charts_dir, charts_skipped_low_r2, all_r2_results, apr_year_range,
     )
 
     if all_r2_results:
