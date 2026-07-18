@@ -307,11 +307,6 @@ ROR_LABEL_MF_INC_CO = "Multifamily Non-Bonus Inclusionary Certificates of Occupa
 ROR_LABEL_OWNER_CO = "Owner Certificates of Occupancy"
 ROR_LABEL_MF_OWNER_CO = "Multifamily Owner Certificates of Occupancy"
 ROR_LABEL_VLOW_LOW_CO = "Multifamily (Very low + Low) Income Certificates of Occupancy"
-ROR_LABEL_NET_MF_BP = "Net Multifamily Building Permits"
-ROR_LABEL_MF_DR_DB_BP = "Multifamily Deed-Restricted Density-Bonus Building Permits"
-ROR_LABEL_MF_DB_BP = "Multifamily Density-Bonus Building Permits"
-ROR_LABEL_OWNER_BP = "Owner Building Permits"
-ROR_LABEL_MF_OWNER_BP = "Multifamily Owner Building Permits"
 
 # Moderate-income CO sum: deed-restricted MOD_INCOME_DR only (excludes NDR).
 MODERATE_INCOME_COMPLETIONS_LABEL = (
@@ -2685,127 +2680,6 @@ def _plot_zip_outcome_two_part_and_optional_positive_ols(
     )
 
 
-def _zip_outcome_predictor_fit_ci_and_charts(
-    df_v,
-    y_col,
-    y_label,
-    x_col,
-    x_tag,
-    x_axis_label,
-    use_log_x,
-    x_tick_dollar,
-    require_msa,
-    suffix,
-    exclude_label,
-    df_zip_yearly_long,
-    all_r2_results,
-    charts_skipped_low_r2,
-    chart_parent_dir,
-    legend_exclusion_note=None,
-):
-    """ZIP outcome×predictor: MLE, CI, R² row, and chart emission (inner body of triple loop)."""
-    use_zips = set(df_v['zipcode'].astype(str).str.zfill(5))
-    print(f"\n  --- {y_label} vs {'raw ' + x_col if not use_log_x else 'log(' + x_col + ')'}{suffix or ''} ---")
-    pred_filter = (
-        (lambda zy_df: (zy_df[x_col].notna() & np.isfinite(zy_df[x_col].values)))
-        if not use_log_x
-        else (lambda zy_df: (zy_df[x_col].notna() & (zy_df[x_col] > 0)))
-    )
-    zy = _filter_jurisdiction_panel(
-        df_zip_yearly_long, 'zipcode', use_zips, x_col, y_col, predicate=pred_filter,
-    )
-    if zy.empty:
-        return
-    zy['y_rate'] = _rate_per_1000(zy[y_col].values.astype(float), zy['population'].values.astype(float))
-    df_yearly_zip = zy[['year', 'county', 'population', x_col, 'y_rate']].copy()
-    zip_years_out = sorted(df_yearly_zip['year'].dropna().unique().astype(int).tolist())
-    if not zip_years_out:
-        return
-    df_totals_zip = df_v[['zipcode', 'county', 'population']].copy().reset_index(drop=True)
-    df_totals_zip[x_col] = df_v[x_col].values.astype(float)
-    df_totals_zip['y_rate'] = _rate_per_1000(
-        df_v[y_col].values.astype(float), df_v['population'].values.astype(float),
-    )
-    geography_zip = _geo_label(GEOGRAPHY_ZIP, exclude_label)
-    chart_id_zip_out = f"zip_{y_col.replace('total_', '')}_{x_tag}{suffix or ''}"
-    regression_zip_out = fit_two_part_with_ci(
-        df_totals_zip, df_yearly_zip, x_col, 'y_rate', zip_years_out,
-        log_x=use_log_x, y_is_rate=True, rate_precomputed=True,
-        x_varies_by_year=False, county_col='county', label_col='zipcode',
-        skipped_low_r2=charts_skipped_low_r2, chart_id=chart_id_zip_out,
-        r2_diagnostics=all_r2_results,
-        r2_x_label=x_axis_label,
-        r2_y_label=f"{y_label} (per 1000 pop)",
-        r2_geography=geography_zip,
-    )
-    if regression_zip_out is None:
-        return
-    filter_note = "Metro Regions only" if require_msa else None
-    data_label_zip_out = (
-        f"{CHART_LEGEND_GEO_ZIP} {exclude_label}" if exclude_label else CHART_LEGEND_GEO_ZIP
-    )
-    mle_result = regression_zip_out['mle_result']
-    x_range_ror = np.linspace(
-        float(np.nanmin(regression_zip_out['x_data'])),
-        float(np.nanmax(regression_zip_out['x_data'])),
-        100,
-    )
-    x_disp_ols = np.exp(mle_result['x']) if use_log_x else mle_result['x']
-    boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = _extract_ci_band(
-        regression_zip_out, x_range_ror,
-    )
-    ols_r2_zip_out = regression_zip_out.get('ols_rsquared')
-    file_tag = f'{y_col.replace("total_", "")}_{x_tag}{suffix}'
-    output_path = chart_parent_dir / f'zip_{file_tag}.png'
-    zip_labels = regression_zip_out.get('jurisdictions')
-    x_scatter_display = x_disp_ols
-    x_line_display = np.exp(x_range_ror) if use_log_x else x_range_ror
-    positive_line_y = _positive_part_line_from_two_part(
-        x_range_ror,
-        float(mle_result['intercept_mle']),
-        float(mle_result['slope_mle']),
-    )
-    r2_mle_line_zip = _r2_positive_subset_vs_mle_line(
-        mle_result['x'], mle_result['y_rate'],
-        float(mle_result['intercept_mle']), float(mle_result['slope_mle']),
-    )
-    if filter_note:
-        x_label_full = f'{x_axis_label}\n{filter_note}'
-    else:
-        x_label_full = x_axis_label
-    _plot_zip_outcome_two_part_and_optional_positive_ols(
-        output_path,
-        x_scatter_display,
-        mle_result['y_rate'],
-        x_line_display,
-        mle_result['predict'](x_range_ror),
-        x_label_full,
-        f'{y_label} (per 1000 pop)',
-        data_label_zip_out,
-        '',
-        mle_result['mcfadden_r2'],
-        ols_r2_zip_out,
-        boot_ci_lo,
-        boot_ci_hi,
-        bayes_ci_lo,
-        bayes_ci_hi,
-        bayes_mean,
-        zip_labels,
-        use_log_x,
-        x_tick_dollar,
-        _x_axis_should_use_percent_ticks(x_col, x_axis_label),
-        x_col,
-        positive_line_y,
-        r2_mle_line_zip,
-        legend_exclusion_note,
-        float(mle_result['slope_mle']),
-        (
-            float(np.mean(regression_zip_out['slope_samples']))
-            if regression_zip_out.get('slope_samples') is not None else None
-        ),
-    )
-
-
 def _xytext_keep_inside(ax, x_val, y_val=None, label=None):
     """Offset (dx, dy) in points so annotation text stays inside plot area.
     If label is provided, uses its length to keep the full text box inside (avoids labels spilling past the right/top edge)."""
@@ -3706,22 +3580,6 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
     return out
 
 
-def fit_two_part_for_pages(df_totals, df_yearly, x_col, y_col, years, **kwargs):
-    """Pages/Jupyter export: MLE + CI without publication R² chart gates."""
-    return fit_two_part_with_ci(
-        df_totals,
-        df_yearly,
-        x_col,
-        y_col,
-        years,
-        skipped_low_r2=None,
-        chart_id=None,
-        r2_diagnostics=None,
-        skip_r2_chart_gate=True,
-        **kwargs,
-    )
-
-
 # --- Section: fit_pairs (single fit pass over the bipartite pair registry) ---
 # Fit kind is keyed off which provenance set the Y variable belongs to (a single branch),
 # never a per-variable flag: housing-as-Y always runs the two-part MLE engine
@@ -3789,7 +3647,7 @@ def _render_meta(col, geography):
             "display_label": meta["display_label"],
             "tick_kind": meta["tick_kind"],
             "is_log_x": meta["is_log_x"],
-            "file_tag": None,
+            "file_tag": meta.get("file_tag"),
         }
     from pages.pair_registry import parse_city_outcome, parse_zip_outcome
 
@@ -4210,160 +4068,6 @@ def _round_dollar_ticks_from_range(x_lo, x_hi, max_ticks=8):
     if ticks[-1] < x_hi and len(ticks) < max_ticks:
         ticks.append(int(x_hi))
     return ticks[:max_ticks]
-
-
-def _plot_income_chart(result, output_path, title_suffix, acs_year_range, apr_year_range, data_label,
-                       positive_ols_simple=False, x_col_for_ols=None, legend_exclusion_note=None):
-    """Chart for income/ZHVI/afford regressions: builds labels, computes MLE/CI, delegates to plot_two_part_chart."""
-    income_label = result.get('income_label', 'County Income')
-    x_is_days = 'days' in income_label.lower()
-    arrays = build_chart_arrays(result, income_label, acs_year_range)
-    x_label = arrays['x_label']
-    y_label = f'{title_suffix} per 1000 pop'
-    x_scatter_plot = arrays['x_scatter_plot']
-    x_line_plot = arrays['x_line_plot']
-    is_log_x = arrays['is_log_x']
-    if positive_ols_simple:
-        positive_line_y = arrays['positive_line_y']
-        r2_mle_line = _r2_positive_subset_vs_mle_line(
-            result['x_data'], result['y_data'],
-            float(result['intercept_mle']), float(result['slope_mle']),
-        )
-        plot_two_part_chart(
-            x_scatter=x_scatter_plot, y_scatter=result['y_data'],
-            x_line=x_line_plot, mle_y=np.zeros_like(x_line_plot),
-            output_path=output_path,
-            x_label=x_label, y_label=y_label,
-            data_label=data_label, apr_year_range=apr_year_range,
-            r2=0.0, ols_r2=None,
-            boot_ci_lo=None, boot_ci_hi=None, bayes_ci_lo=None, bayes_ci_hi=None,
-            bayes_mean=None,
-            labels=result.get('jurisdictions'),
-            label_cleanup=lambda s: str(s).replace(' COUNTY', ''),
-            use_log_x=is_log_x,
-            x_tick_dollar=is_log_x and not x_is_days,
-            x_tick_percent=(not is_log_x and _x_axis_should_use_percent_ticks(x_col_for_ols, income_label)),
-            x_tick_days=is_log_x and x_is_days,
-            positive_ols_simple=True,
-            x_col_for_ols=x_col_for_ols,
-            positive_line_y=positive_line_y,
-            positive_ols_r2=r2_mle_line,
-            legend_exclusion_note=legend_exclusion_note,
-            mle_beta=float(result['slope_mle']),
-        )
-        return
-    mle_y = arrays['mle_y']
-    boot_ci_lo = arrays['boot_ci_lo']
-    boot_ci_hi = arrays['boot_ci_hi']
-    bayes_ci_lo = arrays['bayes_ci_lo']
-    bayes_ci_hi = arrays['bayes_ci_hi']
-    bayes_mean = arrays['bayes_mean']
-    plot_two_part_chart(
-        x_scatter=x_scatter_plot, y_scatter=result['y_data'],
-        x_line=x_line_plot, mle_y=mle_y,
-        output_path=output_path,
-        x_label=x_label, y_label=y_label,
-        data_label=data_label, apr_year_range=apr_year_range,
-        r2=result['mcfadden_r2'],
-        ols_r2=result.get('ols_rsquared'),
-        boot_ci_lo=boot_ci_lo, boot_ci_hi=boot_ci_hi, bayes_ci_lo=bayes_ci_lo, bayes_ci_hi=bayes_ci_hi,
-        bayes_mean=bayes_mean,
-        labels=result.get('jurisdictions'),
-        label_cleanup=lambda s: str(s).replace(' COUNTY', ''),
-        use_log_x=is_log_x,
-        x_tick_dollar=is_log_x and not x_is_days,
-        x_tick_percent=(not is_log_x and _x_axis_should_use_percent_ticks(x_col_for_ols, income_label)),
-        x_tick_days=is_log_x and x_is_days,
-        legend_exclusion_note=legend_exclusion_note,
-        mle_beta=float(result['slope_mle']),
-        ppm_beta=(
-            float(np.mean(result['slope_samples']))
-            if result.get('slope_samples') is not None else None
-        ),
-    )
-
-
-def run_one_regression(df_geo, dr_type, type_label, geo_label, x_col, file_tag, cat_suffix, cat_label, years,
-                       output_dir, skipped_low_r2=None, label_col='JURISDICTION', x_axis_filter_note=None,
-                       r2_diagnostics=None, r2_geography=None, legend_exclusion_note=None):
-    """Run two-part regression for one (dr_type, geo, category); plot if fit succeeds.
-    label_col: column for chart dot labels (e.g. 'JURISDICTION' for cities). Hierarchy always uses 'county'."""
-    cat_prefix = f'{dr_type}_{cat_suffix}'
-    total_col = f'{cat_prefix}_total'
-    if total_col not in df_geo.columns:
-        print(f"    No {total_col} column found, skipping")
-        return
-    if label_col not in df_geo.columns:
-        print(f"    No {label_col} column found, skipping")
-        return
-    if 'county' not in df_geo.columns:
-        print(f"    No 'county' column found, skipping (required for hierarchy)")
-        return
-    yearly_cols = [y for y in years if f'{cat_prefix}_{y}' in df_geo.columns]
-    if not yearly_cols:
-        print(f"    No yearly data found, skipping")
-        return
-    keep_cols = [label_col, 'county', x_col, 'population']
-    df_totals = df_geo[keep_cols + [total_col]].rename(columns={total_col: 'units'})
-    df_yearly = _melt_jurisdiction_years(
-        df_geo, keep_cols, yearly_cols,
-        lambda d, y: {'units': d[f'{cat_prefix}_{y}']},
-    )
-    if df_yearly.empty:
-        print(f"    No yearly rows after melt, skipping")
-        return
-    print(f"    MLE on {len(df_totals)} {geo_label.lower()} (totals), hierarchical on {len(df_yearly)} {geo_label.lower()}-year obs")
-    if len(df_totals) < 10:
-        print(f"    Insufficient data ({len(df_totals)} jurisdictions)")
-        return
-    file_prefix = 'net' if dr_type == 'TOTAL' else ('net_mf' if dr_type == 'TOTAL_MF' else dr_type.lower())
-    chart_id = f"{file_prefix}_{cat_suffix}_{file_tag}"
-    phase_count_label = PHASE_COUNT_LABEL_BY_TAG.get(cat_suffix, cat_label)
-    pcl = phase_count_label.lower()
-    if dr_type == "TOTAL" and cat_suffix in PHASE_COUNT_LABEL_BY_TAG:
-        title_suffix = f"Net housing {pcl} (all housing)"
-    elif dr_type == "TOTAL_MF" and cat_suffix in PHASE_COUNT_LABEL_BY_TAG:
-        title_suffix = f"Net multifamily {pcl}"
-    else:
-        title_suffix = f"{type_label} {cat_label}"
-    regression_results = fit_two_part_with_ci(
-        df_totals, df_yearly, x_col, 'units', years,
-        log_x=_predictor_is_log_x(x_col),
-        skipped_low_r2=skipped_low_r2, chart_id=chart_id if skipped_low_r2 is not None else None,
-        county_col='county', label_col=label_col,
-        x_varies_by_year=False,
-        r2_diagnostics=r2_diagnostics,
-        r2_x_label=_predictor_display_label(x_col) if r2_diagnostics is not None else None,
-        r2_y_label=title_suffix if r2_diagnostics is not None else None,
-        r2_geography=r2_geography,
-    )
-    if not regression_results:
-        return
-    regression_results['income_label'] = _predictor_display_label(x_col)
-    if x_axis_filter_note is not None:
-        regression_results['x_axis_filter_note'] = x_axis_filter_note
-    _plot_income_chart(
-        regression_results,
-        output_dir / f'{file_prefix}_{cat_suffix.lower()}_{file_tag}.png',
-        title_suffix=title_suffix,
-        acs_year_range='2020-2024',
-        apr_year_range=f'{min(years)}-{max(years)}',
-        data_label=geo_label,
-        x_col_for_ols=x_col,
-        legend_exclusion_note=legend_exclusion_note,
-    )
-    if _predictor_positive_ols_companion(x_col):
-        _plot_income_chart(
-            regression_results,
-            output_dir / f'{file_prefix}_{cat_suffix.lower()}_{file_tag}_positive_ols.png',
-            title_suffix=title_suffix,
-            acs_year_range='2020-2024',
-            apr_year_range=f'{min(years)}-{max(years)}',
-            data_label=geo_label,
-            positive_ols_simple=True,
-            x_col_for_ols=x_col,
-            legend_exclusion_note=legend_exclusion_note,
-        )
 
 
 # --- Section: XSF mask & pipeline stages before main() ---
@@ -5567,7 +5271,6 @@ def _prepare_apr_db_inc(
     df_apr_master,
     df_apr_all,
     mf_mask_all,
-    phase_context,
     owner_net_city,
     is_city_all,
     base_output_dir,
@@ -5921,9 +5624,8 @@ _ROBUSTNESS_GEO_LABEL = {
 def _two_part_pair_chart_id(result, dr_type, cat_suffix):
     """Filename stem (and r2-diagnostics chart id) for one two_part PairFitResult.
     Predictor (x_col) segment uses x_render_meta's file_tag when available (abbreviated
-    tag, matching pre-6b naming); ECON_META currently defines no file_tag entries, so this
-    falls back to the raw x_col for every predictor OG renders today -- a no-op in practice
-    until ECON_META gains file_tag values, at which point this picks them up automatically."""
+    tag, matching pre-6b naming); falls back to the raw x_col only for predictors whose
+    ECON_META entry omits file_tag."""
     is_zip = result.geography == "zip"
     file_prefix = result.y_render_meta.get("file_tag") or dr_type.lower()
     x_tag = result.x_render_meta.get("file_tag") or result.x_col
@@ -6072,7 +5774,6 @@ def _render_two_part_results(fit_results, geography, output_dir, legend_note_pay
 def _continuous_pair_chart_id(result):
     """Filename stem for one continuous (econ-as-Y) PairFitResult.
 
-    y_render_meta['file_tag'] is always None for ECON_META columns (see _render_meta), and
     y_col here is an econ column, not a housing-provenance one -- parse_city_outcome /
     parse_zip_outcome (used by _two_part_pair_chart_id) assume the latter and would raise on
     the former. So this uses the raw econ y_col directly (lowercased) instead, with a

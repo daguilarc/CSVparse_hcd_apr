@@ -126,8 +126,12 @@ class CatalogContractTests(unittest.TestCase):
         with mock.patch.object(acs_apr_models, "mle_two_part", return_value=mle) as mle_mock, \
              mock.patch.object(acs_apr_models, "hierarchical_ci", return_value=posterior) as hierarchy_mock, \
              mock.patch.object(acs_apr_models, "_stationary_bootstrap_sorted_xy", return_value=bootstrap_rows) as bootstrap_mock:
-            result = acs_apr_models.fit_two_part_for_pages(
-                totals, yearly, "x", "y", [2024], log_x=False, county_col="county", label_col="label"
+            # fit_two_part_with_ci with skip_r2_chart_gate=True is the live "pages" fit path
+            # (used by _fit_housing_y_city/_fit_housing_y_zip): MLE + CI without publication
+            # R2 chart gates, matching the now-deleted fit_two_part_for_pages wrapper's intent.
+            result = acs_apr_models.fit_two_part_with_ci(
+                totals, yearly, "x", "y", [2024], log_x=False, county_col="county", label_col="label",
+                skip_r2_chart_gate=True,
             )
         self.assertIsNotNone(result)
         self.assertEqual(mle_mock.call_count, 1)

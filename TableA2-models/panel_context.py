@@ -84,7 +84,6 @@ def prepare_panel_context(base_path: Path | None = None) -> dict[str, Any]:
         df_apr_master,
         df_apr_all,
         mf_mask_all,
-        phase_context,
         owner_net_city,
         is_city_all,
         base_output_dir,
