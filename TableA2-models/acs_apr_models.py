@@ -3703,6 +3703,14 @@ class PairFitResult:
     y_render_meta/x_render_meta (label, file_tag, tick/log format) are resolved from
     whichever of HOUSING_META/ECON_META the column belongs to — same lookup regardless of
     whether the column is playing the outcome or the predictor in this pair.
+
+    ppm_beta / mle_diag are two_part-only (housing-as-Y): ppm_beta is the hierarchical-Bayes
+    posterior mean beta (mean of fit_two_part_with_ci's slope_samples, when present); mle_diag
+    carries the positive-part/zero-hurdle t/p-stats straight off fit_two_part_with_ci's
+    mle_result dict (positive_part_t/p, zero_mle_t/p) for the r2_diagnostics.csv row. r2 may
+    also carry a "positive_ols_r2" key (two_part only) -- the companion-chart R² of the y>0
+    subset vs. the reused positive-part MLE line. All None/absent for continuous (econ-as-Y)
+    results, which OG does not render.
     """
 
     geography: str
@@ -3717,6 +3725,8 @@ class PairFitResult:
     chart_arrays: dict | None
     y_render_meta: dict
     x_render_meta: dict
+    ppm_beta: float | None = None
+    mle_diag: dict | None = None
 
 
 def _render_meta(col, geography):
@@ -3971,6 +3981,8 @@ def fit_pairs(df_final, df_zip, df_zip_yearly_long, permit_years, *, max_pairs=N
         coeffs = None
         r2 = None
         chart_arrays = None
+        ppm_beta = None
+        mle_diag = None
         if fit is not None:
             coeffs = {
                 "intercept_mle": fit.get("intercept_mle"),
@@ -3982,6 +3994,26 @@ def fit_pairs(df_final, df_zip, df_zip_yearly_long, permit_years, *, max_pairs=N
                 "mcfadden_r2": fit.get("mcfadden_r2"),
                 "ols_rsquared": fit.get("ols_rsquared"),
             }
+            if not is_econ_y:
+                # two_part (housing-as-Y) only: carry the already-computed hierarchical-Bayes
+                # posterior mean beta, the positive-part/zero-hurdle t/p-stats (from the raw
+                # mle_result fit_two_part_with_ci returns), and the positive-OLS companion R²
+                # (a closed-form R² of the y>0 subset against the already-fit positive-part
+                # MLE line -- no refit). None of this re-runs any fit.
+                slope_samples = fit.get("slope_samples")
+                if slope_samples is not None:
+                    ppm_beta = float(np.mean(slope_samples))
+                mle_result = fit.get("mle_result")
+                if mle_result is not None:
+                    mle_diag = {
+                        "positive_part_t": mle_result.get("positive_part_t"),
+                        "positive_part_p": mle_result.get("positive_part_p"),
+                        "zero_mle_t": mle_result.get("zero_mle_t"),
+                        "zero_mle_p": mle_result.get("zero_mle_p"),
+                    }
+                r2["positive_ols_r2"] = _r2_positive_subset_vs_mle_line(
+                    fit["x_data"], fit["y_data"], fit["intercept_mle"], fit["slope_mle"],
+                )
             x_meta = _render_meta(pair.x_col, pair.geography)
             chart_arrays = build_chart_arrays(fit, x_meta["display_label"])
 
@@ -3999,6 +4031,8 @@ def fit_pairs(df_final, df_zip, df_zip_yearly_long, permit_years, *, max_pairs=N
                 chart_arrays=chart_arrays,
                 y_render_meta=_render_meta(pair.y_col, pair.geography),
                 x_render_meta=_render_meta(pair.x_col, pair.geography),
+                ppm_beta=ppm_beta,
+                mle_diag=mle_diag,
             )
         )
     return results
@@ -5775,11 +5809,16 @@ _ROBUSTNESS_GEO_LABEL = {
 
 
 def _two_part_pair_chart_id(result, dr_type, cat_suffix):
-    """Filename stem (and r2-diagnostics chart id) for one two_part PairFitResult."""
+    """Filename stem (and r2-diagnostics chart id) for one two_part PairFitResult.
+    Predictor (x_col) segment uses x_render_meta's file_tag when available (abbreviated
+    tag, matching pre-6b naming); ECON_META currently defines no file_tag entries, so this
+    falls back to the raw x_col for every predictor OG renders today -- a no-op in practice
+    until ECON_META gains file_tag values, at which point this picks them up automatically."""
     is_zip = result.geography == "zip"
     file_prefix = result.y_render_meta.get("file_tag") or dr_type.lower()
+    x_tag = result.x_render_meta.get("file_tag") or result.x_col
     robustness_tag = "" if result.robustness == "none" else ("_zip_hash" if is_zip else "_city_hash")
-    return f"{'zip_' if is_zip else ''}{file_prefix}_{cat_suffix.lower()}_{result.x_col}{robustness_tag}"
+    return f"{'zip_' if is_zip else ''}{file_prefix}_{cat_suffix.lower()}_{x_tag}{robustness_tag}"
 
 
 def _two_part_ppm_at_median_x(chart_arrays):
@@ -5799,23 +5838,24 @@ def _two_part_ppm_at_median_x(chart_arrays):
 
 def _append_pair_r2_diagnostics_row(r2_diagnostics, result, geography_label):
     """Append one R2_DIAG_COLUMNS row from a two_part PairFitResult.
-    Per-observation t/p stats (Positive_part_slope_t/p, Zero_mle_t/p) lived on the raw MLE
-    result object that OG no longer holds (fit_pairs keeps only point estimates + r2 on
-    PairFitResult.coeffs/.r2); those four columns are NaN here."""
+    Per-observation t/p stats (Positive_part_slope_t/p, Zero_mle_t/p) are carried on
+    result.mle_diag (from fit_two_part_with_ci's mle_result, captured by fit_pairs); NaN
+    only if mle_diag itself is absent (should not happen for a successful two_part fit)."""
     if r2_diagnostics is None:
         return
     regression_label = f"{result.y_render_meta['display_label']} vs {result.x_render_meta['display_label']}"
+    mle_diag = result.mle_diag or {}
     r2_diagnostics.append((
         regression_label,
         geography_label,
         float(result.r2["mcfadden_r2"]),
         result.r2.get("ols_rsquared"),
         float(result.coeffs["slope_mle"]),
-        np.nan,
-        np.nan,
+        mle_diag.get("positive_part_t", np.nan),
+        mle_diag.get("positive_part_p", np.nan),
         float(result.coeffs["beta_mle"]),
-        np.nan,
-        np.nan,
+        mle_diag.get("zero_mle_t", np.nan),
+        mle_diag.get("zero_mle_p", np.nan),
         _two_part_ppm_at_median_x(result.chart_arrays),
     ))
 
@@ -5825,10 +5865,11 @@ def _draw_two_part_pair_png(result, output_dir, legend_note_payload, apr_year_ra
     predictor calls for one) straight from its precomputed chart_arrays. No fitting here.
 
     ppm_beta (Bayes posterior mean beta) and positive_ols_r2 (companion-chart R² of the y>0
-    subset vs. the reused two-part line) are left None: both require raw values PairFitResult
-    does not carry (hierarchical slope_samples; raw model-scale x/y for the R² calc), and
-    plot_two_part_chart already renders correctly with either omitted (pre-existing None-safe
-    legend behavior), so this is a graceful drop, not a fabrication.
+    subset vs. the reused positive-part MLE line) are carried on the PairFitResult itself
+    (result.ppm_beta, result.r2["positive_ols_r2"]) -- both computed once by fit_pairs from
+    values fit_two_part_with_ci already returned (slope_samples mean; a closed-form R² off
+    intercept_mle/slope_mle and the raw x/y arrays), so no fitting or recomputation happens
+    here either.
     """
     from pages.pair_registry import parse_city_outcome, parse_zip_outcome
 
@@ -5863,7 +5904,7 @@ def _draw_two_part_pair_png(result, output_dir, legend_note_payload, apr_year_ra
         also_annotate_second_max_x=is_zip,
         legend_exclusion_note=legend_exclusion_note,
         mle_beta=float(result.coeffs["slope_mle"]),
-        ppm_beta=None,
+        ppm_beta=result.ppm_beta,
     )
     if _predictor_positive_ols_companion(result.x_col):
         companion_path = output_path.with_name(f"{output_path.stem}_positive_ols{output_path.suffix}")
@@ -5880,7 +5921,7 @@ def _draw_two_part_pair_png(result, output_dir, legend_note_payload, apr_year_ra
             x_tick_dollar=x_tick_dollar, x_tick_percent=x_tick_percent, x_tick_days=x_tick_days,
             also_annotate_second_max_x=is_zip,
             positive_ols_simple=True, x_col_for_ols=result.x_col,
-            positive_line_y=ca.get("positive_line_y"), positive_ols_r2=None,
+            positive_line_y=ca.get("positive_line_y"), positive_ols_r2=result.r2.get("positive_ols_r2"),
             legend_exclusion_note=legend_exclusion_note,
             mle_beta=float(result.coeffs["slope_mle"]),
         )
