@@ -126,12 +126,24 @@ def build_mle_ci(result, x_range_raw):
     """MLE curve + CI bands from fit_two_part_with_ci result."""
     x_sc = x_sc_for_two_part_xgrid(x_range_raw, result.get("x_transform"))
     eta = result["intercept_mle"] + result["slope_mle"] * x_sc
-    psi = expit(result["alpha_mle"] + result["beta_mle"] * x_sc)
+    # Continuous (no-hurdle) fits carry alpha_mle/beta_mle == 0.0 as dummy placeholders
+    # (see acs_apr_models.py::_fit_econ_y_pair / catalog_builder.py::_fit_continuous_pair --
+    # neither has a zero-inflation part). Applying expit(0)=0.5 to those dummies would halve
+    # the curve/bands. Detect the no-hurdle case via model_family (mirrors
+    # export.py::_mle_curve_summary's `model_family == "continuous"` branch) and skip the
+    # hurdle scaling entirely: psi=1.0, so mle_y/bootstrap/Bayes bands are the raw OLS line
+    # + CI. The real two-part hurdle path (model_family != "continuous") is unchanged:
+    # psi = expit(alpha_mle + beta_mle*x).
+    is_continuous = (result.get("mle_result") or {}).get("model_family") == "continuous"
+    if is_continuous:
+        psi = np.ones_like(x_sc)
+    else:
+        psi = expit(result["alpha_mle"] + result["beta_mle"] * x_sc)
     mle_y = psi * eta
     ba, bb = result.get("boot_alpha_samples"), result.get("boot_beta_samples")
     bi, bs = result.get("boot_intercept_samples"), result.get("boot_slope_samples")
     boot_ci_lo, boot_ci_hi = None, None
-    if all(s is not None for s in (ba, bb, bi, bs)):
+    if not is_continuous and all(s is not None for s in (ba, bb, bi, bs)):
         ba_a = np.asarray(ba, dtype=np.float64)
         bb_a = np.asarray(bb, dtype=np.float64)
         bi_a = np.asarray(bi, dtype=np.float64)
@@ -140,7 +152,11 @@ def build_mle_ci(result, x_range_raw):
             curves_boot = full_two_part_curve_matrix(ba_a, bb_a, bi_a, bs_a, x_sc)
             boot_ci_lo = np.percentile(curves_boot, 2.5, axis=0)
             boot_ci_hi = np.percentile(curves_boot, 97.5, axis=0)
-    if boot_ci_lo is None and bi is not None and bs is not None and (ba is None or bb is None):
+    if boot_ci_lo is None and bi is not None and bs is not None and (is_continuous or ba is None or bb is None):
+        # For continuous fits, boot_alpha_samples/boot_beta_samples are dummy zero arrays
+        # (not a real hurdle), so route through here unconditionally: psi is already 1.0
+        # above, giving the raw bootstrap intercept/slope CI instead of re-deriving
+        # expit(0)=0.5 via full_two_part_curve_matrix.
         boot_ci_lo, boot_ci_hi = ci_from_samples(
             x_sc,
             int_s=np.asarray(bi, dtype=np.float64),
