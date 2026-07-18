@@ -1,7 +1,11 @@
 # pair-registry Specification
 
 ## Purpose
-TBD - created by archiving change pages-full-cartesian-catalog. Update Purpose after archive.
+Enumerate the directed model pairs the explorer fits: bipartite housing↔econ pairs (one housing
+variable and one econ variable, both directions; no housing×housing or econ×econ), at robustness
+`none` and `randhash`, with the metadata (geography, y_col, x_col, dr_type, cat_suffix, var_suffix)
+needed to build catalog keys and route each pair to its fit and renderers. Housing membership comes
+from the APR-sourced `HOUSING_META`; econ membership from the Zillow/Census-sourced `ECON_META`.
 ## Requirements
 ### Requirement: Outcome enumeration from data columns
 
