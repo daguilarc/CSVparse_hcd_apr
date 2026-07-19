@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 from datetime import datetime, timezone
 import hashlib
@@ -623,19 +624,17 @@ def main() -> None:
         verify_release(args.staging_dir)
         print(f"Finalized existing release: {args.staging_dir}")
         return
-    if args.staging_dir:
-        stage = args.staging_dir
+    # One build+publish path whether stage is a caller-supplied dir or a temp dir (the ExitStack
+    # only registers cleanup for the temp case; a caller-supplied --staging-dir is left in place).
+    with contextlib.ExitStack() as stack:
+        if args.staging_dir:
+            stage = args.staging_dir
+        else:
+            stage = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="apr-release-"))) / RELEASE_ID
         build_release(stage, fixture=args.fixture, max_pairs=args.max_pairs)
         print(f"Verified staging directory: {stage}")
         if args.publish:
             print(f"Promoted release: {promote_release(stage)}")
-        return
-    with tempfile.TemporaryDirectory(prefix="apr-release-") as tmp:
-        stage = Path(tmp) / RELEASE_ID
-        build_release(stage, fixture=args.fixture, max_pairs=args.max_pairs)
-        if args.publish:
-            promote_release(stage)
-        print(f"Verified staging directory: {stage}")
 
 
 if __name__ == "__main__":
