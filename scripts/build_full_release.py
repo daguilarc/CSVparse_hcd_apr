@@ -28,6 +28,7 @@ the outputs are still written, just not gated).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import sys
@@ -143,20 +144,17 @@ def main() -> None:
     #     skips its internal fit (fit_results passed). _full_release needs ctx["df_final"] for
     #     the maps and build_pages_catalog needs ctx["legend_note_payload"] -- both present in
     #     the panel ctx.
-    if args.staging_dir:
-        stage = args.staging_dir
+    # One build+publish path whether stage is a caller-supplied dir or a temp dir (the ExitStack
+    # only registers cleanup for the temp case; a caller-supplied --staging-dir is left in place).
+    with contextlib.ExitStack() as stack:
+        if args.staging_dir:
+            stage = args.staging_dir
+        else:
+            stage = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="apr-release-"))) / RELEASE_ID
         build_release(stage, context=ctx, fit_results=fit_results, max_pairs=args.max_pairs, verify=not args.skip_verify)
         print(f"{'Built (unverified)' if args.skip_verify else 'Verified'} staging directory: {stage}")
         if args.publish:
             print(f"Promoted release: {promote_release(stage)}")
-        return
-
-    with tempfile.TemporaryDirectory(prefix="apr-release-") as tmp:
-        stage = Path(tmp) / RELEASE_ID
-        build_release(stage, context=ctx, fit_results=fit_results, max_pairs=args.max_pairs, verify=not args.skip_verify)
-        if args.publish:
-            promote_release(stage)
-        print(f"{'Built (unverified)' if args.skip_verify else 'Verified'} staging directory: {stage}")
 
 
 if __name__ == "__main__":
