@@ -32,7 +32,6 @@ from pages.chart_prep import (
     build_mle_ci as _build_mle_ci,
     ci_from_samples as _ci_from_samples,
     full_two_part_curve_matrix as _full_two_part_curve_matrix,
-    hierarchy_re_policy as _hierarchy_re_policy,
     income_x_label as _income_x_label,
 )
 
@@ -260,10 +259,6 @@ X_COL_TWO_PART_LINEAR_X = frozenset(
 X_COL_PERCENT_TICK_PREDICTORS = frozenset(
     x_col for x_col, meta in ECON_META.items()
     if meta["tick_kind"] == "percent"
-)
-X_COL_MSA_INCOME_PREDICTORS = frozenset(
-    x_col for x_col, meta in ECON_META.items()
-    if meta["requires_msa"]
 )
 # Standard phase display labels for all chart text.
 PHASE_DISPLAY_BY_TAG = {
@@ -2697,8 +2692,8 @@ def hierarchical_ci_transformed(df, x_col, y_col, x_transform='log', y_transform
     """Hierarchical Bayesian CI for transformed outcome (non-hurdle, single-part OLS-style).
     Fit on the jurisdiction cross-section: one row per jurisdiction (the same totals frame
     the two-part MLE / OLS fit uses). Hierarchy: population -> county REs (no year layer;
-    no jurisdiction-year panel). County REs omitted when x_col in X_COL_MSA_INCOME_PREDICTORS.
-    Fallback: hierarchical SMC -> None (no bootstrap inside this function)."""
+    no jurisdiction-year panel). County REs are always included whenever >= 2 counties are
+    present. Fallback: hierarchical SMC -> None (no bootstrap inside this function)."""
     if df.empty or x_col not in df.columns or y_col not in df.columns:
         reason = "empty df" if df.empty else f"missing columns: {[c for c in [x_col, y_col] if c not in df.columns]}"
         print(f"  [hierarchical_ci_transformed] None: {reason}")
@@ -2745,14 +2740,9 @@ def hierarchical_ci_transformed(df, x_col, y_col, x_transform='log', y_transform
         print(f"  [hierarchical_ci_transformed] None: x mean/sd invalid (mean={x_mean}, sd={x_sd})")
         return None
     x_std = (x_arr - x_mean) / x_sd
-    use_county_re = _hierarchy_re_policy(x_col, True)
-    if not use_county_re:
-        print("  [hierarchical_ci_transformed] Omitting county REs (predictor embeds MSA-level income)")
-    county_idx_smc = county_idx if use_county_re else None
-    n_counties_smc = n_counties if use_county_re else 0
     try:
         out = _hierarchical_year_county_smc(
-            x_std, y_arr, county_idx_smc, n_counties_smc, x_mean, x_sd, n_draws,
+            x_std, y_arr, county_idx, n_counties, x_mean, x_sd, n_draws,
         )
         if out is None:
             raise ValueError("SMC returned None")
@@ -2992,10 +2982,10 @@ def hierarchical_ci(df, x_col, y_col, pop_col, n_draws=5000, x_transform='log', 
     """Bayesian Hierarchical Model for CIs with fallback cascade (no bootstrap inside this function).
     Fit on the jurisdiction cross-section: one row per jurisdiction (the same totals frame the two-part
     MLE uses). Hierarchy: population -> county REs (no year layer; no jurisdiction-year panel).
-    County REs omitted when x_col is in X_COL_MSA_INCOME_PREDICTORS (MSA income in denominator of x).
-    Cascade: hierarchical full two-part -> pooled-zero + hierarchical-positive; else None.
-    county_col: column for county grouping; if present and >=2 unique, county REs are used unless policy omits them."""
-    use_county_re = _hierarchy_re_policy(x_col, x_varies_by_year)
+    County REs are always included whenever >= 2 counties are present (MSA income in denominator
+    of x no longer suppresses them). Cascade: hierarchical full two-part -> pooled-zero +
+    hierarchical-positive; else None.
+    county_col: column for county grouping; if present and >=2 unique, county REs are used."""
     # County index built from the cross-section (no year filtering).
     county_to_idx, n_counties = {}, 0
     if county_col and county_col in df.columns:
@@ -3042,11 +3032,9 @@ def hierarchical_ci(df, x_col, y_col, pop_col, n_draws=5000, x_transform='log', 
     if x_sd <= 0:
         _hlog(tag, "Constant x (sd=0); skipping SMC")
         return None
-    if not use_county_re:
-        _hlog(tag, "Omitting county REs (predictor embeds MSA-level income)")
     _hlog(tag, f"{len(x_arr)} jurisdictions, {n_counties} counties (cross-section, linear positive part)")
-    county_idx_smc = county_idx if use_county_re else None
-    n_counties_smc = n_counties if use_county_re else 0
+    county_idx_smc = county_idx
+    n_counties_smc = n_counties
     # --- Fallback cascade ---
     # Step 1: Try hierarchical full two-part (hierarchical zero + hierarchical positive with county REs)
     result = _hierarchical_full_two_part_smc(

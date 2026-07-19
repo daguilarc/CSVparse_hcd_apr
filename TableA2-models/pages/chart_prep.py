@@ -1,4 +1,4 @@
-"""Leaf module: two-part chart arrays, CI bands, and hierarchy policy for PNG + Pages export."""
+"""Leaf module: two-part chart arrays, CI bands, and hierarchy RE summary for PNG + Pages export."""
 
 from __future__ import annotations
 
@@ -49,16 +49,6 @@ X_COL_TWO_PART_LINEAR_X = frozenset(
         "zori_pct_afford",
         "zhvi_condo_pct_change",
         "zhvi_sfrcondo_pct_change",
-        "pct_afford_condo",
-        "pct_afford_sfrcondo",
-    }
-)
-X_COL_MSA_INCOME_PREDICTORS = frozenset(
-    {
-        "zori_afford_ratio",
-        "zori_pct_afford",
-        "zhvi_condo_afford_ratio",
-        "zhvi_sfrcondo_afford_ratio",
         "pct_afford_condo",
         "pct_afford_sfrcondo",
     }
@@ -197,16 +187,6 @@ def positive_part_line_from_two_part(x_model_grid, intercept_mle, slope_mle):
     return intercept_mle + slope_mle * xg
 
 
-def hierarchy_re_policy(x_col, x_varies_by_year):
-    """Return use_county_re for hierarchical SMC.
-
-    Year and income-delta-stratum ("sign") random effects have been removed: hierarchical
-    models are fit on the jurisdiction cross-section (one row per jurisdiction) with county
-    REs (and population) only. The x_varies_by_year argument is retained for call-site
-    compatibility but no longer affects the policy."""
-    return not (x_col is not None and x_col in X_COL_MSA_INCOME_PREDICTORS)
-
-
 def income_x_label(income_label, acs_year_range, filter_note, is_log_x):
     """Build x-axis label for income/ZHVI/afford charts."""
     if is_log_x:
@@ -223,9 +203,10 @@ def income_x_label(income_label, acs_year_range, filter_note, is_log_x):
 
 
 def hierarchy_re_summary(x_col: str, x_varies_by_year: bool = False) -> dict[str, Any]:
-    use_county = hierarchy_re_policy(x_col, x_varies_by_year)
+    """County REs are always included in the hierarchical SMC (whenever >= 2 counties are
+    present in the data); x_col/x_varies_by_year are retained for call-site compatibility."""
     return {
-        "use_county_re": use_county,
+        "use_county_re": True,
     }
 
 
