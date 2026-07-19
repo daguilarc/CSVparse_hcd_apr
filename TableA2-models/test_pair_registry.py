@@ -6,7 +6,7 @@ import unittest
 
 import pandas as pd
 
-from pair_registry import city_y_cols, iter_pairs, zip_y_cols
+from pages.pair_registry import city_y_cols, iter_pairs, zip_y_cols
 
 ECON_COLS = ("zori_pct_afford", "pct_afford_condo", "pct_afford_sfrcondo")
 

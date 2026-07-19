@@ -18,7 +18,7 @@ sys.path.insert(0, str(MODELS))
 
 class ResidualGeometryTests(unittest.TestCase):
     def test_residual_area_strictly_less_than_whole_county_with_cities(self):
-        import db_maps
+        import pages.db_maps as db_maps
 
         county_geo = gpd.GeoDataFrame(
             {
@@ -46,7 +46,7 @@ class ResidualGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(residual_area, whole_area - 8.0)
 
     def test_residual_geometry_excludes_city_interiors(self):
-        import db_maps
+        import pages.db_maps as db_maps
 
         county_geo = gpd.GeoDataFrame(
             {"county_name": ["TEST COUNTY"], "county_fips": ["001"], "geometry": [box(0, 0, 10, 10)]},
@@ -61,7 +61,7 @@ class ResidualGeometryTests(unittest.TestCase):
         self.assertFalse(residual_geom.contains(city_geo.geometry.iloc[0].centroid))
 
     def test_county_without_cities_keeps_full_footprint(self):
-        import db_maps
+        import pages.db_maps as db_maps
 
         county_geo = gpd.GeoDataFrame(
             {"county_name": ["EMPTY COUNTY"], "county_fips": ["005"], "geometry": [box(20, 0, 30, 10)]},
@@ -78,7 +78,7 @@ class ResidualGeometryTests(unittest.TestCase):
 
 class PagesBuildWaterClipTests(unittest.TestCase):
     def test_water_mask_loads_and_clips_under_pages_build(self):
-        import db_maps
+        import pages.db_maps as db_maps
 
         with tempfile.TemporaryDirectory() as tmp:
             cache = Path(tmp)
@@ -105,7 +105,7 @@ class PagesBuildWaterClipTests(unittest.TestCase):
         self.assertAlmostEqual(county_clip.geometry.area.iloc[0], 50.0)
 
     def test_water_mask_none_when_no_ocean_shapefile(self):
-        import db_maps
+        import pages.db_maps as db_maps
 
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(db_maps, "BOUNDARY_CACHE_DIR", Path(tmp)), \

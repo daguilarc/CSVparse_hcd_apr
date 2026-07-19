@@ -39,7 +39,7 @@ def _copy_census_caches() -> int:
 
 def _download_map_boundaries() -> None:
     sys.path.insert(0, str(MODELS_DIR))
-    from db_maps import ensure_boundaries_downloaded
+    from pages.db_maps import ensure_boundaries_downloaded
 
     ensure_boundaries_downloaded()
 

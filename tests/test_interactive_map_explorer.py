@@ -22,7 +22,7 @@ sys.path.insert(0, str(MODELS))
 
 class CatalogContractTests(unittest.TestCase):
     def setUp(self):
-        import pages_export
+        import pages.export as pages_export
 
         self.export = pages_export
         self.export.PAGES_CATALOG.clear()
@@ -166,7 +166,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         self.assertIn(f'"acs/{cache_name}"', verify_text)
 
     def test_2018_county_nhgis_cache_is_used_without_network(self):
-        import db_maps
+        import pages.db_maps as db_maps
 
         fips = [f"{value:03d}" for value in range(1, 116, 2)]
         payload = {"data": {
@@ -186,7 +186,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         self.assertEqual(frame["county_mhi_2018_nominal"].tolist()[:2], [101000, 99000])
 
     def test_county_delta_metrics_join_nhgis_cache_by_fips(self):
-        import db_maps
+        import pages.db_maps as db_maps
 
         city_metric = pd.DataFrame({
             "city_name": ["EXAMPLE"], "county_fips": ["001"],
@@ -225,7 +225,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         self.assertEqual(result["income_delta_pct_change"].notna().sum(), 2)
 
     def test_residual_acs_population_delta_subtracts_city_rollups(self):
-        import db_maps
+        import pages.db_maps as db_maps
 
         city_rates = pd.DataFrame({
             "county_fips": ["001", "001"],
@@ -248,19 +248,19 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         self.assertEqual(residual_rates.loc[0, "population_pct_change"], 20.0)
 
     def test_pages_release_forces_tiger_geometry_profile(self):
-        import db_maps
+        import pages.db_maps as db_maps
 
         self.assertEqual(db_maps._boundary_mode({"PAGES_BUILD": "1"}), "tiger")
         self.assertEqual(db_maps._boundary_mode({}), "auto")
 
     def test_normalize_county_fips_avoids_int64_na_string_keys(self):
-        import db_maps
+        import pages.db_maps as db_maps
 
         normalized = db_maps._normalize_county_fips(pd.Series([1.0, 37, None, "003"]))
         self.assertEqual(normalized.tolist(), ["001", "037", pd.NA, "003"])
 
     def test_attach_city_county_fips_from_tiger_geoid(self):
-        import db_maps
+        import pages.db_maps as db_maps
         from shapely.geometry import Point
 
         city_gdf = gpd.GeoDataFrame(
@@ -275,7 +275,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         self.assertEqual(attached["county_fips"].tolist(), ["059", "029"])
 
     def test_attach_city_county_fips_raises_without_relationship_file(self):
-        import db_maps
+        import pages.db_maps as db_maps
         from shapely.geometry import Point
 
         city_gdf = gpd.GeoDataFrame(
@@ -292,7 +292,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
             rel_path.write_bytes(backup)
 
     def test_registry_intersection_labels_and_stable_order(self):
-        from map_metric_registry import build_map_metric_registry
+        from pages.map_metric_registry import build_map_metric_registry
 
         df = pd.DataFrame(columns=[
             "DB_CO_total", "TOTAL_MF_CO_total", "TOTAL_CO_total", "total_owner_CO_total",
@@ -337,7 +337,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         self.assertEqual([m["key"] for m in first[-2:]], ["population_pct_change", "income_pct_change"])
 
     def test_non_mf_housing_outcome_predicate(self):
-        from map_metric_registry import is_non_mf_housing_outcome
+        from pages.map_metric_registry import is_non_mf_housing_outcome
 
         self.assertTrue(is_non_mf_housing_outcome("TOTAL_CO_total"))
         self.assertTrue(is_non_mf_housing_outcome("TOTAL_BP_total"))
@@ -586,7 +586,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         self.assertAlmostEqual(result["slope_mle"], 2.0, places=3)
         self.assertEqual(result["mle_result"]["model_family"], "continuous")
 
-        import pages_export
+        import pages.export as pages_export
 
         pages_export.PAGES_CATALOG.clear()
         result["income_label"] = "ZHVI condo % change"
@@ -608,7 +608,7 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         )
 
     def test_city_whole_and_residual_rates_with_guards(self):
-        from db_maps import calculate_geography_rates
+        from pages.db_maps import calculate_geography_rates
 
         cities = pd.DataFrame({
             "city_name": ["A", "B", "C"], "county_fips": ["001", "001", "003"], "population": [5000, 145000, 100],
