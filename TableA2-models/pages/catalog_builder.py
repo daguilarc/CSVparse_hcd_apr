@@ -159,12 +159,17 @@ def build_pages_catalog(
             n_mle_failed += 1
             continue
 
+        # Informational only -- does NOT gate export. The R2 gate nulls the bootstrap/
+        # hierarchical bands on gate-FAIL, but the MLE fit itself still succeeded, so the
+        # pair must still be exported (as MLE-only); the availability flags computed here
+        # (and stored on the record by record_regression) are what tell the front-end to
+        # hide the absent bands.
         availability = result.availability or {}
         has_bootstrap = bool(availability.get("stationary_bootstrap"))
-        if not has_bootstrap:
+        if has_bootstrap:
+            n_bootstrap_succeeded += 1
+        else:
             n_bootstrap_failed += 1
-            continue
-        n_bootstrap_succeeded += 1
         n_hierarchical_attempted += 1
         if availability.get("hierarchical"):
             n_hierarchical_succeeded += 1
