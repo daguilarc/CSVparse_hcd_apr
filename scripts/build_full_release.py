@@ -16,12 +16,13 @@ Both consumers derive from the same fit_results, so no re-fit and no re-prepare 
 two standalone scripts are unchanged; this is a third, additive entry point (like
 export_pages_catalog.py).
 
-PAGES_BUILD is set to "1" BEFORE the single fit_pairs call, making the shared fit the
-canonical reproducible-release fit (hierarchical SMC cores=1 + fixed PAGES_RANDOM_SEED). The
-immutable release requires that determinism, and single- vs multi-core SMC is statistically
-equivalent for the OG PNGs, so both outputs correctly derive from the cores=1 fit. Because
-PAGES_BUILD / PAGES_RANDOM_SEED are read at acs_apr_models import time, they are set here
-before any module that imports acs_apr_models.
+PAGES_BUILD is set to "1" BEFORE importing acs_apr_models purely so data prep uses the
+committed FRED/IPUMS caches instead of prompting (it no longer affects SMC cores — those are
+SMC_CORES, default 4, in acs_apr_models). PAGES_RANDOM_SEED is fixed for the shared fit. Both
+are read at acs_apr_models import time, so they are set here before any module that imports it.
+
+Pass --skip-verify to skip the release structural-verify gate (fine for a one-time local ship;
+the outputs are still written, just not gated).
 """
 
 from __future__ import annotations
@@ -61,12 +62,18 @@ def main() -> None:
         action="store_true",
         help="promote the release only after successful verification.",
     )
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="skip the release structural-verify gate (one-time local ship; outputs still written).",
+    )
     args = parser.parse_args()
+    if args.skip_verify and args.publish:
+        raise SystemExit("--skip-verify and --publish are mutually exclusive (don't promote an unverified release).")
 
-    # Canonical reproducible-release fit: hierarchical SMC cores=1 + fixed seed. Must be set
-    # BEFORE importing acs_apr_models (module-level reads PAGES_BUILD / PAGES_RANDOM_SEED) and
-    # BEFORE the single fit_pairs call, so both the OG PNGs and the Pages catalog derive from
-    # the one cores=1 fit.
+    # Set BEFORE importing acs_apr_models (module-level reads PAGES_BUILD / PAGES_RANDOM_SEED).
+    # PAGES_BUILD=1 makes data prep use committed caches instead of prompting; it does NOT set the
+    # SMC core count (that is SMC_CORES, default 4). The seed is fixed for the single shared fit.
     os.environ["PAGES_BUILD"] = "1"
     sys.path.insert(0, str(MODELS_DIR))
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -138,18 +145,18 @@ def main() -> None:
     #     the panel ctx.
     if args.staging_dir:
         stage = args.staging_dir
-        build_release(stage, context=ctx, fit_results=fit_results, max_pairs=args.max_pairs)
-        print(f"Verified staging directory: {stage}")
+        build_release(stage, context=ctx, fit_results=fit_results, max_pairs=args.max_pairs, verify=not args.skip_verify)
+        print(f"{'Built (unverified)' if args.skip_verify else 'Verified'} staging directory: {stage}")
         if args.publish:
             print(f"Promoted release: {promote_release(stage)}")
         return
 
     with tempfile.TemporaryDirectory(prefix="apr-release-") as tmp:
         stage = Path(tmp) / RELEASE_ID
-        build_release(stage, context=ctx, fit_results=fit_results, max_pairs=args.max_pairs)
+        build_release(stage, context=ctx, fit_results=fit_results, max_pairs=args.max_pairs, verify=not args.skip_verify)
         if args.publish:
             promote_release(stage)
-        print(f"Verified staging directory: {stage}")
+        print(f"{'Built (unverified)' if args.skip_verify else 'Verified'} staging directory: {stage}")
 
 
 if __name__ == "__main__":

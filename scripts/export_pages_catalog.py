@@ -552,6 +552,7 @@ def build_release(
     max_pairs: int | None = None,
     context: dict | None = None,
     fit_results: list | None = None,
+    verify: bool = True,
 ) -> Path:
     if stage.exists() and any(stage.iterdir()):
         raise FileExistsError(f"staging directory must be new or empty: {stage}")
@@ -561,9 +562,10 @@ def build_release(
     else:
         _full_release(stage, max_pairs, context=context, fit_results=fit_results)
     finalize_release_integrity(stage)
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    from verify_pages_catalog import verify_release
-    verify_release(stage)
+    if verify:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        from verify_pages_catalog import verify_release
+        verify_release(stage)
     return stage
 
 

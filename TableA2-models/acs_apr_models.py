@@ -1212,9 +1212,10 @@ PAGES_BUILD = os.environ.get("PAGES_BUILD", "").strip().lower() in ("1", "true",
 PAGES_SKIP_HIERARCHICAL = os.environ.get("PAGES_SKIP_HIERARCHICAL", "").strip().lower() in ("1", "true", "yes")
 PAGES_RANDOM_SEED = int(os.environ.get("PAGES_RANDOM_SEED", "20240618"))
 CI_MODE = os.environ.get("CI", "").strip().lower() == "true"
-# SMC sampler core count — decoupled from PAGES_BUILD (which only gates cached-input behavior).
-# Multi-core does not affect what the release manifest hashes (code + inputs + catalog key coverage),
-# so the release verifies identically at any core count. Default 4; tune via ACS_APR_SMC_CORES.
+# SMC sampler core count. Capped at 4 to keep from crashing Diego's 8-core/16GB Mac — this machine
+# freezes/OOMs when pymc's multiprocessing runs hot. Change this line at your own risk.
+# (Decoupled from PAGES_BUILD, which only gates cached-input behavior. Core count does not affect what
+# the release manifest hashes — code + inputs + catalog key coverage — so any value verifies the same.)
 SMC_CORES = int(os.environ.get("ACS_APR_SMC_CORES", "4"))
 
 # Configuration
