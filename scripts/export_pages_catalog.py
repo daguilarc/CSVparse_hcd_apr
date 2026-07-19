@@ -241,7 +241,9 @@ def prune_non_mf_release_artifacts(stage: Path) -> None:
     manifest["n_stationary_bootstrap_succeeded"] = len(catalog)
     manifest["n_hierarchical_succeeded"] = hierarchical_succeeded
     manifest["n_hierarchical_attempted"] = hierarchical_succeeded + hierarchical_failed
-    manifest["n_pairs_attempted"] = len(catalog) + mle_failed + bootstrap_failed
+    # Gate-fail (bootstrap-absent) pairs are now KEPT in the catalog as MLE-only, so they are counted
+    # in len(catalog); only true MLE failures are excluded. (bootstrap_failed is informational only.)
+    manifest["n_pairs_attempted"] = len(catalog) + mle_failed
     manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8")
 
 
