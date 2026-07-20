@@ -87,12 +87,17 @@ For pairs with `model_family` continuous (or equivalent continuous export), the 
 
 ### Requirement: Observation and hierarchical legend copy
 
-Scatter points SHALL be legend-labeled **Cities** or **ZIP codes** according to the selected Models geography (or catalog `data_label` when present). Hierarchical mean legend text SHALL be **Posterior Predictive Mean (with county-level random effects)**. Hierarchical interval legend text SHALL describe a posterior/credible interval (not the bare string "Hierarchical Bayes" alone).
+Scatter points SHALL be legend-labeled **Cities** or **ZIP codes** according to the selected Models geography (or catalog `data_label` when present). Hierarchical mean legend text SHALL be **Posterior Predictive Mean (with county-level random effects)**. Hierarchical interval legend text SHALL describe a posterior/credible interval (not the bare string "Hierarchical Bayes" alone). The two-part point-estimate mean line legend text SHALL be **Two-part MLE** (or **MLE** for continuous pairs). The shaded stationary-bootstrap interval legend text SHALL be **Stationary bootstrap 95% interval**. The mean line SHALL NOT be labeled "Stationary bootstrap".
 
 #### Scenario: City geography legend
 
 - **WHEN** Models geography is City and hierarchical display is on
 - **THEN** the legend includes **Cities** and **Posterior Predictive Mean (with county-level random effects)**
+
+#### Scenario: Stationary bootstrap display mode
+
+- **WHEN** user selects Model display including stationary bootstrap
+- **THEN** the chart shows a solid **Two-part MLE** (or **MLE**) line and a shaded **Stationary bootstrap 95% interval** band
 
 ### Requirement: Observation hover names
 
@@ -226,19 +231,75 @@ The UI SHALL display McFadden R² and OLS R² from catalog `stats` without hidin
 
 The UI SHALL display a diagnostics table below the model chart showing both parts of the two-part MLE fit from `stats.two_part`:
 
-- Zero / hurdle: α, β, t(β), p(β)
-- Positive part: γ (intercept), δ (slope), t(δ), p(δ)
+- Zero / hurdle (logit): α, β, t(β), p(β)
+- Positive part (OLS on y > 0): γ (intercept), δ (slope), t(δ), p(δ)
+
+The numeric column header SHALL read **Coefficient**. A subtitle SHALL clarify "Zero part (logit); Positive part (OLS on y > 0)." The table SHALL remain the same when Model display or Zero Values changes; hierarchical availability additionally permits showing archived `stats.ppm_beta` when present.
 
 #### Scenario: Both parts visible
 
 - **WHEN** user selects any exported pair with a populated `stats.two_part`
-- **THEN** the stats area shows coefficient and t/p columns for zero and positive parts
+- **THEN** the stats area shows **Coefficient** and t/p columns for zero and positive parts with α/β/γ/δ parameter names
 
 ### Requirement: Catalog key alignment
 
-The UI `catalogKey()` function SHALL match the builder key format `geography:y_col:x_col:robustness`.
+The UI pair-key function SHALL match the archived builder format `geography:y_col:x_col:robustness`. Model display and Zero Values SHALL select nested components rather than alter the pair key.
 
 #### Scenario: Successful chart render
 
 - **WHEN** user selects options matching an exported key
 - **THEN** Plotly renders the pre-computed series with labels applied
+
+### Requirement: Authored Census and Zillow footer provenance
+
+The footer SHALL visibly identify ACS 2020–2024 (with 2014–2018 comparison for population and income change), Zillow monthly series January 2018–December 2024 in real 2024 dollars, ZHVI/ZORI series descriptions, and City/ZIP geographies used, with links to HCD, Census, and Zillow methodology pages. Provenance copy SHALL be authored in HTML (not loaded from release JSON).
+
+#### Scenario: Footer rendered
+
+- **WHEN** the page loads
+- **THEN** the full source-vintage block is readable without opening a model chart
+
+### Requirement: Model display composes archived components
+
+The Models tab SHALL expose a **Model display** control with Two-Part MLE + Stationary Bootstrap, Hierarchical Bayes, and Both (availability filtered by the selected pair). Rendering SHALL compose archived components and SHALL NOT request or run a model.
+
+#### Scenario: Both selected
+
+- **WHEN** Both is selected for a pair with complete archived components
+- **THEN** the chart overlays the stationary-bootstrap line/band and hierarchical posterior line/credible band
+
+### Requirement: Zero Values control
+
+The Models tab SHALL expose a dropdown labeled **Zero Values** with **Two-Part Hurdle** and **Positive Only** (Two-Part Hurdle default). Continuous pairs MAY disable or replace this control per continuous-econ-Y rules. The dropdown SHALL NOT offer a Bernoulli-only option.
+
+#### Scenario: Positive Only view
+
+- **WHEN** Positive Only is selected for a two-part pair
+- **THEN** zero-valued observations are excluded and selected model components use archived positive-part expectation summaries
+
+### Requirement: Maps and Models tabs remain separate
+
+The UI SHALL keep Maps and Models as separate tabs; map controls SHALL NOT appear on the Models tab and model controls SHALL NOT appear on the Maps tab.
+
+#### Scenario: Tab isolation
+
+- **WHEN** a user is on the Models tab
+- **THEN** geography-view and map-metric controls are not visible
+
+### Requirement: Maps tab geography and metric controls
+
+The Maps tab SHALL expose geography view and map metric controls as specified by `pages-map-explorer-ui` and SHALL load them from the same archived `2018-2024` release as the model catalog.
+
+#### Scenario: Maps tab default view
+
+- **WHEN** the Maps tab first renders
+- **THEN** geography defaults to Cities + unincorporated county and the first entry in archived `map_metrics.json` is selected
+
+### Requirement: For-sale terminology in model UI
+
+Model-tab user-visible labels for multifamily for-sale streams (`mf_owner_*`) SHALL use **For-sale** instead of **Owner** in chart labels, dropdown options, axis titles, and hover text.
+
+#### Scenario: MF for-sale variable label
+
+- **WHEN** user opens Variable (Y) dropdown for city geography
+- **THEN** `mf_owner_CO_total` displays with **For-sale** terminology (not "Owner")

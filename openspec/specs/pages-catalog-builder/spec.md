@@ -1,8 +1,10 @@
 # pages-catalog-builder Specification
 
 ## Purpose
-TBD - created by archiving change pages-full-cartesian-catalog. Update Purpose after archive.
+Pages release catalog builder: bipartite housing↔econ pairs, shared fit results, and archived model views for the explorer.
+
 ## Requirements
+
 ### Requirement: Catalog built as a renderer over the shared result set
 
 The Pages catalog builder SHALL construct `catalog.json` by consuming the shared fit result set
@@ -96,19 +98,69 @@ A catalog entry whose hierarchical band is available SHALL include `stats.ppm_be
 
 ### Requirement: Series without axis titles
 
-Catalog plotly payloads SHALL omit `xaxis.title` and `yaxis.title` from stored layout; axis labels are applied at render time.
+Archived pair components SHALL contain numeric observations, x-grid, curve summaries, stats, and metadata but SHALL NOT contain complete Plotly layouts or baked axis titles. Website and notebook rendering SHALL apply labels from `docs/chart_labels.json`.
 
-#### Scenario: Layout shape
+#### Scenario: Component payload shape
 
-- **WHEN** a catalog entry is written
-- **THEN** `plotly.layout` does not contain baked axis title strings
+- **WHEN** a pair payload is serialized
+- **THEN** it contains no `plotly.layout`, `xaxis.title`, or `yaxis.title` object
 
 ### Requirement: Manifest statistics
 
-`manifest.json` SHALL record `built_at`, `n_pairs_attempted`, `n_pairs_exported`, `n_pairs_mle_failed`, and `pair_registry_version`.
+`manifest.json` SHALL record `built_at`, `release_id`, source vintages, `n_pairs_attempted`, `n_pairs_exported`, `n_pairs_mle_failed`, `n_stationary_bootstrap_succeeded`, `n_hierarchical_attempted`, `n_hierarchical_succeeded`, `n_hierarchical_failed`, and `pair_registry_version`.
 
 #### Scenario: Build summary
 
 - **WHEN** the builder completes
-- **THEN** manifest includes pair counts and does not reference R²-gated tiers
+- **THEN** the manifest counts distinguish MLE, stationary-bootstrap, and hierarchical outcomes and contain no R²-gated export tier
+
+### Requirement: One fit result produces composable model views
+
+For each eligible pair, the builder SHALL run the two-part MLE once, the stationary bootstrap once, and hierarchical SMC at most once. It SHALL derive `two_part_hurdle` and `positive_only` summaries from those same results.
+
+#### Scenario: Both display modes requested
+
+- **WHEN** a website user switches among stationary-bootstrap, Hierarchical Bayes, and Both
+- **THEN** the browser selects archived components and no model is rerun
+
+#### Scenario: Zero Values view changes
+
+- **WHEN** a website user switches between Two-Part Hurdle and Positive Only
+- **THEN** the browser selects the corresponding archived summary derived from the same fit result
+
+### Requirement: Compact pair payload
+
+Each pair payload SHALL store shared observations and x-grid once, two-part MLE diagnostics once, and model summaries grouped by zero-value view. It SHALL NOT duplicate complete Plotly figures for stationary-bootstrap, hierarchical-only, and combined displays.
+
+#### Scenario: Pair payload serialized
+
+- **WHEN** a pair has both stationary-bootstrap and hierarchical results
+- **THEN** one payload contains both component summaries and the UI composes traces at render time
+
+### Requirement: Zero-valued observations retained
+
+The archived observations SHALL retain zero-valued outcomes so the Two-Part Hurdle view can display them. Positive Only SHALL filter them at display time.
+
+#### Scenario: Hurdle view observation points
+
+- **WHEN** a selected pair contains zero and positive outcomes
+- **THEN** its archived observation arrays preserve both groups
+
+### Requirement: Export point-estimate MLE curve view
+
+The catalog builder SHALL export a `views.two_part_hurdle.mle` and `views.positive_only.mle` entry for each successful pair, containing `mean` evaluated from point MLE parameters on the pair's `x_grid`. The `mle` entry SHALL NOT contain bootstrap `lower` or `upper` fields. Bootstrap summaries SHALL remain under `views.*.stationary_bootstrap` for interval bands only.
+
+#### Scenario: Catalog entry includes MLE view
+
+- **WHEN** a pair is successfully fitted and recorded to `catalog.json`
+- **THEN** the entry's `views.two_part_hurdle` object contains both `mle` and `stationary_bootstrap` keys when bootstrap succeeded
+
+### Requirement: Continuous-Y fit for predictor-class Y
+
+When `y_col` is not a construction outcome column, the catalog builder SHALL fit a continuous linear model and export `model_family: continuous` with the same `views.*.mle.mean` curve shape as two-part fits where possible.
+
+#### Scenario: Predictor selected as Y
+
+- **WHEN** the builder fits `city:zori_pct_afford:TOTAL_MF_CO_total:none` (or equivalent continuous econ-Y pair)
+- **THEN** the catalog entry exports `model_family: continuous` and `views.positive_only.mle.mean` aligned with `x_grid`
 
