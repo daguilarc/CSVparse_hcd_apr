@@ -50,3 +50,7 @@ Chase_*.pdf
 !docs/data/releases/**/*.json
 !docs/data/releases/**/*.js
 !docs/data/releases/**/*.geojson
+
+# Local release backups: keep on disk, exclude from repo
+docs/data/releases/*.bak-*/
+docs/data/releases/_backups/
