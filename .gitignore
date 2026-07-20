@@ -40,6 +40,10 @@ e2e/.pw-browsers/
 e2e/test-results/
 Chase_*.pdf
 
+# Original-publication PNG generator: kept locally, excluded from the public repo
+/scripts/run_original_models.py
+/TableA2-models/original/
+
 # Re-include OpenSpec markdown and release JSON after *.md / *.json ignores
 !openspec/**/*.md
 !openspec/**/*.yaml

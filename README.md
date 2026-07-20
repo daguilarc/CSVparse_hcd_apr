@@ -6,7 +6,6 @@ California HCD Annual Progress Report (APR) parsing, publication models, and the
 
 | Pipeline | Command |
 |----------|---------|
-| **Original publication** | `python scripts/run_original_models.py` |
 | **Pages catalog (full ENT-only Cartesian)** | `python scripts/export_pages_catalog.py --release-id 2018-2024 --staging-dir <path>` |
 | **Verify release** | `python scripts/verify_pages_catalog.py <staging-path>` |
 | **Explorer e2e (after full build)** | `scripts/run_explorer_e2e.sh` |
@@ -21,10 +20,8 @@ Full build → verify → promote to `docs/data/releases/2018-2024/` → Playwri
 TableA2-models/
   acs_apr_models.py      # shared library
   panel_context.py       # shared Steps 1–11
-  original/              # publication pipeline
   pages/                 # explorer catalog pipeline
 scripts/
-  run_original_models.py
   export_pages_catalog.py
 ```
 

@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
-"""Single-process APR build driver: prepare panel once, fit_pairs once, render BOTH outputs.
-
-Running the OG PNG build (scripts/run_original_models.py) and the Pages release
-(scripts/export_pages_catalog.py) separately re-runs the whole shared pipeline twice: the
-Steps 1-11 panel prep AND the single fit_pairs pass. This orchestrator does that shared work
-exactly once and feeds the one result set to both consumers:
+"""Single-process APR build driver: prepare panel once, fit_pairs once, render the Pages release.
 
     prepare_panel_context()            # Steps 1-11 -- EXACTLY ONCE
       -> _run_zip_regressions(panels_only=True)   # ZIP panel -- once
       -> fit_pairs(...)                # the single fit -- EXACTLY ONCE
-           +-> build_original_models(ctx, fit_results=..., df_zip=..., ...)  # OG PNGs + r2
-           +-> build_release(stage, context=ctx, fit_results=...)           # Pages catalog/maps
+           -> build_release(stage, context=ctx, fit_results=...)            # Pages catalog/maps
 
-Both consumers derive from the same fit_results, so no re-fit and no re-prepare happen. The
-two standalone scripts are unchanged; this is a third, additive entry point (like
-export_pages_catalog.py).
+The catalog/maps derive from that one fit_results, so no re-fit and no re-prepare happen. This
+is an additive entry point alongside export_pages_catalog.py.
 
 PAGES_BUILD is set to "1" BEFORE importing acs_apr_models purely so data prep uses the
 committed FRED/IPUMS caches instead of prompting (it no longer affects SMC cores — those are
@@ -91,7 +84,6 @@ def main() -> None:
     os.environ.setdefault("PAGES_RANDOM_SEED", str(RANDOM_SEED))
 
     from acs_apr_models import _run_zip_regressions, fit_pairs
-    from original.models_builder import build_original_models
     from panel_context import prepare_panel_context
 
     # Ground the panel on the exact release Zillow inputs before prepare_panel_context reads
@@ -104,12 +96,11 @@ def main() -> None:
         if source.resolve() != destination.resolve():
             shutil.copy2(source, destination)
 
-    # (1) Shared Steps 1-11 panel (df_final + df_apr_db_inc + OG render keys) -- EXACTLY ONCE.
+    # (1) Shared Steps 1-11 panel (df_final + df_apr_db_inc) -- EXACTLY ONCE.
     ctx = prepare_panel_context(base_path=args.base_path)
 
-    # (2) ZIP panel only (no regressions) -- built once, the same way build_original_models
-    #     does. Empty r2 lists keep ctx["all_r2_results"] pristine for the OG render passes
-    #     (panels_only=True produces no charts/r2), matching prepare_pages_context.
+    # (2) ZIP panel only (no regressions) -- built once. Empty r2 lists +
+    #     panels_only=True produce no charts/r2, matching prepare_pages_context.
     df_zip, df_zip_yearly_long, _sf_zips = _run_zip_regressions(
         ctx["df_apr_db_inc"],
         ctx["df_apr_all"],
@@ -130,16 +121,7 @@ def main() -> None:
         ctx["df_final"], df_zip, df_zip_yearly_long, ctx["permit_years"],
     )
 
-    # (4) OG PNGs + r2_diagnostics.csv from the shared fit (build_original_models skips its
-    #     own ZIP build + fit_pairs because fit_results is passed).
-    build_original_models(
-        ctx,
-        fit_results=fit_results,
-        df_zip=df_zip,
-        df_zip_yearly_long=df_zip_yearly_long,
-    )
-
-    # (5) Pages catalog/maps/finalize/verify from the SAME ctx + fit_results: build_release ->
+    # (4) Pages catalog/maps/finalize/verify from the SAME ctx + fit_results: build_release ->
     #     _full_release skips prepare_pages_context (context passed) and build_pages_catalog
     #     skips its internal fit (fit_results passed). _full_release needs ctx["df_final"] for
     #     the maps and build_pages_catalog needs ctx["legend_note_payload"] -- both present in
