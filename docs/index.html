@@ -100,6 +100,7 @@
     byId("tab-maps").onclick=()=>setTab("maps");byId("tab-models").onclick=()=>setTab("models");
     function entries(){return Object.entries(artifacts.catalog).map(([key,p])=>({key,p,parts:key.split(":")}))}
     function variableLabel(v){return artifacts.labels.variables?.[v]||artifacts.labels.outcomes?.[v]||artifacts.labels.predictors?.[v]||v}
+    function varOptionLabel(v){return (isHousingVariable(v)&&outcomeIsPer1000(v))?`${variableLabel(v)} per 1,000 pop`:variableLabel(v)}
     function robustnessLabel(v){return v==="none"?"None":v}
     function robustnessForGeo(geo){return [...new Set(entries().filter(e=>e.parts[0]===geo).map(e=>e.parts[3]))].sort()}
     function edgesFor(geo,robustness){return entries().filter(e=>e.parts[0]===geo&&e.parts[3]===robustness)}
@@ -128,8 +129,8 @@
       }else{
         y=yCandidates[0]||"";xs=neighborXs(geo,y,rob);x=xs[0]||"";ys=neighborYs(geo,x,rob);
       }
-      replaceOptions("y-col",ys,variableLabel,y);
-      replaceOptions("x-col",xs,variableLabel,x);
+      replaceOptions("y-col",ys,varOptionLabel,y);
+      replaceOptions("x-col",xs,varOptionLabel,x);
       const pair=selectedPair();
       const avail=pair?.availability||{},bootOk=!!avail.stationary_bootstrap,hierOk=!!avail.hierarchical;
       const displays=[...(bootOk&&hierOk?["both"]:[]),...(bootOk?["stationary_bootstrap"]:[]),...(hierOk?["hierarchical"]:[])];
@@ -139,7 +140,7 @@
         modelDisplayEl.disabled=true;
       }else{
         modelDisplayEl.disabled=false;
-        replaceOptions("model-display",displays,v=>MODEL_LABELS[v]);
+        replaceOptions("model-display",displays,v=>(v==="stationary_bootstrap"&&pair?.model_family==="continuous")?"OLS + Stationary Bootstrap":MODEL_LABELS[v]);
       }
       const zeroValuesEl=byId("zero-values");
       if(pair?.model_family==="continuous"){
