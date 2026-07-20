@@ -16,6 +16,10 @@
     button,select{padding:.45rem}.panel{display:none}.panel.active{display:block}
     .controls{display:grid;gap:.75rem;margin-bottom:1rem}
     .model-grid{grid-template-columns:repeat(2,minmax(220px,1fr))}
+    #panel-models .model-grid{grid-template-columns:minmax(220px,1fr) auto minmax(220px,1fr)}
+    #panel-models .model-grid label:has(#model-display){grid-column:1}
+    #panel-models .model-grid label:has(#zero-values){grid-column:3}
+    #transpose-xy{align-self:end;white-space:nowrap}
     .map-grid{align-items:end}
     label{display:flex;flex-direction:column;gap:.25rem;font-size:.85rem}
     .robustness-below{margin:1rem 0;max-width:320px}
@@ -49,6 +53,7 @@
   <section id="panel-models" class="panel">
     <div class="controls model-grid">
       <label>Variable (Y)<select id="y-col"></select></label>
+      <button id="transpose-xy" type="button" title="Swap X and Y">⇄</button>
       <label>Variable (X)<select id="x-col"></select></label>
       <label>Model display<select id="model-display"></select></label>
       <label>Zero Values<select id="zero-values"><option value="two_part_hurdle" selected>Two-Part Hurdle</option><option value="positive_only">Positive Only</option></select></label>
@@ -74,6 +79,7 @@
     const MODEL_LABELS={stationary_bootstrap:"Two-Part MLE + Stationary Bootstrap",hierarchical:"Hierarchical Bayes",both:"Both"};
     const MODEL_LEGEND={x:.02,y:.98,xanchor:"left",yanchor:"top",bgcolor:"rgba(255,255,255,.78)",bordercolor:"#ddd",borderwidth:1};
     const GEO_NAMES={city:"City",zip:"ZIP code"};
+    const DEFAULT_PAIR={geo:"city",y:"TOTAL_MF_CO_total",x:"zori_pct_afford"};
     const CHART_HEIGHT=560;
     const CHART_MARGIN={l:60,r:30,t:30,b:80};
     let artifacts=null;
@@ -106,7 +112,11 @@
       const geo=byId("geo").value;
       replaceOptions("robustness",robustnessForGeo(geo),robustnessLabel);
       const rob=byId("robustness").value,edgeRows=edgesFor(geo,rob);
-      const oldX=byId("x-col").value,oldY=byId("y-col").value;
+      const rawX=byId("x-col").value,rawY=byId("y-col").value;
+      // Fallback default only: an empty raw value (no real selection yet) on the default geo
+      // prefers the default pair; a real selection is never overridden.
+      const oldX=(!rawX&&geo===DEFAULT_PAIR.geo)?DEFAULT_PAIR.x:rawX;
+      const oldY=(!rawY&&geo===DEFAULT_PAIR.geo)?DEFAULT_PAIR.y:rawY;
       const yCandidates=[...new Set(edgeRows.map(e=>e.parts[1]))].filter(y=>neighborXs(geo,y,rob).length).sort();
       const xCandidates=[...new Set(edgeRows.map(e=>e.parts[2]))].filter(x=>neighborYs(geo,x,rob).length).sort();
       let y,x,xs,ys;
@@ -122,7 +132,24 @@
       const pair=selectedPair();
       const avail=pair?.availability||{},bootOk=!!avail.stationary_bootstrap,hierOk=!!avail.hierarchical;
       const displays=[...(bootOk&&hierOk?["both"]:[]),...(bootOk?["stationary_bootstrap"]:[]),...(hierOk?["hierarchical"]:[])];
-      replaceOptions("model-display",displays,v=>MODEL_LABELS[v]);
+      const modelDisplayEl=byId("model-display");
+      if(displays.length===0){
+        modelDisplayEl.replaceChildren(option("","[weak model fit, OLS only]"));
+        modelDisplayEl.disabled=true;
+      }else{
+        modelDisplayEl.disabled=false;
+        replaceOptions("model-display",displays,v=>MODEL_LABELS[v]);
+      }
+      const zeroValuesEl=byId("zero-values");
+      if(pair?.model_family==="continuous"){
+        zeroValuesEl.replaceChildren(option("","[included]"));
+        zeroValuesEl.disabled=true;
+      }else{
+        const zvOld=zeroValuesEl.value||"two_part_hurdle";
+        zeroValuesEl.replaceChildren(option("two_part_hurdle","Two-Part Hurdle"),option("positive_only","Positive Only"));
+        zeroValuesEl.value=["two_part_hurdle","positive_only"].includes(zvOld)?zvOld:"two_part_hurdle";
+        zeroValuesEl.disabled=false;
+      }
       return pair;
     }
     function bandTraces(x,component,name,color){if(!component?.lower||!component?.upper)return[];return[
@@ -217,7 +244,7 @@
       const z=features.map(f=>f.properties[metric.metric_col]),finite=z.filter(v=>Number.isFinite(Number(v))).map(Number);
       const trace={type:"choroplethmapbox",geojson:geo,locations:features.map(f=>f.properties.feature_id),z,featureidkey:"properties.feature_id",colorscale:div?"RdYlGn":"PuRd",below:"water",marker:{opacity:.92,line:{color:"rgba(255,255,255,.72)",width:.45}},text:features.map(f=>f.properties.city_name||f.properties.county_name),hovertemplate:"%{text}<br>%{z}<extra></extra>"};if(finite.length){if(div){const bound=Math.max(...finite.map(v=>Math.abs(v)));trace.zmid=0;trace.zmin=-bound;trace.zmax=bound}else{trace.zmin=Math.min(...finite);trace.zmax=Math.max(...finite)}};Plotly.newPlot("map-chart",[trace],{title:mapMetricLabel(metric),dragmode:"zoom",uirevision:`${mode}:${metric.key}`,mapbox:{style:"carto-positron",center:{lat:37.2,lon:-119.5},zoom:4.5},margin:{l:0,r:0,t:45,b:0}},{responsive:true,scrollZoom:true})
     }
-    async function load(){try{const names=["manifest.json","chart_labels.json","catalog.json","map_metrics.json","maps.geojson"],vals=await Promise.all(names.map(n=>fetch(`${RELEASE_BASE}/${n}`).then(r=>{if(!r.ok)throw Error(`${n}: ${r.status}`);return r.json()})));artifacts={manifest:vals[0],labels:vals[1],catalog:vals[2],mapMetrics:vals[3],geojson:vals[4]};replaceOptions("map-metric",artifacts.mapMetrics.map(m=>m.key),k=>mapMetricLabel(artifacts.mapMetrics.find(m=>m.key===k)));["geo","y-col","x-col","robustness","model-display","zero-values"].forEach(id=>byId(id).onchange=renderModel);byId("map-geography").onchange=renderMap;byId("map-metric").onchange=renderMap;byId("status").textContent="";byId("build-info").textContent=`Release ${artifacts.manifest.release_id} built ${artifacts.manifest.built_at}`;settleModelControls();renderMap()}catch(e){byId("status").textContent=`Archived release could not be loaded: ${e.message}`;console.error(e)}}
+    async function load(){try{const names=["manifest.json","chart_labels.json","catalog.json","map_metrics.json","maps.geojson"],vals=await Promise.all(names.map(n=>fetch(`${RELEASE_BASE}/${n}`).then(r=>{if(!r.ok)throw Error(`${n}: ${r.status}`);return r.json()})));artifacts={manifest:vals[0],labels:vals[1],catalog:vals[2],mapMetrics:vals[3],geojson:vals[4]};replaceOptions("map-metric",artifacts.mapMetrics.map(m=>m.key),k=>mapMetricLabel(artifacts.mapMetrics.find(m=>m.key===k)));["geo","y-col","x-col","robustness","model-display","zero-values"].forEach(id=>byId(id).onchange=renderModel);byId("transpose-xy").onclick=()=>{const yv=byId("y-col").value,xv=byId("x-col").value;byId("y-col").value=xv;byId("x-col").value=yv;renderModel()};byId("map-geography").onchange=renderMap;byId("map-metric").onchange=renderMap;byId("status").textContent="";byId("build-info").textContent=`Release ${artifacts.manifest.release_id} built ${artifacts.manifest.built_at}`;settleModelControls();renderMap()}catch(e){byId("status").textContent=`Archived release could not be loaded: ${e.message}`;console.error(e)}}
     load();
   </script>
 </body>
