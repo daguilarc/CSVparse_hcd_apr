@@ -3958,38 +3958,6 @@ def _round_dollar_ticks_from_range(x_lo, x_hi, max_ticks=8):
     return ticks[:max_ticks]
 
 
-# --- Section: XSF mask & pipeline stages before main() ---
-def _to_upper_set(values):
-    """Normalize a string collection to uppercase set once for reuse."""
-    return {str(v).upper() for v in values}
-
-
-@dataclass(frozen=True)
-class CityXsfMaskContext:
-    """Reusable city/XSF mask artifacts for consistent variant filtering."""
-
-    is_city: pd.Series
-    juris_upper: pd.Series
-    xsf_exclude_upper: frozenset
-    is_xsf_excluded_city: pd.Series
-    is_city_non_xsf: pd.Series
-
-
-def _build_city_xsf_mask_context(df, city_xsf_exclude):
-    is_city = (df["geography_type"] == "City")
-    juris_upper = df["JURISDICTION"].astype(str).str.upper()
-    xsf_exclude_upper = frozenset(_to_upper_set(city_xsf_exclude))
-    is_xsf_excluded_city = is_city & juris_upper.isin(xsf_exclude_upper)
-    is_city_non_xsf = is_city & (~is_xsf_excluded_city)
-    return CityXsfMaskContext(
-        is_city=is_city,
-        juris_upper=juris_upper,
-        xsf_exclude_upper=xsf_exclude_upper,
-        is_xsf_excluded_city=is_xsf_excluded_city,
-        is_city_non_xsf=is_city_non_xsf,
-    )
-
-
 def _ensure_ipums_api_key():
     """Return a usable IPUMS API key, prompting once if needed."""
     global IPUMS_API_KEY
