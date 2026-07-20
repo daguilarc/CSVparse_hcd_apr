@@ -31,7 +31,6 @@ class PairRecord:
     x_col: str
     robustness: str
     var_suffix: str
-    exclude_set: frozenset | None
     requires_msa: bool
     x_axis_filter_note: str | None
     min_jurisdictions: int
@@ -147,7 +146,6 @@ def _emit_directed_pairs(
             x_col=x_col,
             robustness=robustness,
             var_suffix=var_suffix,
-            exclude_set=None,
             requires_msa=requires_msa,
             x_axis_filter_note="Metro Regions only" if requires_msa else None,
             min_jurisdictions=min_jurisdictions,

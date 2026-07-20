@@ -3505,8 +3505,6 @@ def _fit_housing_y_city(pair, df_final, permit_years):
     if pair.requires_msa:
         mask = mask & df_final["msa_income"].notna()
     df_geo = df_final[mask].copy()
-    if pair.exclude_set:
-        df_geo = df_geo[_exclude_by_upper(df_geo["JURISDICTION"], _to_upper_set(pair.exclude_set))].copy()
     if len(df_geo) < pair.min_jurisdictions:
         return None
 
@@ -3548,8 +3546,6 @@ def _fit_housing_y_zip(pair, df_zip, df_zip_yearly_long):
     if pair.requires_msa:
         mask = mask & df_zip["msa_income"].notna()
     df_v = df_zip[mask].copy()
-    if pair.exclude_set:
-        df_v = df_v[_exclude_by_str(df_v["zipcode"].astype(str).str.zfill(5), pair.exclude_set)].copy()
     if len(df_v) < pair.min_jurisdictions:
         return None
     pop_ok = df_v["population"].notna() & (df_v["population"] > 0)
@@ -3968,13 +3964,6 @@ def _to_upper_set(values):
     return {str(v).upper() for v in values}
 
 
-def _exclude_by_upper(series, excluded_upper):
-    """Return boolean keep-mask for case-insensitive exclusions."""
-    if not excluded_upper:
-        return np.ones(len(series), dtype=bool)
-    return ~series.astype(str).str.upper().isin(excluded_upper)
-
-
 @dataclass(frozen=True)
 class CityXsfMaskContext:
     """Reusable city/XSF mask artifacts for consistent variant filtering."""
@@ -3999,14 +3988,6 @@ def _build_city_xsf_mask_context(df, city_xsf_exclude):
         is_xsf_excluded_city=is_xsf_excluded_city,
         is_city_non_xsf=is_city_non_xsf,
     )
-
-
-def _exclude_by_str(series, excluded_values):
-    """Return boolean keep-mask using string membership exclusions."""
-    if not excluded_values:
-        return np.ones(len(series), dtype=bool)
-    excluded_str = {str(v) for v in excluded_values}
-    return ~series.astype(str).isin(excluded_str)
 
 
 def _ensure_ipums_api_key():
