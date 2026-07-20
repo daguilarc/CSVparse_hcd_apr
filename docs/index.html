@@ -106,13 +106,13 @@
     function neighborYs(geo,x,robustness){return [...new Set(edgesFor(geo,robustness).filter(e=>e.parts[2]===x&&e.parts[1]!==x).map(e=>e.parts[1]))].sort()}
     function catalogKey(){return `${byId("geo").value}:${byId("y-col").value}:${byId("x-col").value}:${byId("robustness").value}`}
     function selectedPair(){return artifacts.catalog[catalogKey()]||null}
-    function settleModelControls(){
+    function settleModelControls(preferredY,preferredX){
       const geos=[...new Set(entries().map(e=>e.parts[0]))].sort();
       replaceOptions("geo",geos,v=>GEO_NAMES[v]||v);
       const geo=byId("geo").value;
       replaceOptions("robustness",robustnessForGeo(geo),robustnessLabel);
       const rob=byId("robustness").value,edgeRows=edgesFor(geo,rob);
-      const rawX=byId("x-col").value,rawY=byId("y-col").value;
+      const rawX=preferredX??byId("x-col").value,rawY=preferredY??byId("y-col").value;
       // Fallback default only: an empty raw value (no real selection yet) on the default geo
       // prefers the default pair; a real selection is never overridden.
       const oldX=(!rawX&&geo===DEFAULT_PAIR.geo)?DEFAULT_PAIR.x:rawX;
@@ -209,8 +209,8 @@
       modelRendered=false;
     }
     function viewKeyForPair(pair){return pair.model_family==="continuous"?"positive_only":byId("zero-values").value}
-    function renderModel(){
-      const pair=settleModelControls();
+    function renderModel(preferredY,preferredX){
+      const pair=settleModelControls(preferredY,preferredX);
       if(!pair){clearModelChart("This combination was not exported (insufficient jurisdictions or missing yearly data). Choose another pair.");return}
       const viewName=viewKeyForPair(pair),view=pair.views[viewName],display=byId("model-display").value;
       if(!view){clearModelChart("This combination was not exported (insufficient jurisdictions or missing yearly data). Choose another pair.");return}
@@ -244,7 +244,7 @@
       const z=features.map(f=>f.properties[metric.metric_col]),finite=z.filter(v=>Number.isFinite(Number(v))).map(Number);
       const trace={type:"choroplethmapbox",geojson:geo,locations:features.map(f=>f.properties.feature_id),z,featureidkey:"properties.feature_id",colorscale:div?"RdYlGn":"PuRd",below:"water",marker:{opacity:.92,line:{color:"rgba(255,255,255,.72)",width:.45}},text:features.map(f=>f.properties.city_name||f.properties.county_name),hovertemplate:"%{text}<br>%{z}<extra></extra>"};if(finite.length){if(div){const bound=Math.max(...finite.map(v=>Math.abs(v)));trace.zmid=0;trace.zmin=-bound;trace.zmax=bound}else{trace.zmin=Math.min(...finite);trace.zmax=Math.max(...finite)}};Plotly.newPlot("map-chart",[trace],{title:mapMetricLabel(metric),dragmode:"zoom",uirevision:`${mode}:${metric.key}`,mapbox:{style:"carto-positron",center:{lat:37.2,lon:-119.5},zoom:4.5},margin:{l:0,r:0,t:45,b:0}},{responsive:true,scrollZoom:true})
     }
-    async function load(){try{const names=["manifest.json","chart_labels.json","catalog.json","map_metrics.json","maps.geojson"],vals=await Promise.all(names.map(n=>fetch(`${RELEASE_BASE}/${n}`).then(r=>{if(!r.ok)throw Error(`${n}: ${r.status}`);return r.json()})));artifacts={manifest:vals[0],labels:vals[1],catalog:vals[2],mapMetrics:vals[3],geojson:vals[4]};replaceOptions("map-metric",artifacts.mapMetrics.map(m=>m.key),k=>mapMetricLabel(artifacts.mapMetrics.find(m=>m.key===k)));["geo","y-col","x-col","robustness","model-display","zero-values"].forEach(id=>byId(id).onchange=renderModel);byId("transpose-xy").onclick=()=>{const yv=byId("y-col").value,xv=byId("x-col").value;byId("y-col").value=xv;byId("x-col").value=yv;renderModel()};byId("map-geography").onchange=renderMap;byId("map-metric").onchange=renderMap;byId("status").textContent="";byId("build-info").textContent=`Release ${artifacts.manifest.release_id} built ${artifacts.manifest.built_at}`;settleModelControls();renderMap()}catch(e){byId("status").textContent=`Archived release could not be loaded: ${e.message}`;console.error(e)}}
+    async function load(){try{const names=["manifest.json","chart_labels.json","catalog.json","map_metrics.json","maps.geojson"],vals=await Promise.all(names.map(n=>fetch(`${RELEASE_BASE}/${n}`).then(r=>{if(!r.ok)throw Error(`${n}: ${r.status}`);return r.json()})));artifacts={manifest:vals[0],labels:vals[1],catalog:vals[2],mapMetrics:vals[3],geojson:vals[4]};replaceOptions("map-metric",artifacts.mapMetrics.map(m=>m.key),k=>mapMetricLabel(artifacts.mapMetrics.find(m=>m.key===k)));["geo","y-col","x-col","robustness","model-display","zero-values"].forEach(id=>byId(id).onchange=renderModel);byId("transpose-xy").onclick=()=>{const geo=byId("geo").value,rob=byId("robustness").value,yOld=byId("y-col").value,xOld=byId("x-col").value;if(!artifacts.catalog[`${geo}:${xOld}:${yOld}:${rob}`])return;renderModel(xOld,yOld)};byId("map-geography").onchange=renderMap;byId("map-metric").onchange=renderMap;byId("status").textContent="";byId("build-info").textContent=`Release ${artifacts.manifest.release_id} built ${artifacts.manifest.built_at}`;settleModelControls();renderMap()}catch(e){byId("status").textContent=`Archived release could not be loaded: ${e.message}`;console.error(e)}}
     load();
   </script>
 </body>
