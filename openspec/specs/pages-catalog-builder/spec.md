@@ -3,6 +3,28 @@
 ## Purpose
 TBD - created by archiving change pages-full-cartesian-catalog. Update Purpose after archive.
 ## Requirements
+### Requirement: Catalog built as a renderer over the shared result set
+
+The Pages catalog builder SHALL construct `catalog.json` by consuming the shared fit result set
+rather than running its own per-pair fit loop. It SHALL NOT call the fit engine directly.
+
+#### Scenario: No independent fit loop
+
+- **WHEN** the catalog builder produces catalog entries
+- **THEN** it reads fitted results from the shared result set
+- **AND** it does not invoke `fit_two_part_for_pages` / `fit_two_part_with_ci` per pair
+
+### Requirement: Bipartite CO catalog keys
+
+Catalog keys SHALL remain 4-part `geography:y_col:x_col:robustness`, cover only bipartite
+housing↔econ(3) pairs, and use robustness values in `{none, randhash}`.
+
+#### Scenario: Key shape and membership
+
+- **WHEN** a catalog key is emitted
+- **THEN** it splits into exactly four colon-separated parts
+- **AND** its robustness part is `none` or `randhash`
+
 ### Requirement: Standalone from acs_apr_models.main
 
 The pages catalog builder SHALL produce `catalog.json` and `manifest.json` without invoking `acs_apr_models.main()` or mutating original-script regression loops, PNG output, or `r2_diagnostics.csv`.
@@ -12,19 +34,19 @@ The pages catalog builder SHALL produce `catalog.json` and `manifest.json` witho
 - **WHEN** `scripts/export_pages_catalog.py` runs in GitHub Actions
 - **THEN** it calls `pages_catalog_builder` only and does not set `ACS_APR_EXPORT_PAGES`
 
-### Requirement: No R² chart floors for Pages export
+### Requirement: Band availability gated at OLS R² ≥ 0.1
 
-The pages catalog builder SHALL NOT apply McFadden R² ≥ 0.03 or OLS R² (y>0) ≥ 0.20 as conditions for exporting hierarchical Bayes results. Those thresholds apply only to the original script's PNG/chart policy.
+The pages catalog builder SHALL export every pair whose MLE two-part fit succeeds, applying no McFadden gate (McFadden R² is recorded for display only). Bootstrap and hierarchical Bayes bands SHALL be marked available only when the positive-part OLS R² ≥ 0.1 (the single `R2_THRESHOLD`); below that threshold the pair is exported MLE-only with `availability.stationary_bootstrap` and `availability.hierarchical` set false.
 
-#### Scenario: Sub-threshold hierarchical still exported
+#### Scenario: Sub-threshold pair exported MLE-only
 
-- **WHEN** McFadden R² is 0.01 and OLS R² is 0.15 but MLE two-part fit succeeds
-- **THEN** the builder writes both `fit_mode: ols` and `fit_mode: hierarchical` catalog entries with stats reflecting the low R² values
+- **WHEN** a pair's positive-part OLS R² is below 0.1 but its MLE two-part fit succeeds
+- **THEN** the builder writes the pair's single catalog entry with MLE stats and both band-availability flags false
 
-#### Scenario: Original script unchanged
+#### Scenario: Above-threshold pair keeps bands
 
-- **WHEN** `acs_apr_models.main()` runs a regression for PNG output
-- **THEN** it continues to skip chart/CI emission when R² floors are not met (unchanged behavior)
+- **WHEN** a pair's positive-part OLS R² is ≥ 0.1
+- **THEN** the builder writes the entry with `availability.stationary_bootstrap` and `availability.hierarchical` true
 
 ### Requirement: Export on MLE success only
 
@@ -51,7 +73,7 @@ Each exported catalog entry SHALL include a `stats.two_part` object with MLE coe
 - **Zero / hurdle part (logit):** `alpha`, `beta`, `beta_t`, `beta_p` (from `alpha_mle`, `beta_mle`, `zero_mle_t`, `zero_mle_p`)
 - **Positive part:** `intercept`, `slope`, `slope_t`, `slope_p` (from `intercept_mle`, `slope_mle`, `positive_part_t`, `positive_part_p`)
 
-The same `stats.two_part` values SHALL appear on both `fit_mode: ols` and `fit_mode: hierarchical` entries for a given pair (shared MLE fit).
+The `stats.two_part` values SHALL appear on the pair's single catalog entry (one entry per bipartite pair; the bootstrap and hierarchical views live under `views` on that same entry).
 
 #### Scenario: Zero and positive part coefficients present
 
@@ -65,21 +87,12 @@ The same `stats.two_part` values SHALL appear on both `fit_mode: ols` and `fit_m
 
 ### Requirement: Hierarchical posterior mean slope
 
-Catalog entries with `fit_mode: hierarchical` SHALL include `stats.ppm_beta` (posterior predictive mean slope) when hierarchical samples exist.
+A catalog entry whose hierarchical band is available SHALL include `stats.ppm_beta` (posterior predictive mean slope) when hierarchical samples exist.
 
-#### Scenario: PPM beta on hierarchical entry
+#### Scenario: PPM beta when hierarchical band present
 
 - **WHEN** hierarchical SMC returns `slope_samples` for a pair
-- **THEN** the hierarchical catalog entry includes `stats.ppm_beta` as the mean of those samples
-
-### Requirement: Catalog key schema
-
-Catalog keys SHALL use the format `geography:y_col:x_col:robustness:fit_mode`.
-
-#### Scenario: Key lookup
-
-- **WHEN** geography is `zip`, `y_col` is `net_MF_CO`, `x_col` is `zhvi_condo_pct_change`, robustness is `none`, fit_mode is `hierarchical`
-- **THEN** the catalog key is `zip:net_MF_CO:zhvi_condo_pct_change:none:hierarchical`
+- **THEN** the pair's catalog entry includes `stats.ppm_beta` as the mean of those samples
 
 ### Requirement: Series without axis titles
 
