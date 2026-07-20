@@ -28,20 +28,7 @@ def _zhvi_afford_label(tier_label: str) -> str:
     )
 
 
-def _zhvi_pct_afford_label(tier_label: str, pca_index_name: str | None = None) -> str:
-    index_name = pca_index_name or f"Zillow Home Value Index ({tier_label})"
-    return (
-        f"Δ{index_name} / MSA median household income (%)\n"
-        "Real 2024 dollars"
-    )
-
-
 ZHVI_AFFORD_X_LABELS = frozenset(_zhvi_afford_label(t["label"]) for t in ZHVI_TIERS)
-SCALE_X_PCT_AFFORD_LABELS = frozenset(
-    {_zhvi_pct_afford_label(t["label"]) for t in ZHVI_TIERS}
-    | {_zhvi_pct_afford_label(t["label"], t["pca_index_name"]) for t in ZHVI_TIERS}
-    | {ZORI_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL}
-)
 
 X_COL_TWO_PART_LINEAR_X = frozenset(
     {
@@ -219,13 +206,8 @@ def build_chart_arrays(result: dict, income_label: str, acs_year_range: str = "2
     x_range = np.linspace(np.nanmin(x_data), np.nanmax(x_data), 100)
     if is_log_x:
         x_range = np.maximum(x_range, 1e-300)
-    scale_x_for_plot = income_label in SCALE_X_PCT_AFFORD_LABELS
-    if scale_x_for_plot:
-        x_scatter_plot = x_data * 100
-        x_line_plot = x_range * 100
-    else:
-        x_scatter_plot = x_data
-        x_line_plot = x_range
+    x_scatter_plot = x_data
+    x_line_plot = x_range
     mle_y, boot_ci_lo, boot_ci_hi, bayes_ci_lo, bayes_ci_hi, bayes_mean = build_mle_ci(result, x_range)
     positive_line_y = positive_part_line_from_two_part(
         x_range,

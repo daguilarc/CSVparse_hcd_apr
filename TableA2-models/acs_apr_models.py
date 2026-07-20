@@ -147,10 +147,6 @@ ZORI_PCT_AFFORD_X_LABEL = (
     "Real 2024 dollars"
 )
 ZORI_PCT_AFFORD_X_LABEL_ZIP = ZORI_PCT_AFFORD_X_LABEL
-SCALE_X_PCT_AFFORD_LABELS = frozenset(
-    {_zhvi_pct_afford_label(t["label"]) for t in ZHVI_TIERS}
-    | {ZORI_AFFORD_X_LABEL, ZORI_PCT_AFFORD_X_LABEL}
-)
 # Legacy hardcoded SF ZCTAs (superseded at runtime: _xsf ZIP charts use all ZCTAs with CNTY_CLEAN == SAN FRANCISCO from APR).
 ZIP_XSF_EXCLUDE = {'94102', '94103', '94105'}
 # City (JURISDICTION) excluded in city-level XSF variant
@@ -2413,13 +2409,13 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
         elif x_tick_dollar:
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'${x:,.0f}'))
         elif x_tick_percent:
-            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.0f}%'))
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x*100:.0f}%'))
             ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune="lower"))
         else:
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
             ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune="lower"))
         if y_tick_percent:
-            ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:.1f}%'))
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y*100:.1f}%'))
         else:
             ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:,.0f}'))
         fig.savefig(
@@ -2506,7 +2502,7 @@ def plot_two_part_chart(x_scatter, y_scatter, x_line, mle_y, output_path,
     elif x_tick_dollar:
         ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'${x:,.0f}'))
     elif x_tick_percent:
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.0f}%'))
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x*100:.0f}%'))
         ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune="lower"))
     else:
         ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))

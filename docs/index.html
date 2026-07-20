@@ -172,7 +172,7 @@
     function axisTickProps(col){
       const kind=artifacts.labels.tickKinds?.[col]||(col==="median_income"?"dollar":isEconVariable(col)?"percent":null);
       if(kind==="dollar")return{tickformat:"$,.0f"};
-      if(kind==="percent")return{tickformat:",.1f",ticksuffix:"%"};
+      if(kind==="percent")return{tickformat:".1%"};
       return{};
     }
     function observationLegendName(pair){return pair.data_label||(byId("geo").value==="zip"?"ZIP codes":"Cities")}

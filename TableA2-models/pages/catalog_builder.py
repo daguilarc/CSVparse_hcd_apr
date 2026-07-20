@@ -20,7 +20,6 @@ from acs_apr_models import (
     _resolve_legend_note,
     fit_pairs,
 )
-from .chart_prep import SCALE_X_PCT_AFFORD_LABELS
 from .export import PAGES_CATALOG, PAGES_MANIFEST, record_regression, write_pages_data
 from .pair_registry import _x_col_requires_msa, parse_city_outcome, parse_zip_outcome
 from .pipeline_context import prepare_pages_context
@@ -59,11 +58,10 @@ def _record_dict_for_pages(result) -> dict[str, Any]:
 
     Every value here is already computed by fit_pairs -- this only reshapes it, it does not
     fit anything:
-    - x_data is recovered from chart_arrays["x_scatter_plot"] by inverting the known,
-      deterministic SCALE_X_PCT_AFFORD_LABELS x100 display-scaling (chart_prep.py applies it
-      only when x_render_meta's display_label is in that set). record_regression rebuilds
-      chart_arrays with the *same* income_label, so it re-applies the identical scale check
-      and the round trip is exact (elementwise x/100 then x*100), not an approximation.
+    - x_data comes straight off chart_arrays["x_scatter_plot"] with NO scaling. Both axes are
+      canonical raw ratios in the catalog; the econ ×100 percent display is a display-layer
+      tick-format concern (PNG FuncFormatters / Plotly ".1%" tickformat), not applied to the
+      stored data on either axis.
     - y_data/labels/is_log_x come straight off chart_arrays (y_scatter is always the raw,
       unscaled y -- chart_prep.py never scales it).
     - mle_result is reconstructed from coeffs (intercept/slope/alpha/beta_mle) + mle_diag
@@ -79,8 +77,7 @@ def _record_dict_for_pages(result) -> dict[str, Any]:
     samples = result.samples or {}
     x_label = result.x_render_meta["display_label"]
 
-    x_scatter = np.asarray(chart_arrays["x_scatter_plot"], dtype=np.float64)
-    x_data = x_scatter / 100.0 if x_label in SCALE_X_PCT_AFFORD_LABELS else x_scatter
+    x_data = np.asarray(chart_arrays["x_scatter_plot"], dtype=np.float64)
 
     mle_result = {
         "intercept_mle": coeffs.get("intercept_mle"),
