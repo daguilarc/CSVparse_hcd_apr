@@ -77,7 +77,8 @@
   <script>
     const RELEASE_BASE="data/releases/2018-2024";
     const MODEL_LABELS={stationary_bootstrap:"Two-Part MLE + Stationary Bootstrap",hierarchical:"Hierarchical Bayes",both:"Both"};
-    const MODEL_LEGEND={x:.02,y:.98,xanchor:"left",yanchor:"top",bgcolor:"rgba(255,255,255,.78)",bordercolor:"#ddd",borderwidth:1};
+    // Top-right corner: the fitted lines slope downward, so the high-X/high-Y region is reliably empty. Opaque bg masks any stray point behind it.
+    const MODEL_LEGEND={x:.98,y:.98,xanchor:"right",yanchor:"top",bgcolor:"rgba(255,255,255,.92)",bordercolor:"#ddd",borderwidth:1};
     const GEO_NAMES={city:"City",zip:"ZIP code"};
     const DEFAULT_PAIR={geo:"city",y:"TOTAL_MF_CO_total",x:"zori_pct_afford"};
     const CHART_HEIGHT=560;
