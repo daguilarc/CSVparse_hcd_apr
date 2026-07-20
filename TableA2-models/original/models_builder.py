@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from acs_apr_models import (
     R2_DIAG_COLUMNS,
-    R2_OLS_POSITIVE_THRESHOLD,
-    R2_THRESHOLD_TWOPART_MCFADDEN_CHART,
+    R2_THRESHOLD,
     _render_continuous_results,
     _run_city_regressions,
     _run_zip_regressions,
@@ -108,8 +107,8 @@ def build_original_models(ctx, *, fit_results=None, df_zip=None, df_zip_yearly_l
     if charts_skipped_low_r2:
         print("\n" + "=" * 70)
         print(
-            f"Charts not produced (two-part: McFadden's R2 < {R2_THRESHOLD_TWOPART_MCFADDEN_CHART}; "
-            f"OLS R2 on y>0 subset < {R2_OLS_POSITIVE_THRESHOLD} for two-part and continuous)"
+            f"Charts not produced (OLS R2 < {R2_THRESHOLD}: y>0 subset for two-part, "
+            f"full fit for continuous; McFadden's R2 is diagnostic-only and does not gate)"
         )
         print("=" * 70)
         for chart_id, r2 in charts_skipped_low_r2:

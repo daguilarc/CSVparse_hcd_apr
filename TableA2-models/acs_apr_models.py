@@ -685,13 +685,11 @@ CI_LABEL_CREDIBLE_SMC = "95% Credible Interval\n(Sequential Monte Carlo)"
 CI_COLOR_CYAN = "cyan"
 CI_COLOR_PINK = "#F472B6"
 CI_COLOR_OVERLAP = "#6B2D5C"
-# R² chart policy: one numeric cutoff (R2_THRESHOLD) but two different R² definitions (name the gate at call sites).
-# - Two-part (units, rate-on-rate, ZIP outcomes): McFadden pseudo-R² → R2_THRESHOLD_TWOPART_MCFADDEN_CHART
-# - Secondary two-part gate: OLS R² on y>0 subset must also pass R2_OLS_POSITIVE_THRESHOLD (after McFadden passes).
-R2_THRESHOLD = 0.03
-R2_THRESHOLD_TWOPART_MCFADDEN_CHART = R2_THRESHOLD
-R2_THRESHOLD_CI_CHART = R2_THRESHOLD  # legacy alias; equals both semantic thresholds numerically
-R2_OLS_POSITIVE_THRESHOLD = 0.20
+# R² chart policy: a single numeric cutoff (R2_THRESHOLD) applied to OLS R² everywhere it
+# gates chart/CI availability. Two-part (units, rate-on-rate, ZIP outcomes) gates on OLS R²
+# of the y>0 subset; continuous (econ-as-Y) gates on its own OLS R². McFadden's pseudo-R² is
+# still computed and displayed as a diagnostic for two-part fits, but it does not gate.
+R2_THRESHOLD = 0.1
 
 
 def _rate_per_1000(raw, pop): return (np.asarray(raw,dtype=np.float64)/np.asarray(pop,dtype=np.float64))*1000.0
@@ -3308,19 +3306,9 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
     geo_lbl = r2_geography if r2_geography is not None else ""
     x_line_diag = np.linspace(float(np.nanmin(x_raw)), float(np.nanmax(x_raw)), 100)
     if not skip_r2_chart_gate:
-        if mle_result['mcfadden_r2'] < R2_THRESHOLD_TWOPART_MCFADDEN_CHART:
-            if r2_diagnostics is not None:
-                _append_two_part_r2_diagnostics_row(
-                    r2_diagnostics, reg_lbl, geo_lbl, mle_result, x_col, x_raw, all_rate, x_line_diag, None, None,
-                )
-            if skipped_low_r2 is not None and chart_id is not None:
-                skipped_low_r2.append((chart_id, mle_result['mcfadden_r2']))
-            print(
-                f"    McFadden's R² < {R2_THRESHOLD_TWOPART_MCFADDEN_CHART}, skipping CI and chart; "
-                f"OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_pos)}"
-            )
-            return None
-        if not np.isfinite(ols_r2_pos) or ols_r2_pos < R2_OLS_POSITIVE_THRESHOLD:
+        # McFadden's pseudo-R² is computed above and displayed, but it no longer gates chart/CI
+        # availability -- only the OLS R² on the y>0 subset does (single R2_THRESHOLD).
+        if not np.isfinite(ols_r2_pos) or ols_r2_pos < R2_THRESHOLD:
             if r2_diagnostics is not None:
                 _append_two_part_r2_diagnostics_row(
                     r2_diagnostics, reg_lbl, geo_lbl, mle_result, x_col, x_raw, all_rate, x_line_diag, None, None,
@@ -3328,7 +3316,7 @@ def fit_two_part_with_ci(df_totals, df_yearly, x_col, y_col, years, log_x=True, 
             if skipped_low_r2 is not None and chart_id is not None:
                 skipped_low_r2.append((chart_id, ols_r2_pos))
             print(
-                f"    OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_pos)} < {R2_OLS_POSITIVE_THRESHOLD}, "
+                f"    OLS R² (y>0 subset) = {_fmt_ols_r2(ols_r2_pos)} < {R2_THRESHOLD}, "
                 f"skipping CI and chart; McFadden's R² = {mle_result['mcfadden_r2']:.3f}"
             )
             return None
@@ -3714,7 +3702,7 @@ def fit_pairs(df_final, df_zip, df_zip_yearly_long, permit_years, *, max_pairs=N
             r2_gate_passed = bool(
                 fit is not None
                 and np.isfinite(fit.get("ols_rsquared", np.nan))
-                and fit["ols_rsquared"] >= R2_OLS_POSITIVE_THRESHOLD
+                and fit["ols_rsquared"] >= R2_THRESHOLD
             )
             if fit is not None and r2_gate_passed:
                 hierarchical = _econ_y_county_hierarchical_ci(pair, frame)
@@ -3742,7 +3730,7 @@ def fit_pairs(df_final, df_zip, df_zip_yearly_long, permit_years, *, max_pairs=N
             r2_gate_passed = bool(
                 fit is not None
                 and np.isfinite(fit.get("ols_rsquared", np.nan))
-                and fit["ols_rsquared"] >= R2_OLS_POSITIVE_THRESHOLD
+                and fit["ols_rsquared"] >= R2_THRESHOLD
             )
             if fit is not None and not r2_gate_passed:
                 for key in (
