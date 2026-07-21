@@ -14,8 +14,6 @@
 !docs/chart_labels.json
 !docs/data/releases/
 !docs/data/releases/**/*
-!openspec/
-!openspec/**/*
 !README.md
 !requirements-pages-release.txt
 !requirements-pages-release.lock
@@ -44,9 +42,7 @@ Chase_*.pdf
 /scripts/build_full_release.py
 /TableA2-models/original/
 
-# Re-include OpenSpec markdown and release JSON after *.md / *.json ignores
-!openspec/**/*.md
-!openspec/**/*.yaml
+# Re-include release JSON after the blanket *.json ignore
 !docs/data/releases/**/*.json
 !docs/data/releases/**/*.js
 !docs/data/releases/**/*.geojson
@@ -59,3 +55,6 @@ docs/data/releases/_backups/
 tests/
 TableA2-models/test_pair_registry.py
 TableA2-models/r2_diagnostics_filtered_both_model_types_two_coeffs.tsv
+
+# Local-only dev-process docs (kept on disk, not published; nothing at runtime reads these)
+openspec/

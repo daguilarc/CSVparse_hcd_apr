@@ -32,7 +32,6 @@ Full build → verify → promote to `docs/data/releases/2018-2024/` → Playwri
 - **`docs/`** — the published static site (`docs/index.html`) plus `docs/data/releases/<id>/`, the immutable release archives.
 - **`e2e/`** — Playwright browser tests for the published explorer (CI-wired).
 - **`notebooks/`** — `apr_explorer.ipynb`, a notebook consumer of an archived release; see `docs/PAGES_SETUP.md`.
-- **`openspec/`** — design history and specs for this codebase itself, not needed to use the pipeline.
 - **`requirements.txt`, `requirements-pages-release.txt`, `requirements-pages-release.lock`** — see Dependencies below.
 
 ## Dependencies
