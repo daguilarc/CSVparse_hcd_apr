@@ -3,11 +3,11 @@
   "n_pairs_attempted": 188,
   "n_pairs_exported": 140,
   "n_pairs_mle_failed": 48,
-  "n_stationary_bootstrap_succeeded": 140,
-  "n_stationary_bootstrap_failed": 134,
-  "n_hierarchical_attempted": 174,
-  "n_hierarchical_succeeded": 40,
-  "n_hierarchical_failed": 134,
+  "n_stationary_bootstrap_succeeded": 34,
+  "n_stationary_bootstrap_failed": 142,
+  "n_hierarchical_attempted": 176,
+  "n_hierarchical_succeeded": 34,
+  "n_hierarchical_failed": 142,
   "input_profile": "release-2018-2024-v1",
   "source_files": [
     "acs/acs_zcta_income_cache.json",
@@ -67,7 +67,7 @@
     "zillow/Zip_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv": "dd5dda31951188b77374cbca1b0af636f42cf30b8ae29572d13e24c765d74fca",
     "zillow/Zip_zori_uc_sfrcondomfr_sm_sa_month.csv": "fa148854c7183218013a32e40897cd55eca96fa11087fb4aa41f69a2357a5a66"
   },
-  "built_at": "2026-07-20T08:41:42.935121+00:00",
+  "built_at": "2026-07-21T08:02:01.740375+00:00",
   "release_id": "2018-2024",
   "build_actor": "diegoaguilar-canabal",
   "hcd_apr_range": "2018\u20132024",
@@ -233,7 +233,7 @@
   "random_seed": 20240618,
   "maps_geojson": "maps.geojson",
   "python_runtime": "CPython 3.11.14",
-  "code_revision": "68e5e4e9c0c156a6a7e8fa8157baf92e6aaa7bdb",
+  "code_revision": "f7aa558971ead93bb0190ac75fb2e83d7bbf5f68",
   "code_files": [
     ".github/workflows/build-pages.yml",
     "TableA2-models/acs_apr_models.py",
@@ -265,13 +265,13 @@
     "docs/index.html",
     "notebooks/apr_explorer.ipynb"
   ],
-  "code_sha256": "33c6ba8898db85ad7c2f156cafdf93f9d251d5fd23b318eb6ee0cc307f2c9cfe",
+  "code_sha256": "fbe77b7a7a78783ebd115ebcc5b8e2bb16edf22ae48837a665ac29924092b429",
   "dependency_files": [
     "requirements-pages-release.lock"
   ],
   "dependency_sha256": "511eb183cb94c2e2ea06a4b1118036c991a131bd76f16802036de80650af3be7",
   "artifact_sha256": {
-    "catalog.json": "fc5bdac236d5707471417740dc61bf0c4fc5bdcf0954a2967645ecb55a132ea7",
+    "catalog.json": "215fd4829a351eaba3c430db4ad40ec5638e2c0e15902088689147bc758121bd",
     "map_metrics.json": "35f37b60531e53f14c13695e58118f40062b623ea966652ab560a9f7a88e52a3",
     "maps.geojson": "4b7a89af5e2175c72848302ede734ad1b4ac9a0b6f2477e6f067df62ce6fa358",
     "chart_labels.json": "68ebf02e6fc6fdeec8df89f458d4339d87400997806414b0b7a0d2922465e313",
