@@ -35,7 +35,7 @@
   <div class="tab-row">
     <div class="tabs">
       <button id="tab-maps" class="active" type="button">Maps</button>
-      <button id="tab-models" type="button">Models</button>
+      <button id="tab-models" type="button">Statistical Models</button>
     </div>
     <label class="tab-geo" id="models-geo-wrap" hidden>Geography<select id="geo"></select></label>
   </div>
@@ -163,7 +163,7 @@
     ]}
     const ACS_ECON=new Set(["median_income"]);
     const ECON_PREFIXES=["zori_","zhvi_","pct_afford_"];
-    function isEconVariable(v){return ACS_ECON.has(v)||ECON_PREFIXES.some(p=>String(v).startsWith(p))}
+    function isEconVariable(v){const econVariables=artifacts?.labels?.econVariables;if(Array.isArray(econVariables))return econVariables.includes(v);return ACS_ECON.has(v)||ECON_PREFIXES.some(p=>String(v).startsWith(p))}
     function isHousingVariable(v){return !isEconVariable(v)}
     function outcomeIsPer1000(col){return (artifacts.labels.per1000Outcomes||[]).includes(col)}
     function axisTitle(col){

@@ -48,12 +48,12 @@ Changing geography view or map metric SHALL filter archived features and select 
 
 ### Requirement: Color scale follows cmap_kind
 
-Sequential construction metrics SHALL use the existing purple sequential scale. Diverging ACS metrics SHALL use a diverging scale centered at zero.
+Sequential construction metrics SHALL use the existing purple sequential scale.
 
-#### Scenario: Income percent change
+#### Scenario: Sequential construction metric color scale
 
-- **WHEN** `income_pct_change` is selected
-- **THEN** Plotly uses the diverging scale with `zmid: 0`
+- **WHEN** a sequential construction metric is selected
+- **THEN** the map displays using the purple sequential color scale
 
 ### Requirement: Jurisdiction subheader follows geography view
 

@@ -296,9 +296,10 @@ def finalize_release_integrity(stage: Path, *, preserve_runtime_pins: bool = Fal
 def enrich_chart_labels(labels: dict) -> dict:
     """Merge role-neutral variables and geography applicability for release export."""
     sys.path.insert(0, str(MODELS_DIR))
-    from pages.map_metric_registry import predictor_tick_kind
+    from pages.map_metric_registry import is_econ_variable, predictor_tick_kind
 
     labels["variables"] = {**labels["outcomes"], **labels["predictors"]}
+    labels["econVariables"] = sorted(k for k in labels["variables"] if is_econ_variable(k))
     labels["variableApplicability"] = {
         "city": [
             k for k in labels["variables"]
@@ -499,6 +500,7 @@ def overlay_real_maps(stage: Path) -> None:
         json.dumps(build_map_formula_audit(plot_frame, registry), indent=2, allow_nan=False),
         encoding="utf-8",
     )
+    (stage / "chart_labels.json").write_text(json.dumps(labels, indent=2, allow_nan=False), encoding="utf-8")
 
 
 def _full_release(

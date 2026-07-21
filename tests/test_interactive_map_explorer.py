@@ -347,15 +347,17 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         first = build_map_metric_registry(df, labels)
         second = build_map_metric_registry(df, labels)
         self.assertEqual(first, second)
-        construction_y = [m["y_col"] for m in first[:-2]]
+        construction_y = [m["y_col"] for m in first]
         self.assertEqual(construction_y, ["TOTAL_MF_CO_total", "DB_CO_total", "NOT_ARCHIVED_CO_total"])
         self.assertNotIn("TOTAL_CO_total", construction_y)
         self.assertNotIn("total_owner_CO_total", construction_y)
         self.assertNotIn("TOTAL_MF_BP_total", construction_y)
         self.assertNotIn("DB_BP_total", construction_y)
         self.assertNotIn("income_delta_pct_change", construction_y)
-        self.assertTrue(all(m["unit"] == "per_1000_pop" for m in first[:-2]))
-        self.assertEqual([m["key"] for m in first[-2:]], ["population_pct_change", "income_pct_change"])
+        self.assertTrue(all(m["unit"] == "per_1000_pop" for m in first))
+        # Map registry is housing-only: no unconditional ACS delta entries.
+        self.assertNotIn("population_pct_change", [m["key"] for m in first])
+        self.assertNotIn("income_pct_change", [m["key"] for m in first])
 
     def test_non_mf_housing_outcome_predicate(self):
         from pages.map_metric_registry import is_non_mf_housing_outcome
@@ -391,6 +393,40 @@ class RegistryAndMapFormulaTests(unittest.TestCase):
         self.assertTrue(is_econ_cross_pair("zori_pct_change", "median_income"))
         self.assertFalse(is_econ_cross_pair("DB_CO_total", "TOTAL_MF_CO_total"))
         self.assertFalse(is_econ_cross_pair("DB_CO_total", "zori_pct_change"))
+
+    def test_map_registry_is_housing_only_no_acs_deltas(self):
+        """Map registry is housing-only: real chart labels, no *_pct_change delta entries."""
+        from pages.map_metric_registry import build_map_metric_registry
+
+        labels = json.loads((ROOT / "docs/chart_labels.json").read_text(encoding="utf-8"))
+        construction_cols = [
+            c for c in labels["per1000Outcomes"] if c.endswith("_CO_total")
+        ]
+        df = pd.DataFrame(columns=construction_cols)
+        metrics = build_map_metric_registry(df, labels)
+        self.assertTrue(metrics)
+        for metric in metrics:
+            self.assertTrue(metric["key"].endswith("_CO_total"))
+            self.assertIsNotNone(metric["y_col"])
+            self.assertFalse(metric["key"].endswith("_pct_change"))
+        keys = [m["key"] for m in metrics]
+        self.assertNotIn("population_pct_change", keys)
+        self.assertNotIn("income_pct_change", keys)
+
+    def test_enrich_chart_labels_emits_econ_variables_matching_predicate(self):
+        spec = importlib.util.spec_from_file_location(
+            "export_enrich_econ_variables", ROOT / "scripts/export_pages_catalog.py"
+        )
+        export = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(export)
+        from pages.map_metric_registry import is_econ_variable
+
+        labels = json.loads((ROOT / "docs/chart_labels.json").read_text(encoding="utf-8"))
+        enriched = export.enrich_chart_labels(labels)
+        self.assertIn("econVariables", enriched)
+        expected = sorted(k for k in enriched["variables"] if is_econ_variable(k))
+        self.assertEqual(sorted(enriched["econVariables"]), expected)
+        self.assertTrue(expected)
 
     def test_prune_non_mf_release_artifacts_drops_all_housing_streams(self):
         spec = importlib.util.spec_from_file_location(
@@ -701,7 +737,7 @@ class StaticContractTests(unittest.TestCase):
         html = (ROOT / "docs/index.html").read_text(encoding="utf-8")
         self.assertRegex(
             html,
-            r'(?s)<div class="tab-row">.*?<button id="tab-models"[^>]*>Models</button>.*?'
+            r'(?s)<div class="tab-row">.*?<button id="tab-models"[^>]*>Statistical Models</button>.*?'
             r'<label class="tab-geo" id="models-geo-wrap" hidden>Geography<select id="geo"></select></label>',
         )
         self.assertNotRegex(

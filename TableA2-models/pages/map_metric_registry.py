@@ -1,4 +1,4 @@
-"""Deterministic release registry for mappable city CO per-1000 metrics plus ACS deltas."""
+"""Deterministic release registry for mappable city CO per-1000 housing metrics."""
 
 from __future__ import annotations
 
@@ -99,11 +99,12 @@ def _variable_title(labels: dict[str, Any], col: str) -> str:
 
 
 def build_map_metric_registry(df_final, labels: dict[str, Any]) -> list[dict[str, Any]]:
-    """City CO per-1000 map metrics from per1000Outcomes ∩ panel CO columns, plus ACS deltas.
+    """City CO per-1000 housing map metrics from per1000Outcomes ∩ panel CO columns.
 
     Candidate selection matches assemble_plot_frame (endswith ``_CO_total``). Catalog Y
     membership must not select map metrics — regression archive is role-neutral under cartesian.
-    Non-MF all-housing streams (TOTAL_*, total_owner_*) are excluded from candidates.
+    Non-MF all-housing streams (TOTAL_*, total_owner_*) are excluded from candidates. Econ/ACS
+    delta metrics are not part of this registry (map shows housing construction streams only).
     """
     per1000 = labels.get("per1000Outcomes")
     if not isinstance(per1000, list) or not per1000:
@@ -130,12 +131,4 @@ def build_map_metric_registry(df_final, labels: dict[str, Any]) -> list[dict[str
             "phase": phase,
             "applicable_geo_types": list(ALL_GEO_TYPES),
         })
-    metrics.extend([
-        {"key": "population_pct_change", "y_col": None, "metric_col": "population_pct_change",
-         "title": "Population percent change", "subtitle": "",
-         "cmap_kind": "div", "phase": "ACS", "applicable_geo_types": list(ALL_GEO_TYPES)},
-        {"key": "income_pct_change", "y_col": None, "metric_col": "income_pct_change",
-         "title": "Real median household income percent change", "subtitle": "",
-         "cmap_kind": "div", "phase": "ACS", "applicable_geo_types": list(ALL_GEO_TYPES)},
-    ])
     return metrics

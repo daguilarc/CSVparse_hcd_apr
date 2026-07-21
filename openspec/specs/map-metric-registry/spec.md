@@ -1,7 +1,7 @@
 # map-metric-registry Specification
 
 ## Purpose
-Deterministic archived map-metric registry (`map_metrics.json`) for construction outcomes and ACS deltas.
+Deterministic archived map-metric registry (`map_metrics.json`) for housing construction outcomes only. The registry's variable set mirrors the Statistical Models page's housing vocabulary (all APR-provenance CO housing streams, excluding econ predictors); ACS demographic/economic delta metrics are not part of the map.
 
 ## Requirements
 
@@ -26,14 +26,14 @@ Each entry SHALL include `key`, `y_col`, `metric_col` (`{y_col}_per1000`), `titl
 - **WHEN** a units column exists but no archived catalog pair uses that outcome
 - **THEN** the registry does not advertise it as an archived model outcome
 
-### Requirement: Include ACS delta metrics
+### Requirement: Housing-only registry (no ACS delta metrics)
 
-The registry SHALL include `population_pct_change` and `income_pct_change` with `cmap_kind: div`, percent units, and explicit applicable geo types.
+The registry SHALL emit only housing construction (`_CO_total`) metric entries. It SHALL NOT include `population_pct_change`, `income_pct_change`, or any other ACS/econ delta metric — the map's variable set is exactly the housing vocabulary, matching the Statistical Models page's housing variables (excluding econ predictors per the shared `is_econ_variable` predicate).
 
-#### Scenario: ACS deltas present
+#### Scenario: ACS deltas absent
 
 - **WHEN** the release map registry is built
-- **THEN** it includes both ACS delta metrics independently of construction outcome availability
+- **THEN** it does not include `population_pct_change` or `income_pct_change`, nor any entry with `y_col: None`
 
 ### Requirement: Display titles use structured labels
 
