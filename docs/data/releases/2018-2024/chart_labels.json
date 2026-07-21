@@ -207,6 +207,18 @@
     "pct_afford_condo": "Change in Condo/Co-op ZHVI / MSA median household income",
     "pct_afford_sfrcondo": "Change in All Homes ZHVI / MSA median household income"
   },
+  "econVariables": [
+    "median_income",
+    "pct_afford_condo",
+    "pct_afford_sfrcondo",
+    "zhvi_condo_afford_ratio",
+    "zhvi_condo_pct_change",
+    "zhvi_sfrcondo_afford_ratio",
+    "zhvi_sfrcondo_pct_change",
+    "zori_afford_ratio",
+    "zori_pct_afford",
+    "zori_pct_change"
+  ],
   "variableApplicability": {
     "city": [
       "TOTAL_CO_total",

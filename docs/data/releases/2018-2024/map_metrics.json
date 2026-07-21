@@ -118,33 +118,5 @@
       "county_whole",
       "county_residual"
     ]
-  },
-  {
-    "key": "population_pct_change",
-    "y_col": null,
-    "metric_col": "population_pct_change",
-    "title": "Population percent change",
-    "subtitle": "",
-    "cmap_kind": "div",
-    "phase": "ACS",
-    "applicable_geo_types": [
-      "city",
-      "county_whole",
-      "county_residual"
-    ]
-  },
-  {
-    "key": "income_pct_change",
-    "y_col": null,
-    "metric_col": "income_pct_change",
-    "title": "Real median household income percent change",
-    "subtitle": "",
-    "cmap_kind": "div",
-    "phase": "ACS",
-    "applicable_geo_types": [
-      "city",
-      "county_whole",
-      "county_residual"
-    ]
   }
 ]

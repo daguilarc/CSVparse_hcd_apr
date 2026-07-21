@@ -233,7 +233,7 @@
   "random_seed": 20240618,
   "maps_geojson": "maps.geojson",
   "python_runtime": "CPython 3.11.14",
-  "code_revision": "f7aa558971ead93bb0190ac75fb2e83d7bbf5f68",
+  "code_revision": "2ccf430ac5255a706d1952917a7ec4a2bba272e9",
   "code_files": [
     ".github/workflows/build-pages.yml",
     "TableA2-models/acs_apr_models.py",
@@ -265,16 +265,16 @@
     "docs/index.html",
     "notebooks/apr_explorer.ipynb"
   ],
-  "code_sha256": "fbe77b7a7a78783ebd115ebcc5b8e2bb16edf22ae48837a665ac29924092b429",
+  "code_sha256": "555b5f9777c97adc394fa9a511c11a204671daff24fc13e2f3c49d0fa75a1c2c",
   "dependency_files": [
     "requirements-pages-release.lock"
   ],
   "dependency_sha256": "511eb183cb94c2e2ea06a4b1118036c991a131bd76f16802036de80650af3be7",
   "artifact_sha256": {
     "catalog.json": "215fd4829a351eaba3c430db4ad40ec5638e2c0e15902088689147bc758121bd",
-    "map_metrics.json": "35f37b60531e53f14c13695e58118f40062b623ea966652ab560a9f7a88e52a3",
-    "maps.geojson": "4b7a89af5e2175c72848302ede734ad1b4ac9a0b6f2477e6f067df62ce6fa358",
-    "chart_labels.json": "68ebf02e6fc6fdeec8df89f458d4339d87400997806414b0b7a0d2922465e313",
+    "map_metrics.json": "da009b91ef8c1b6494115f69e1f7cd2b07e8366f4306364b305d7e9838023ace",
+    "maps.geojson": "879b7c44fae7ee0ac92c90255ea28549c7066bc6fae27493a822e646278c84ea",
+    "chart_labels.json": "608704a9cf1b237f82c806f1147488df7c4042c356b15672b67ea44867325e53",
     "map_formula_audit.json": "f09e46fa9c1abe6882a26fc3f7e22c251caf245629d1cb06d5a56c4790b6cdcd",
     "plotly.min.js": "41a395c2d558d13d3655a1ebafaa67a072c2c1ac8c269e0ee67e18c9a137ac99"
   }
