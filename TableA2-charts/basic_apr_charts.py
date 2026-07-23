@@ -111,26 +111,26 @@ def _prune_origin_ticks(ax, eps=1e-9):
         ax.yaxis.set_major_locator(MaxNLocator(prune='lower'))
 
 
-def get_income_cols(prefix, tier_suffix):
-    """Return column name(s) for income tier aggregation.
-    
-    EXTR_LOW_INCOME_UNITS is a single column with no BP/CO prefix or DR/NDR suffix.
-    Other tiers have {prefix}{tier}_DR and {prefix}{tier}_NDR columns (prefix may be empty for entitlement).
-    Returns: (col_or_list, is_single) - either single column name or (dr_col, ndr_col) tuple.
+def income_col_names(stage, tier, part='all'):
+    """Canonical income-tier column name(s) for one development stage.
+
+    stage: '' (entitlement), 'BP', or 'CO'  -- ONE convention (bare; separator added here).
+    tier : 'EXTR_LOW' | 'VLOW' | 'LOW' | 'MOD' | 'ABOVE_MOD'.
+    part : 'all' -> the tier's stage column(s) to SUM (DR+NDR, or the single column for
+                    ELI/ABOVE_MOD which have no DR/NDR split);
+           'dr'/'ndr' -> the single DR or NDR column (DR/NDR tiers only).
+    Always returns a LIST of column names, so every caller uniformly sums it -- no is_single branch.
     """
-    if tier_suffix == 'EXTR_LOW':
-        return 'EXTR_LOW_INCOME_UNITS', True
-    sep = '_' if prefix else ''
-    return (f'{prefix}{sep}{tier_suffix}_DR', f'{prefix}{sep}{tier_suffix}_NDR'), False
+    p = f'{stage}_' if stage else ''
+    if tier == 'EXTR_LOW':   return [f'{p}EXTR_LOW_INCOME']       # imputed single, no DR/NDR
+    if tier == 'ABOVE_MOD':  return [f'{p}ABOVE_MOD_INCOME']      # single, no DR/NDR
+    if part == 'dr':   return [f'{p}{tier}_INCOME_DR']
+    if part == 'ndr':  return [f'{p}{tier}_INCOME_NDR']
+    return [f'{p}{tier}_INCOME_DR', f'{p}{tier}_INCOME_NDR']
 
 
 # Income-by-unit-cat charts: stacked tier columns (VLOW/LOW/MOD/ABOVE_MOD) in absolute units.
 INCOME_BY_UNITCAT_STACK_KEYS = ('VLOW', 'LOW', 'MOD', 'ABOVE_MOD')
-_UNITCAT_DR_NDR_KEYS = (
-    ('VLOW', 'VLOW_INCOME_DR', 'VLOW_INCOME_NDR'),
-    ('LOW', 'LOW_INCOME_DR', 'LOW_INCOME_NDR'),
-    ('MOD', 'MOD_INCOME_DR', 'MOD_INCOME_NDR'),
-)
 UNITCAT_INCOME_TIER_LEGEND = (
     ('VLOW', 'Very Low Income', 'blue'),
     ('LOW', 'Low Income', 'orange'),
@@ -143,15 +143,38 @@ _INCOME_UNITCAT_FIG_BOTTOM = 0.52
 # Taller, narrower figure so y-axis (units) has more pixels; six categories need limited width.
 _INCOME_UNITCAT_FIGSIZE_INCHES = (6.5, 8.5)
 
+# DR/NDR-suffix-level tier structure (one canonical definition; was duplicated verbatim in
+# _coerce_income_unit_columns and in main()). Format: (tier, part, label, color, linestyle) --
+# EXTR_LOW's part is ignored by income_col_names (always single-column).
+income_tier_structure = [
+    ('MOD', 'dr', 'Moderate (DR)', COLORS['purple'], '-'),
+    ('MOD', 'ndr', 'Moderate (Non-DR)', COLORS['purple'], '--'),
+    ('LOW', 'dr', 'Low (DR)', COLORS['orange'], '-'),
+    ('LOW', 'ndr', 'Low (Non-DR)', COLORS['orange'], '--'),
+    ('VLOW', 'dr', 'Very Low (DR)', COLORS['blue'], '-'),
+    ('VLOW', 'ndr', 'Very Low (Non-DR)', COLORS['blue'], '--'),
+    ('EXTR_LOW', 'all', 'Extremely Low', COLORS['gray'], '-'),
+]
 
-def _income_tier_units_by_unitcat(df, prefix, above_mod_col, unit_cat_order):
+# Per-stage specs for the income-by-unitcat stacked-bar charts (one canonical definition; was
+# duplicated verbatim in _coerce_income_unit_columns and in main()). Format:
+# (stage, display_name, filename) -- above_mod_col is now derived via income_col_names.
+unitcat_stage_specs = [
+    ('', 'entitlement', 'income_by_unitcat_ent.png'),
+    ('BP', 'building permit', 'income_by_unitcat_bp.png'),
+    ('CO', 'certificate of occupancy', 'income_by_unitcat_co.png'),
+]
+
+
+def _income_tier_units_by_unitcat(df, stage, unit_cat_order):
     """Aggregate income-tier unit counts by UNIT_CAT for one development stage (absolute units)."""
-    ent_income_cols = [
-        f'{prefix}VLOW_INCOME_DR', f'{prefix}VLOW_INCOME_NDR',
-        f'{prefix}LOW_INCOME_DR', f'{prefix}LOW_INCOME_NDR',
-        f'{prefix}MOD_INCOME_DR', f'{prefix}MOD_INCOME_NDR',
-        above_mod_col,
-    ]
+    above_mod_col = income_col_names(stage, 'ABOVE_MOD')[0]
+    ent_income_cols = (
+        income_col_names(stage, 'VLOW')
+        + income_col_names(stage, 'LOW')
+        + income_col_names(stage, 'MOD')
+        + [above_mod_col]
+    )
     agg_cat = (
         df.loc[df['UNIT_CAT'].isin(unit_cat_order)]
         .groupby('UNIT_CAT')[ent_income_cols]
@@ -159,10 +182,9 @@ def _income_tier_units_by_unitcat(df, prefix, above_mod_col, unit_cat_order):
         .reindex(unit_cat_order)
         .fillna(0)
     )
-    for key, dr_suffix, ndr_suffix in _UNITCAT_DR_NDR_KEYS:
-        dr_col = f'{prefix}{dr_suffix}'
-        ndr_col = f'{prefix}{ndr_suffix}'
-        agg_cat[key] = agg_cat[dr_col] + agg_cat[ndr_col]
+    for tier in ('VLOW', 'LOW', 'MOD'):
+        dr_col, ndr_col = income_col_names(stage, tier)
+        agg_cat[tier] = agg_cat[dr_col] + agg_cat[ndr_col]
     agg_cat['ABOVE_MOD'] = agg_cat[above_mod_col]
     return agg_cat[list(INCOME_BY_UNITCAT_STACK_KEYS)]
 
@@ -259,41 +281,35 @@ def _derive_dr_type_flags(df):
 
 
 def _coerce_income_unit_columns(df):
-    all_income_cols = [
-        'BP_VLOW_INCOME_DR', 'BP_VLOW_INCOME_NDR', 'BP_LOW_INCOME_DR', 'BP_LOW_INCOME_NDR',
-        'BP_MOD_INCOME_DR', 'BP_MOD_INCOME_NDR', 'BP_ABOVE_MOD_INCOME',
-        'CO_VLOW_INCOME_DR', 'CO_VLOW_INCOME_NDR', 'CO_LOW_INCOME_DR', 'CO_LOW_INCOME_NDR',
-        'CO_MOD_INCOME_DR', 'CO_MOD_INCOME_NDR', 'CO_ABOVE_MOD_INCOME',
-    ]
-    income_tier_structure = [
-        ('MOD_INCOME_DR', 'Moderate (DR)', COLORS['purple'], '-'),
-        ('MOD_INCOME_NDR', 'Moderate (Non-DR)', COLORS['purple'], '--'),
-        ('LOW_INCOME_DR', 'Low (DR)', COLORS['orange'], '-'),
-        ('LOW_INCOME_NDR', 'Low (Non-DR)', COLORS['orange'], '--'),
-        ('VLOW_INCOME_DR', 'Very Low (DR)', COLORS['blue'], '-'),
-        ('VLOW_INCOME_NDR', 'Very Low (Non-DR)', COLORS['blue'], '--'),
-        ('EXTR_LOW', 'Extremely Low', COLORS['gray'], '-'),
-    ]
-    unitcat_stage_specs = [
-        ('', 'ABOVE_MOD_INCOME', 'entitlement', 'income_by_unitcat_ent.png'),
-        ('BP_', 'BP_ABOVE_MOD_INCOME', 'building permit', 'income_by_unitcat_bp.png'),
-        ('CO_', 'CO_ABOVE_MOD_INCOME', 'certificate of occupancy', 'income_by_unitcat_co.png'),
-    ]
-    income_cols = set(all_income_cols)
-    income_cols.update(
-        'EXTR_LOW_INCOME_UNITS' if suffix == 'EXTR_LOW' else f'{prefix}_{suffix}'
-        for prefix in ['BP', 'CO']
-        for suffix, _, _, _ in income_tier_structure
-    )
-    for prefix, above_mod_col, _, _ in unitcat_stage_specs:
-        income_cols.add(above_mod_col)
-        for tier in ['VLOW_INCOME', 'LOW_INCOME', 'MOD_INCOME']:
-            income_cols.add(f'{prefix}{tier}_DR')
-            income_cols.add(f'{prefix}{tier}_NDR')
+    # Superset of every income/unit column any chart reads: the raw ELI units column plus,
+    # for each development stage, its ABOVE_MOD single column and its VLOW/LOW/MOD DR+NDR pairs.
+    income_cols = {'EXTR_LOW_INCOME_UNITS'}
+    for stage in ('', 'BP', 'CO'):
+        income_cols.add(income_col_names(stage, 'ABOVE_MOD')[0])
+        for tier in ('VLOW', 'LOW', 'MOD'):
+            income_cols.update(income_col_names(stage, tier))
     missing = sorted(col for col in income_cols if col not in df.columns)
     assert not missing, f"Missing income/unit columns: {missing}"
     for col in income_cols:
         df[col] = to_numeric_safe(df[col])
+    return df
+
+
+def _impute_eli_stage_columns(df):
+    """Impute per-development-stage Extremely-Low-Income (ELI) unit columns.
+
+    HCD reports ELI affordable units only as a single stage-less column
+    (EXTR_LOW_INCOME_UNITS); VLOW/LOW/MOD carry BP_/CO_/(ENT) stage columns.
+    A row re-reports the same units at each milestone it reaches (verified:
+    overlapping stages carry identical amounts in >=98% of rows), so a row's
+    ELI units are attributed to a stage iff the row reached that stage's
+    milestone (its NO_* count > 0). This makes ELI uniform with the other
+    tiers so the rest of this module stops special-casing it.
+    """
+    eli = to_numeric_safe(df['EXTR_LOW_INCOME_UNITS'])
+    df['BP_EXTR_LOW_INCOME'] = np.where(to_numeric_safe(df['NO_BUILDING_PERMITS']) > 0, eli, 0)
+    df['CO_EXTR_LOW_INCOME'] = np.where(to_numeric_safe(df['NO_OTHER_FORMS_OF_READINESS']) > 0, eli, 0)
+    df['EXTR_LOW_INCOME']    = np.where(to_numeric_safe(df['NO_ENTITLEMENTS']) > 0, eli, 0)  # ENT (unprefixed)
     return df
 
 
@@ -303,8 +319,8 @@ def _plot_dr_income_tier_groups(df, years, dr_tier_groups, income_tier_structure
         for prefix, title_type, filename in stage_specs:
             next_chart(filename)
             col_specs = [
-                (('EXTR_LOW_INCOME_UNITS' if suffix == 'EXTR_LOW' else f'{prefix}_{suffix}'), label, color, ls)
-                for suffix, label, color, ls in income_tier_structure
+                (income_col_names(prefix, tier, part)[0], label, color, ls)
+                for tier, part, label, color, ls in income_tier_structure
             ]
             agg_data = {col: sub.groupby('YEAR')[col].sum().reindex(years).fillna(0) for col, _, _, _ in col_specs}
             fig, ax = plt.subplots(figsize=(10, 6))
@@ -328,12 +344,13 @@ def _plot_dr_income_tier_groups(df, years, dr_tier_groups, income_tier_structure
 
 def _plot_dr_share_100_restricted(df, years, dr_share_100r_specs, income_line_tiers, stage_y_labels, next_chart):
     restricted_tiers = [tier for tier, _, _ in income_line_tiers if tier != 'EXTR_LOW']
-    for prefix, total_col, above_mod_col, title_type, filename in dr_share_100r_specs:
+    for prefix, total_col, title_type, filename in dr_share_100r_specs:
         next_chart(filename)
-        dr_cols = [f'{prefix}{tier}_DR' for tier in restricted_tiers]
-        ndr_cols = [f'{prefix}{tier}_NDR' for tier in restricted_tiers]
+        dr_cols = [income_col_names(prefix, tier, 'dr')[0] for tier in restricted_tiers]
+        ndr_cols = [income_col_names(prefix, tier, 'ndr')[0] for tier in restricted_tiers]
+        above_mod_col = income_col_names(prefix, 'ABOVE_MOD')[0]
         stage_total = df[total_col]
-        stage_dr_sum = df[dr_cols].sum(axis=1) + df['EXTR_LOW_INCOME_UNITS']
+        stage_dr_sum = df[dr_cols].sum(axis=1) + df[income_col_names(prefix, 'EXTR_LOW')[0]]
         stage_ndr_sum = df[ndr_cols].sum(axis=1)
         qualified_mask = (
             (stage_dr_sum == stage_total)
@@ -346,7 +363,7 @@ def _plot_dr_share_100_restricted(df, years, dr_share_100r_specs, income_line_ti
         denom = qualified.groupby('YEAR')[total_col].sum().reindex(years).fillna(0)
         shares = {}
         for tier_suffix, tier_label, tier_color in income_line_tiers:
-            tier_col = 'EXTR_LOW_INCOME_UNITS' if tier_suffix == 'EXTR_LOW' else f'{prefix}{tier_suffix}_DR'
+            tier_col = income_col_names(prefix, tier_suffix, 'dr')[0]
             tier_sum = qualified.groupby('YEAR')[tier_col].sum().reindex(years).fillna(0)
             tier_share = tier_sum.div(denom.replace(0, np.nan)).mul(100).fillna(0)
             shares[tier_label] = (tier_share, tier_color)
@@ -510,6 +527,7 @@ def main():
     # =============================================================================
 
     df = _coerce_income_unit_columns(df)
+    df = _impute_eli_stage_columns(df)
 
     income_chart_specs = [
         ('BP', 'Building Permits', 'income_permits.png'),
@@ -518,19 +536,18 @@ def main():
 
     # Income tiers (highest to lowest) - excludes Above Moderate (market rate)
     income_tier_defs = [
-        ('MOD_INCOME', 'Moderate', COLORS['purple']),
-        ('LOW_INCOME', 'Low', COLORS['orange']),
-        ('VLOW_INCOME', 'Very Low', COLORS['blue']),
+        ('MOD', 'Moderate', COLORS['purple']),
+        ('LOW', 'Low', COLORS['orange']),
+        ('VLOW', 'Very Low', COLORS['blue']),
     ]
 
     for prefix, title_type, filename in income_chart_specs:
         next_chart(filename)
-    
+
         # Aggregate each income tier by tenure (DR + NDR combined)
         agg_data = {}
         for tier_suffix, tier_label, tier_color in income_tier_defs:
-            dr_col = f'{prefix}_{tier_suffix}_DR'
-            ndr_col = f'{prefix}_{tier_suffix}_NDR'
+            dr_col, ndr_col = income_col_names(prefix, tier_suffix)
             vals_owner = to_numeric_safe(df.loc[df['is_owner'], dr_col]) + to_numeric_safe(df.loc[df['is_owner'], ndr_col])
             vals_rental = to_numeric_safe(df.loc[df['is_rental'], dr_col]) + to_numeric_safe(df.loc[df['is_rental'], ndr_col])
             agg_data[(tier_suffix, 'owner')] = vals_owner.groupby(df.loc[df['is_owner'], 'YEAR']).sum().reindex(years).fillna(0)
@@ -564,19 +581,8 @@ def main():
 
     # =============================================================================
     # DR income-tier charts: all affordable, DB for-sale, DB rental
-    # Format: (suffix, label, color, linestyle) - EXTR_LOW has no prefix
+    # Uses the module-level income_tier_structure (tier, part, label, color, linestyle).
     # =============================================================================
-
-    income_tier_structure = [
-        ('MOD_INCOME_DR', 'Moderate (DR)', COLORS['purple'], '-'),
-        ('MOD_INCOME_NDR', 'Moderate (Non-DR)', COLORS['purple'], '--'),
-        ('LOW_INCOME_DR', 'Low (DR)', COLORS['orange'], '-'),
-        ('LOW_INCOME_NDR', 'Low (Non-DR)', COLORS['orange'], '--'),
-        ('VLOW_INCOME_DR', 'Very Low (DR)', COLORS['blue'], '-'),
-        ('VLOW_INCOME_NDR', 'Very Low (Non-DR)', COLORS['blue'], '--'),
-        ('EXTR_LOW', 'Extremely Low', COLORS['gray'], '-'),
-    ]
-
 
     # (mask_or_None, title_prefix, stage_specs)
     dr_tier_groups = [
@@ -608,26 +614,24 @@ def main():
     ]
 
     # Income tier structure for these charts (highest to lowest, combined DR+NDR)
-    # EXTR_LOW_INCOME_UNITS is a single column (no BP/CO or DR/NDR variants)
+    # EXTR_LOW is a single imputed per-stage column (no DR/NDR variants) via income_col_names
     income_tier_combined = [
-        ('MOD_INCOME', 'Moderate Income', COLORS['purple']),
-        ('LOW_INCOME', 'Low Income', COLORS['orange']),
-        ('VLOW_INCOME', 'Very Low Income', COLORS['blue']),
+        ('MOD', 'Moderate Income', COLORS['purple']),
+        ('LOW', 'Low Income', COLORS['orange']),
+        ('VLOW', 'Very Low Income', COLORS['blue']),
         ('EXTR_LOW', 'Extremely Low Income', COLORS['gray']),
     ]
 
     for dr_filter, dr_label, prefix, title_type, filename in dr_income_chart_specs:
         next_chart(filename)
-    
+
         # Filter to rows matching the DR type
         mask = df[dr_filter]
-    
+
         # Build column specs and aggregate (combine DR + NDR for each tier)
         agg_data = {}
         for tier_suffix, tier_label, tier_color in income_tier_combined:
-            cols, is_single = get_income_cols(prefix, tier_suffix)
-            vals = to_numeric_safe(df.loc[mask, cols]) if is_single else (
-                to_numeric_safe(df.loc[mask, cols[0]]) + to_numeric_safe(df.loc[mask, cols[1]]))
+            vals = sum(to_numeric_safe(df.loc[mask, c]) for c in income_col_names(prefix, tier_suffix))
             agg_data[tier_label] = vals.groupby(df.loc[mask, 'YEAR']).sum().reindex(years).fillna(0)
     
         # Create chart
@@ -665,16 +669,11 @@ def main():
         '2 to 4': '2-4 Units',
         '5+': '5+ Units',
     }
-    unitcat_stage_specs = [
-        ('', 'ABOVE_MOD_INCOME', 'entitlement', 'income_by_unitcat_ent.png'),
-        ('BP_', 'BP_ABOVE_MOD_INCOME', 'building permit', 'income_by_unitcat_bp.png'),
-        ('CO_', 'CO_ABOVE_MOD_INCOME', 'certificate of occupancy', 'income_by_unitcat_co.png'),
-    ]
-
+    # unitcat_stage_specs is the module-level (stage, display_name, filename) definition.
     _income_unitcat_year_span = f'{int(min(years))}-{int(max(years))}'
-    for prefix, above_mod_col, stage_display_name, filename in unitcat_stage_specs:
+    for stage, stage_display_name, filename in unitcat_stage_specs:
         next_chart(filename)
-        agg_units = _income_tier_units_by_unitcat(df, prefix, above_mod_col, UNIT_CAT_ORDER)
+        agg_units = _income_tier_units_by_unitcat(df, stage, UNIT_CAT_ORDER)
         fig, ax = plt.subplots(figsize=_INCOME_UNITCAT_FIGSIZE_INCHES)
         _plot_income_units_vertical_stacked_bars(
             ax, agg_units, UNIT_CAT_ORDER, UNIT_CAT_LABELS, stage_display_name, _income_unitcat_year_span,
@@ -689,20 +688,20 @@ def main():
     # Deed-restricted vs non-DR units by income tier (entitlement, building permits, completions)
     # =============================================================================
     tiers = [
-        ('VLOW_INCOME', 'Very Low Income', COLORS['blue']),
-        ('LOW_INCOME', 'Low Income', COLORS['orange']),
-        ('MOD_INCOME', 'Moderate Income', COLORS['purple']),
+        ('VLOW', 'Very Low Income', COLORS['blue']),
+        ('LOW', 'Low Income', COLORS['orange']),
+        ('MOD', 'Moderate Income', COLORS['purple']),
     ]
     tier_labels = [label for _, label, _ in tiers]
     dr_ndr_specs = [
         ('', 'entitlement', 'dr_vs_ndr_ent.png'),
-        ('BP_', 'building permits', 'dr_vs_ndr_bp.png'),
-        ('CO_', 'completions', 'dr_vs_ndr_cos.png'),
+        ('BP', 'building permits', 'dr_vs_ndr_bp.png'),
+        ('CO', 'completions', 'dr_vs_ndr_cos.png'),
     ]
     for prefix, stage_name, filename in dr_ndr_specs:
         next_chart(filename)
-        dr_vals = [df[f'{prefix}{t}_DR'].sum() for t, _, _ in tiers]
-        ndr_vals = [df[f'{prefix}{t}_NDR'].sum() for t, _, _ in tiers]
+        dr_vals = [df[income_col_names(prefix, t, 'dr')[0]].sum() for t, _, _ in tiers]
+        ndr_vals = [df[income_col_names(prefix, t, 'ndr')[0]].sum() for t, _, _ in tiers]
         x = np.arange(len(tier_labels))
         fig, ax = plt.subplots(figsize=(7, 5))
         ax.bar(x - 0.175, dr_vals, 0.35, label='Deed-restricted (DR)', color=COLORS['blue'])
@@ -736,9 +735,9 @@ def main():
 
     # Income tiers (highest to lowest for legend order)
     income_line_tiers = [
-        ('MOD_INCOME', 'Moderate', COLORS['purple']),
-        ('LOW_INCOME', 'Low', COLORS['orange']),
-        ('VLOW_INCOME', 'Very Low', COLORS['blue']),
+        ('MOD', 'Moderate', COLORS['purple']),
+        ('LOW', 'Low', COLORS['orange']),
+        ('VLOW', 'Very Low', COLORS['blue']),
         ('EXTR_LOW', 'Extremely Low', COLORS['gray']),
     ]
 
@@ -746,16 +745,14 @@ def main():
         for prefix, title_type, file_suffix in line_type_specs:
             filename = f'{base_filename}{file_suffix}.png'
             next_chart(filename)
-        
+
             # Combined mask: DR type AND tenure
             mask = df[dr_filter] & df[tenure_filter]
-        
+
             # Aggregate each income tier
             agg_tiers = {}
             for tier_suffix, tier_label, tier_color in income_line_tiers:
-                cols, is_single = get_income_cols(prefix, tier_suffix)
-                vals = to_numeric_safe(df.loc[mask, cols]) if is_single else (
-                    to_numeric_safe(df.loc[mask, cols[0]]) + to_numeric_safe(df.loc[mask, cols[1]]))
+                vals = sum(to_numeric_safe(df.loc[mask, c]) for c in income_col_names(prefix, tier_suffix))
                 agg_tiers[tier_suffix] = vals.groupby(df.loc[mask, 'YEAR']).sum().reindex(years).fillna(0)
         
             fig, ax = plt.subplots(figsize=(8, 5))
@@ -781,18 +778,51 @@ def main():
     # DR share by income tier in 100%-restricted projects (ENT/BP/CO)
     # =============================================================================
     dr_share_100r_specs = [
-        ('', 'NO_ENTITLEMENTS', 'ABOVE_MOD_INCOME', 'Entitlements', 'dr_share_100_restricted_ent.png'),
-        ('BP_', 'NO_BUILDING_PERMITS', 'BP_ABOVE_MOD_INCOME', 'Building Permits', 'dr_share_100_restricted_bp.png'),
-        ('CO_', 'NO_OTHER_FORMS_OF_READINESS', 'CO_ABOVE_MOD_INCOME', 'Completions', 'dr_share_100_restricted_co.png'),
+        ('', 'NO_ENTITLEMENTS', 'Entitlements', 'dr_share_100_restricted_ent.png'),
+        ('BP', 'NO_BUILDING_PERMITS', 'Building Permits', 'dr_share_100_restricted_bp.png'),
+        ('CO', 'NO_OTHER_FORMS_OF_READINESS', 'Completions', 'dr_share_100_restricted_co.png'),
     ]
     stage_y_labels = {
         'Entitlements': 'entitled',
         'Building Permits': 'permitted',
         'Completions': 'occupied',
     }
-    restricted_tiers = [tier for tier, _, _ in income_line_tiers if tier != 'EXTR_LOW']
 
     _plot_dr_share_100_restricted(df, years, dr_share_100r_specs, income_line_tiers, stage_y_labels, next_chart)
+
+    # =============================================================================
+    # Charts: db_inc_eli_cos.png, db_inc_vli_cos.png, db_inc_li_cos.png, db_inc_mi_cos.png
+    # DB vs Non-Bonus Inclusionary, CO only, by income tier, all tenures (filled area)
+    # =============================================================================
+    tier_db_inc_specs = [
+        ('EXTR_LOW', 'Extremely Low Income', 'db_inc_eli_cos.png'),
+        ('VLOW',     'Very Low Income',      'db_inc_vli_cos.png'),
+        ('LOW',      'Low Income',           'db_inc_li_cos.png'),
+        ('MOD',      'Moderate Income',      'db_inc_mi_cos.png'),
+    ]
+    for tier_suffix, tier_label, filename in tier_db_inc_specs:
+        next_chart(filename)
+        cols = income_col_names('CO', tier_suffix)
+        def tier_series(mask):
+            vals = sum(to_numeric_safe(df.loc[mask, c]) for c in cols)
+            return vals.groupby(df.loc[mask, 'YEAR']).sum().reindex(years).fillna(0)
+        db  = tier_series(df['has_db'])
+        inc = tier_series(df['has_inc_only'])
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.fill_between(years, 0, db, alpha=0.7, color=COLORS['blue'],
+                        label=legend_label_with_annual_avg('Density Bonus', db))
+        ax.fill_between(years, db, db + inc, alpha=0.7, color=COLORS['orange'],
+                        label=legend_label_with_annual_avg('Non-Bonus Inclusionary', inc))
+        ax.plot(years, db, color=COLORS['blue'], linewidth=1.5)
+        ax.plot(years, db + inc, color=COLORS['orange'], linewidth=1.5)
+        ax.set_title(f'{tier_label} Certificates of Occupancy\nDensity Bonus vs Non-Bonus Inclusionary')
+        ax.set_xlabel('Year')
+        style_unit_count_yaxis(ax, ylabel="Dwelling Units")
+        ax.set_xticks(years)
+        ax.legend(loc='upper left')
+        ax.set_xlim(min(years), max(years))
+        ax.set_ylim(bottom=0)
+        save_chart(fig, filename)
 
     print(f"\nAll {chart_counter[0]} charts generated successfully.")
 
