@@ -1,12 +1,12 @@
-# tablea2_parsefilter_repair.py
+# data-cleanup/tablea2_parsefilter_repair.py
 pandas>=2.0
 numpy>=1.24
 openpyxl>=3.1
 
-# TableA2-charts/basic_apr_charts.py
+# scripts/basic_apr_charts.py
 matplotlib>=3.7
 
-# Not imported by anything at this scope (root / TableA2-charts). Retained
+# Not imported by anything at this scope (data-cleanup / scripts). Retained
 # only for parity with TableA2-models/requirements.txt, which lists it for
 # an actual caller (acs_apr_models.py, pages/db_maps.py). Safe to drop here
 # if this file is ever scoped strictly to the root pipeline.

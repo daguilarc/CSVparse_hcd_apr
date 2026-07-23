@@ -4,14 +4,14 @@ California HCD Annual Progress Report (APR) parsing, publication models, and the
 
 ## Where to start
 
-The data-cleaning entry point is **`tablea2_parsefilter_repair.py`, at the repo root**. It parses and repairs the raw APR CSV export together with the nine `*.xlsm` source workbooks (`Bell2019.xlsm`, `Bell2023.xlsm`, `Campbell2024.xlsm`, `Ceres2020.xlsm`, `Colfax2021.xlsm`, `Hesperia2022.xlsm`, `Hesperia2023.xlsm`, `Hesperia2024.xlsm`, `Irvine2022.xlsm`), also at the repo root. Everything downstream — charts, models, the Pages catalog — consumes its cleaned output.
+The data-cleaning entry point is **`data-cleanup/tablea2_parsefilter_repair.py`**. It parses and repairs the raw APR CSV export (`tablea2.csv`, at the repo root) together with the nine `*.xlsm` source workbooks (`Bell2019.xlsm`, `Bell2023.xlsm`, `Campbell2024.xlsm`, `Ceres2020.xlsm`, `Colfax2021.xlsm`, `Hesperia2022.xlsm`, `Hesperia2023.xlsm`, `Hesperia2024.xlsm`, `Irvine2022.xlsm`), which live beside it in `data-cleanup/`. Its cleaned output is written to the repo root. Everything downstream — charts, models, the Pages catalog — consumes its cleaned output.
 
 ## Entry points
 
 | Pipeline | Command |
 |----------|---------|
-| **Data cleaning (repo root)** | `python tablea2_parsefilter_repair.py` |
-| **Charts from cleaned data** | `python TableA2-charts/basic_apr_charts.py` |
+| **Data cleaning** | `python data-cleanup/tablea2_parsefilter_repair.py` |
+| **Charts from cleaned data** | `python scripts/basic_apr_charts.py` |
 | **Pages catalog (full ENT-only Cartesian)** | `python scripts/export_pages_catalog.py --release-id 2018-2024 --staging-dir <path>` |
 | **Bootstrap Pages caches (CI)** | `python scripts/bootstrap_pages_data.py` |
 | **Verify release** | `python scripts/verify_pages_catalog.py <staging-path>` |
@@ -25,10 +25,10 @@ Full build → verify → promote to `docs/data/releases/2018-2024/` → Playwri
 
 ## Layout
 
-- **`tablea2_parsefilter_repair.py`** — the data-cleaning entry point described above; reads the nine `*.xlsm` workbooks at the repo root.
-- **`TableA2-charts/`** — `basic_apr_charts.py`, matplotlib charts generated from the cleaned APR data.
+- **`data-cleanup/`** — `tablea2_parsefilter_repair.py`, the data-cleaning entry point described above, plus the nine `*.xlsm` source workbooks it reads.
+- **`charts/`** — matplotlib PNGs written by `scripts/basic_apr_charts.py` (git-ignored build output).
 - **`TableA2-models/`** — `acs_apr_models.py` (shared modeling library), `panel_context.py` (shared prep steps), and `pages/` (the explorer catalog pipeline).
-- **`scripts/`** — release build/verify/bootstrap glue; see the Entry points table above.
+- **`scripts/`** — `basic_apr_charts.py` plus the release build/verify/bootstrap glue; see the Entry points table above.
 - **`docs/`** — the published static site (`docs/index.html`) plus `docs/data/releases/<id>/`, the immutable release archives.
 - **`e2e/`** — Playwright browser tests for the published explorer (CI-wired).
 - **`notebooks/`** — `apr_explorer.ipynb`, a notebook consumer of an archived release; see `docs/PAGES_SETUP.md`.
@@ -36,7 +36,7 @@ Full build → verify → promote to `docs/data/releases/2018-2024/` → Playwri
 
 ## Dependencies
 
-External Python packages required for the root pipeline (`tablea2_parsefilter_repair.py`, `TableA2-charts/basic_apr_charts.py`) are listed in `requirements.txt`: **pandas**, **numpy**, **openpyxl** (workbook parsing), and **matplotlib** (charts). Install with:
+External Python packages required for the cleaning + charts pipeline (`data-cleanup/tablea2_parsefilter_repair.py`, `scripts/basic_apr_charts.py`) are listed in `requirements.txt`: **pandas**, **numpy**, **openpyxl** (workbook parsing), and **matplotlib** (charts). Install with:
 
 ```bash
 pip install -r requirements.txt

@@ -14,8 +14,9 @@ Two grains (do not conflate)
   `truncated_identities_detected`. Upsert ambiguity and resolution apply only here.
 
 Inputs
-- APR export: `tablea2.csv` beside this script (repo layout: shared `tablea2.csv` in `CSVparse_hcd_apr/`).
-- Workbooks: `{Juris}{YEAR}.xlsm` beside this script, e.g. Campbell + 2024 ->
+- APR export: `tablea2.csv` at the repo root (one level above this script). Cleaned output
+  and all diagnostic CSVs are written there too, where downstream consumers read them.
+- Workbooks: `{Juris}{YEAR}.xlsm` beside this script in `data-cleanup/`, e.g. Campbell + 2024 ->
   `Campbell2024.xlsm`. Non-alphanumeric characters are stripped from `JURIS_NAME` for the
   stem. Lock files `~$*.xlsm` are ignored by convention (they are not used).
 - Current workbook files available for upsert lookup (present in this directory; only a subset may be used per run):
@@ -97,7 +98,7 @@ Diagnostics snapshot (2026-04-16 run; `tablea2.csv` in `CSVparse_hcd_apr/`)
 - Step 8 (final artifacts): wrote `tablea2_cleaned_parsefilter_repair.csv`,
   `ambiguous_truncated_repair.csv=6`.
 
-Output files (all beside this script unless paths are edited below)
+Output files (all written to the repo root unless paths are overridden via `run_repair`)
 - Primary: `tablea2_cleaned_parsefilter_repair.csv`
 - Truncated classification: `matched_truncated_repair.csv`, `unmatched_truncated_repair.csv`
 - Upsert ambiguity audit: `ambiguous_truncated_repair.csv`
@@ -118,9 +119,12 @@ import pandas as pd
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 _THIS_DIR = Path(__file__).resolve().parent
+# This script and the .xlsm workbooks live in data-cleanup/; the CSV data it reads and
+# writes lives at the repo root, where every downstream consumer expects it.
+_REPO_ROOT = _THIS_DIR.parent
 
-_input_dir = _THIS_DIR
-_output_dir = _THIS_DIR
+_input_dir = _REPO_ROOT
+_output_dir = _REPO_ROOT
 apr_path = _input_dir / "tablea2.csv"
 cleaned_path = _output_dir / "tablea2_cleaned_parsefilter_repair.csv"
 date_year_mismatch_path = _output_dir / "date_year_mismatch_rows_parsefilter_repair.csv"
@@ -442,7 +446,7 @@ def _resolve_workbook_path(row):
     juris = _to_workbook_stem(row.get("JURIS_NAME", ""))
     if not year or not juris:
         return None
-    candidate = _input_dir / f"{juris}{year}.xlsm"
+    candidate = _THIS_DIR / f"{juris}{year}.xlsm"
     return candidate if candidate.exists() else None
 
 
@@ -516,6 +520,16 @@ def map_a2_row_to_apr_record(a2_row, identity_row):
         "DENSITY_BONUS_RECEIVE_REDUCTION": a2_row.get("A2_25_DB", ""),
         "NOTES": a2_row.get("A2_21_Notes", ""),
     }
+    # Income-tier unit counts, per development stage. HCD codes the stage as the field
+    # number (A2_4 entitlement, A2_7 building permit, A2_10 certificate of occupancy) and
+    # the deed restriction as a Deed/None suffix. Unlike the identity fields above these
+    # ARE patterned, so they are generated rather than tabulated. Omitting them left every
+    # XLSM-upserted row with unit totals but no affordability breakdown.
+    for a2_stage, prefix in (("A2_4", ""), ("A2_7", "BP_"), ("A2_10", "CO_")):
+        for a2_tier, tier in (("vLow", "VLOW"), ("Low", "LOW"), ("Mod", "MOD")):
+            mapped[f"{prefix}{tier}_INCOME_DR"] = a2_row.get(f"{a2_stage}_{a2_tier}Deed", "")
+            mapped[f"{prefix}{tier}_INCOME_NDR"] = a2_row.get(f"{a2_stage}_{a2_tier}None", "")
+        mapped[f"{prefix}ABOVE_MOD_INCOME"] = a2_row.get(f"{a2_stage}_Above", "")
     mapped["JURIS_NAME"] = identity_row.get("JURIS_NAME", "")
     mapped["CNTY_NAME"] = identity_row.get("CNTY_NAME", "")
     mapped["YEAR"] = identity_row.get("YEAR", "")
@@ -1042,5 +1056,5 @@ def run_repair(base_dir: Path, output_dir: Path | None = None) -> None:
 
 
 if __name__ == "__main__":
-    run_repair(_THIS_DIR, _THIS_DIR)
+    run_repair(_REPO_ROOT, _REPO_ROOT)
 

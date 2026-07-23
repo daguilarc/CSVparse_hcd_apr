@@ -73,7 +73,7 @@ jobs:
           test -n "$HCD_INPUT_SHA256"
           curl -fL -A "Mozilla/5.0 (APR Explorer release)" -o tablea2.csv "$TABLEA2_URL"
           echo "$HCD_INPUT_SHA256  tablea2.csv" | sha256sum --check --strict
-          python tablea2_parsefilter_repair.py
+          python data-cleanup/tablea2_parsefilter_repair.py
 
       - name: Restore committed Census caches and boundaries
         env:

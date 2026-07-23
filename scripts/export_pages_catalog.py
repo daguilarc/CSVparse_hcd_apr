@@ -38,7 +38,7 @@ ARTIFACT_FILES = (
 )
 CODE_FILES = (
     ".github/workflows/build-pages.yml", "TableA2-models/acs_apr_models.py",
-    "tablea2_parsefilter_repair.py",
+    "data-cleanup/tablea2_parsefilter_repair.py",
     "TableA2-models/pages/__init__.py", "TableA2-models/pages/catalog_builder.py",
     "TableA2-models/pages/export.py", "TableA2-models/pages/pipeline_context.py",
     "TableA2-models/pages/pair_registry.py", "TableA2-models/pages/chart_prep.py",
