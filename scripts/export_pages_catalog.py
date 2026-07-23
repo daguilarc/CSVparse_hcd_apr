@@ -372,14 +372,14 @@ def _fixture_release(stage: Path) -> None:
         json.loads((REPO_ROOT / "docs" / "chart_labels.json").read_text(encoding="utf-8"))
     )
     catalog = {
-        "city:DB_CO_total:zori_pct_change:none": _fixture_pair(
-            "city", "DB_CO_total", "zori_pct_change", hierarchical=True, labels=["Albany", "Berkeley", "Culver City"]
+        "city:DB_CO_total:zori_pct_afford:none": _fixture_pair(
+            "city", "DB_CO_total", "zori_pct_afford", hierarchical=True, labels=["Albany", "Berkeley", "Culver City"]
         ),
-        "city:TOTAL_CO_total:zhvi_sfrcondo_pct_change:none": _fixture_pair(
-            "city", "TOTAL_CO_total", "zhvi_sfrcondo_pct_change", hierarchical=False, labels=["Fresno", "Irvine", "Oakland"]
+        "city:TOTAL_CO_total:pct_afford_sfrcondo:none": _fixture_pair(
+            "city", "TOTAL_CO_total", "pct_afford_sfrcondo", hierarchical=False, labels=["Fresno", "Irvine", "Oakland"]
         ),
-        "city:DB_CO_total:zhvi_sfrcondo_pct_change:none": _fixture_pair(
-            "city", "DB_CO_total", "zhvi_sfrcondo_pct_change", hierarchical=True, labels=["Pasadena", "Redwood City", "Sacramento"]
+        "city:DB_CO_total:pct_afford_sfrcondo:none": _fixture_pair(
+            "city", "DB_CO_total", "pct_afford_sfrcondo", hierarchical=True, labels=["Pasadena", "Redwood City", "Sacramento"]
         ),
         "zip:net_MF_CO:median_income:none": _fixture_pair(
             "zip", "net_MF_CO", "median_income", hierarchical=False, labels=["90001", "90002", "94102"]

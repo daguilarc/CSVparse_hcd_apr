@@ -56,12 +56,14 @@ ZHVI_TIERS = (
         "label": "Condo",
         "pca_index_name": "Zillow Home Value Index (Condos/Co-ops)",
         "file_stem": "zhvi_uc_condo_tier_0.33_0.67_sm_sa_month",
+        "burden_label": "Condos",
     },
     {
         "key": "sfrcondo",
         "label": "All Homes (SFR+Condo)",
         "pca_index_name": "Zillow Home Value Index (All Homes (SFR+Condo))",
         "file_stem": "zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month",
+        "burden_label": "All for-sale homes",
     },
 )
 
@@ -80,12 +82,8 @@ def _zhvi_afford_label(tier_label):
     )
 
 
-def _zhvi_pct_afford_label(tier_label, pca_index_name=None):
-    index_name = pca_index_name or f"Zillow Home Value Index ({tier_label})"
-    return (
-        f"Δ{index_name} / MSA median household income (%)\n"
-        "Real 2024 dollars"
-    )
+def _zhvi_pct_afford_label(burden_label):
+    return f"Change in average cost burden ({burden_label}), 2024 dollars"
 
 
 def _zhvi_tier_pct_col(key):
@@ -143,10 +141,7 @@ ZORI_PCT_LABEL = "Zillow Observed Rent Index (ZORI) % change (Jan 2018 – Dec 2
 ZORI_MONTHS_PER_YEAR = 12
 ZORI_AFFORD_X_LABEL = f"(Dec. 2024 ZORI / MSA median household income ({ACS_5YR_MHI_DENOM_LABEL}))%"
 ZORI_AFFORD_X_LABEL_ZIP = ZORI_AFFORD_X_LABEL
-ZORI_PCT_AFFORD_X_LABEL = (
-    "ΔZORI (Zillow Observed Rent Index) / MSA median household income (%)\n"
-    "Real 2024 dollars"
-)
+ZORI_PCT_AFFORD_X_LABEL = "Change in average rent burden, 2024 dollars"
 ZORI_PCT_AFFORD_X_LABEL_ZIP = ZORI_PCT_AFFORD_X_LABEL
 # Legacy hardcoded SF ZCTAs (superseded at runtime: _xsf ZIP charts use all ZCTAs with CNTY_CLEAN == SAN FRANCISCO from APR).
 ZIP_XSF_EXCLUDE = {'94102', '94103', '94105'}
@@ -202,9 +197,8 @@ ECON_META = {
 
 for _zhvi_tier in ZHVI_TIERS:
     _zhvi_key = _zhvi_tier["key"]
-    _zhvi_lbl = _zhvi_tier["label"]
     ECON_META[_zhvi_tier_pct_afford_col(_zhvi_key)] = {
-        "display_label": _zhvi_pct_afford_label(_zhvi_lbl, _zhvi_tier["pca_index_name"]),
+        "display_label": _zhvi_pct_afford_label(_zhvi_tier["burden_label"]),
         "print_title": f"{_zhvi_tier['pca_index_name']} / MSA income",
         "file_tag": f"pct_afford_{_zhvi_key}",
         "tick_kind": "percent",

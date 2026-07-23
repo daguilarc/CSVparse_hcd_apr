@@ -44,40 +44,22 @@
   ],
   "predictorApplicability": {
     "city": [
-      "zori_pct_change",
-      "zori_afford_ratio",
       "zori_pct_afford",
-      "zhvi_condo_pct_change",
-      "zhvi_sfrcondo_pct_change",
-      "zhvi_condo_afford_ratio",
-      "zhvi_sfrcondo_afford_ratio",
       "pct_afford_condo",
       "pct_afford_sfrcondo"
     ],
     "zip": [
       "median_income",
-      "zori_pct_change",
-      "zori_afford_ratio",
       "zori_pct_afford",
-      "zhvi_condo_pct_change",
-      "zhvi_sfrcondo_pct_change",
-      "zhvi_condo_afford_ratio",
-      "zhvi_sfrcondo_afford_ratio",
       "pct_afford_condo",
       "pct_afford_sfrcondo"
     ]
   },
   "predictors": {
-    "zori_pct_change": "Zillow Observed Rent Index (ZORI) % change",
-    "zori_afford_ratio": "December 2024 ZORI / MSA median household income",
-    "zori_pct_afford": "Change in ZORI / MSA median household income",
+    "zori_pct_afford": "Change in average rent burden, 2024 dollars",
     "median_income": "ZIP median household income, log scale",
-    "zhvi_condo_pct_change": "Zillow Condo/Co-op Home Value Index % change",
-    "zhvi_sfrcondo_pct_change": "Zillow All Homes Home Value Index % change",
-    "zhvi_condo_afford_ratio": "December 2024 Condo/Co-op ZHVI / MSA median household income",
-    "zhvi_sfrcondo_afford_ratio": "December 2024 All Homes ZHVI / MSA median household income",
-    "pct_afford_condo": "Change in Condo/Co-op ZHVI / MSA median household income",
-    "pct_afford_sfrcondo": "Change in All Homes ZHVI / MSA median household income"
+    "pct_afford_condo": "Change in average cost burden (Condos), 2024 dollars",
+    "pct_afford_sfrcondo": "Change in average cost burden (All for-sale homes), 2024 dollars"
   },
   "outcomes": {
     "TOTAL_CO_total": "Net housing certificates of occupancy",
